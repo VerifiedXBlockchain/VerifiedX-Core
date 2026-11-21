@@ -982,7 +982,7 @@ namespace VerifiedXCore.Nodes
                                             if (!string.IsNullOrEmpty(answer))
                                             {
                                                 var networkVal = JsonConvert.DeserializeObject<NetworkValidator>(answer);
-                                                if(networkVal != null)
+                                                if(networkVal != null && InputValidationHelper.IsPeerIPAddress(networkVal.IPAddress))
                                                 {
                                                     _currentRound.NetworkValidators[caster.PeerIP] =  networkVal;
                                                 }

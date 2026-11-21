@@ -118,6 +118,17 @@ namespace VerifiedXCore.Models
                     return false;
                 }
 
+                // An entry is dialed at its IP: an address it carries is an IP address, kept in dotted form.
+                if (!string.IsNullOrEmpty(validator.IPAddress))
+                {
+                    if (!InputValidationHelper.TryGetPeerIP(validator.IPAddress, out var validatorIp))
+                    {
+                        ErrorLogUtility.LogError($"Validator advertisement for {validator.Address} from peer {advertisingPeerIP} refused: its address is not an IP address", "NetworkValidator.AddValidatorToPool");
+                        return false;
+                    }
+                    validator.IPAddress = validatorIp;
+                }
+
                 // VX-07 (follow-up): a direct Status moves the entry to the caller's IP, so it must be addressed to THIS
                 // node. A fresh signature addressed to another caster (obtainable from that caster's registry gossip)
                 // is refused here instead of re-pointing the entry at the replayer.
@@ -636,8 +647,7 @@ namespace VerifiedXCore.Models
         /// </summary>
         public static async Task<bool> CheckValidatorLiveness(string ipAddress)
         {
-            var ip = ipAddress?.Replace("::ffff:", "");
-            if (string.IsNullOrEmpty(ip))
+            if (!InputValidationHelper.TryGetPeerIP(ipAddress, out var ip))
                 return false;
 
             try

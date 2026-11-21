@@ -184,6 +184,7 @@ namespace VerifiedXCore.Services
             {
                 try
                 {
+                    if (!InputValidationHelper.IsPeerIPAddress(n.Ip)) return new Reply { Ip = n.Ip };
                     using var client = Globals.HttpClientFactory.CreateClient();
                     using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(timeoutSeconds));
                     var uri = $"http://{n.Ip}:{Globals.ValAPIPort}/valapi/validator/Health";
