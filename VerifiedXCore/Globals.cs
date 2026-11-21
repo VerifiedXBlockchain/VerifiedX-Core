@@ -682,6 +682,17 @@ namespace VerifiedXCore
         public const long BridgeVoteOncePerCasterTestnetHeight = long.MaxValue;
 
         /// <summary>
+        /// From this height a bridge exit to Bitcoin (VBTC_V2_BRIDGE_EXIT_TO_BTC) that carries allocations is refused in
+        /// a block unless it also carries TotalAmount and TotalAmountSats, as it already is at admission: the exit's record
+        /// and its locks' draws are written from those two alone, so an exit that is accepted is one that is recorded. The
+        /// exits casters build carry both. A tightening rule: a node without it accepts every block a node with it does.
+        /// Unset (long.MaxValue) on both networks until the release that activates it.
+        /// </summary>
+        public static long BridgeExitCarriesTotalsHeight = long.MaxValue;
+        /// <summary>The same height on testnet (GlobalsNetworkHeights).</summary>
+        public const long BridgeExitCarriesTotalsTestnetHeight = long.MaxValue;
+
+        /// <summary>
         /// Item 6: a vBTC withdrawal REQUEST may not reuse a (requester, UniqueId, contract) key under which a request was
         /// already mined. The holder chooses UniqueId, nothing in consensus read it, and the row store's save matched on
         /// that key and kept the old row's Amount and destination: a dust request with an old UniqueId reopened a
