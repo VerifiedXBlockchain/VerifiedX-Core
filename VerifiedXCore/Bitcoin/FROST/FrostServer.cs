@@ -64,8 +64,9 @@ namespace VerifiedXCore.Bitcoin.FROST
             // Every route reads its body before it can tell who sent it: with Kestrel's defaults (30 MB a
             // body, no connection limit) a few hundred trickled bodies held gigabytes of a validator's
             // memory (fifth review, round 17). The largest honest body, a Round 2 commitment set at the
-            // 200-participant cap, is about 2 MB (6.4 MB at the commitment size limit).
-            options.Limits.MaxRequestBodySize = 8 * 1024 * 1024;
+            // 200-participant cap, is about 2 MB (6.4 MB at the commitment size limit). This is the limit for
+            // any body; what one route takes, and how much is held at once, is FrostRequestBodyLimits' decision.
+            options.Limits.MaxRequestBodySize = FrostRequestBodyLimits.LargestBodyBytes;
             // A connection is kept while it is serving a request (FrostConnectionLimits), so a request has to arrive at
             // a real pace to count as one: the largest honest body takes under seven minutes at this rate, and
             // validators send it in seconds.
@@ -74,8 +75,20 @@ namespace VerifiedXCore.Bitcoin.FROST
             // Who may hold how many connections is FrostConnectionLimits' decision, over both listeners together.
             // Kestrel's own ceiling is set above those limits, so it never decides before them.
             options.Limits.MaxConcurrentConnections = FrostConnectionLimits.ServerTotal;
-            options.ListenAnyIP(port + 1, listenOption => { listenOption.Use(connectionLimits.Guard); listenOption.UseHttps(GetSelfSignedCertificate()); });
-            options.ListenAnyIP(port, listenOption => listenOption.Use(connectionLimits.Guard));
+            // HTTP/1.1 only, on both listeners: a connection then carries one request at a time, so the limits on
+            // connections are also limits on requests and on the bodies being read. Validators reach each other
+            // over HTTP/1.1.
+            options.ListenAnyIP(port + 1, listenOption =>
+            {
+                listenOption.Protocols = Microsoft.AspNetCore.Server.Kestrel.Core.HttpProtocols.Http1;
+                listenOption.Use(connectionLimits.Guard);
+                listenOption.UseHttps(GetSelfSignedCertificate());
+            });
+            options.ListenAnyIP(port, listenOption =>
+            {
+                listenOption.Protocols = Microsoft.AspNetCore.Server.Kestrel.Core.HttpProtocols.Http1;
+                listenOption.Use(connectionLimits.Guard);
+            });
         }
 
         /// <summary>

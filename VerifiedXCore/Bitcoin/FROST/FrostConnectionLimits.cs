@@ -55,6 +55,9 @@ namespace VerifiedXCore.Bitcoin.FROST
         /// <summary>The limits the running FROST server enforces.</summary>
         public static readonly FrostConnectionLimits Server = new(FundedValidatorAddresses);
 
+        /// <summary>The request bodies counted for the callers these limits place.</summary>
+        internal readonly FrostRequestBodyLimits Bodies = new();
+
         internal sealed class Budget
         {
             public readonly int Total;
@@ -278,6 +281,7 @@ namespace VerifiedXCore.Bitcoin.FROST
             private readonly ConnectionContext? _connection;
             internal readonly string Source;
             internal readonly Budget? Budget;
+            internal FrostRequestBodyLimits Bodies => _limits.Bodies;
             internal int Requests;
             internal long IdleSince;
             internal bool Released;

@@ -40,6 +40,7 @@ namespace VerifiedXCore.Bitcoin.FROST
         public void Configure(IApplicationBuilder app)
         {
             app.Use(FrostConnectionLimits.TrackRequest);
+            app.Use(FrostRequestBodyLimits.Bound);
             app.UseRouting();
             app.UseEndpoints(endpoints =>
             {

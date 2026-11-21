@@ -748,7 +748,7 @@ namespace VerifiedXCore.Tests
             var sessionId = Guid.NewGuid().ToString();
             var body = JsonConvert.SerializeObject(new FrostDKGStartRequest
             {
-                SessionId = sessionId, SmartContractUID = new string('a', 1_000_000), LeaderAddress = "xLeader", LeaderSignature = "sig", Timestamp = _now,
+                SessionId = sessionId, SmartContractUID = new string('a', 10_000), LeaderAddress = "xLeader", LeaderSignature = "sig", Timestamp = _now,
                 ParticipantAddresses = new List<string> { "xV1", "xV2" }, RequiredThreshold = 67,
             });
             var response = await client.PostAsync("/frost/dkg/start", new StringContent(body, Encoding.UTF8, "application/json"));
