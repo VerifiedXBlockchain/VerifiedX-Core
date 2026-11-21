@@ -35,6 +35,7 @@ namespace VerifiedXCore.Tests
 
             var result = FrostFFICheckUtility.RunFullCheck();
             Assert.True(result.VersionCheckPassed);
+            Assert.True(result.SignAggregateIdentifyPassed, result.Summary);
             Assert.True(result.AllChecksPassed, result.Summary);
             Assert.Equal(FrostFFICheckUtility.PinnedLibraryVersion, result.LibraryVersion);
         }
