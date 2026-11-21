@@ -32,6 +32,8 @@ namespace VerifiedXCore.Utilities
             public bool SignRound1Passed { get; set; }
             public bool SignRound2Passed { get; set; }
             public bool SignAggregatePassed { get; set; }
+            /// <summary>The coordinator's aggregation (<see cref="FrostNative.SignAggregateIdentify"/>): signs valid shares, and names the holder of a share that does not verify.</summary>
+            public bool SignAggregateIdentifyPassed { get; set; }
             public List<string> Errors { get; set; } = new List<string>();
 
             public bool AllChecksPassed =>
@@ -42,7 +44,8 @@ namespace VerifiedXCore.Utilities
                 DKGRound3Passed &&
                 SignRound1Passed &&
                 SignRound2Passed &&
-                SignAggregatePassed;
+                SignAggregatePassed &&
+                SignAggregateIdentifyPassed;
 
             public string Summary
             {
@@ -63,6 +66,7 @@ namespace VerifiedXCore.Utilities
                     sb.AppendLine($"  Sign Round 1 (Nonces):  {(SignRound1Passed ? "PASS" : "FAIL")}");
                     sb.AppendLine($"  Sign Round 2 (Share):   {(SignRound2Passed ? "PASS" : "FAIL")}");
                     sb.AppendLine($"  Sign Aggregate:         {(SignAggregatePassed ? "PASS" : "FAIL")}");
+                    sb.AppendLine($"  Aggregate + Identify:   {(SignAggregateIdentifyPassed ? "PASS" : "FAIL")}");
                     sb.AppendLine($"  Overall:                {(AllChecksPassed ? "ALL CHECKS PASSED" : "SOME CHECKS FAILED")}");
                     if (Errors.Count > 0)
                     {
@@ -184,7 +188,7 @@ namespace VerifiedXCore.Utilities
         /// that may serialize or derive differently from its peers. A release that ships new binaries updates this value
         /// with them.
         /// </summary>
-        public const string PinnedLibraryVersion = "0.2.0-frost-real";
+        public const string PinnedLibraryVersion = "0.3.0-frost-real";
 
         /// <summary>Replaceable for tests: the version the loaded native library reports.</summary>
         internal static Func<string> Version = FrostNative.GetVersion;
@@ -491,6 +495,30 @@ namespace VerifiedXCore.Utilities
                 }
 
                 result.SignAggregatePassed = true;
+
+                // The call the coordinator aggregates with: the same shares sign, and a share given under another
+                // holder's identifier is refused with that holder named.
+                var (identifiedSignature, identifyCode, noCulprits) = FrostNative.SignAggregateIdentify(
+                    signatureSharesJson, nonceCommitmentsJson, testMessageHash, pubkeyPackages[0]);
+                if (identifyCode != FrostNative.SUCCESS || identifiedSignature.Length != 128 || noCulprits.Count != 0)
+                {
+                    result.Errors.Add($"Sign Aggregate (identify) failed on valid shares: error code {identifyCode}");
+                    return;
+                }
+                var swapped = new JObject
+                {
+                    [identifiersForSigning[0]] = JToken.Parse(signatureShares[0]),
+                    [identifiersForSigning[1]] = JToken.Parse(signatureShares[0]),
+                };
+                var (_, refusedCode, culprits) = FrostNative.SignAggregateIdentify(
+                    swapped.ToString(Newtonsoft.Json.Formatting.None), nonceCommitmentsJson, testMessageHash, pubkeyPackages[0]);
+                if (refusedCode != FrostNative.ERROR_INVALID_SIGNATURE_SHARE || culprits.Count != 1
+                    || !string.Equals(culprits[0], identifiersForSigning[1], StringComparison.OrdinalIgnoreCase))
+                {
+                    result.Errors.Add($"Sign Aggregate (identify) did not name the holder of a share that does not verify: error code {refusedCode}, named [{string.Join(", ", culprits)}]");
+                    return;
+                }
+                result.SignAggregateIdentifyPassed = true;
             }
             catch (Exception ex)
             {

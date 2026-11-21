@@ -1166,7 +1166,7 @@ namespace VerifiedXCore.Bitcoin.Services
                 // FIND-026 Fix: Pass scUID and ordered signer addresses for correct pubkey package lookup
                 // and FROST Identifier remapping
                 var signerAddresses = validators.Select(v => v.ValidatorAddress).ToList();
-                var (signingResult, aggCode, aggDetail) = await AggregateSignature(sessionId, messageHash, scUID, signerAddresses, validators, threshold, round2Shares, round1Nonces, ceremonyId);
+                var (signingResult, aggCode, aggDetail, invalidShareHolders) = await AggregateSignature(sessionId, messageHash, scUID, signerAddresses, validators, threshold, round2Shares, round1Nonces, ceremonyId);
                 if (signingResult != null)
                 {
                     LogUtility.Log($"[FROST MPC] sid={sessionId} input={inputIndex} wrh={Shorten(withdrawalRequestHash)} phase=agg — ceremony completed successfully", "FrostMPCService.CoordinateSigningCeremony");
@@ -1179,8 +1179,10 @@ namespace VerifiedXCore.Bitcoin.Services
                 // makes the retry work regardless.
                 LogUtility.Log($"[FROST MPC] sid={sessionId} input={inputIndex} wrh={Shorten(withdrawalRequestHash)} phase=agg code={aggCode} — {aggDetail}", "FrostMPCService.CoordinateSigningCeremony");
                 AbortCeremony();
-                return FrostCeremonyOutcome.Fail(aggCode, sessionId, aggDetail,
+                var aggOutcome = FrostCeremonyOutcome.Fail(aggCode, sessionId, aggDetail,
                     round2Shares.Count, requiredCount, validators.Count, null, inputIndex);
+                aggOutcome.InvalidShareHolders = invalidShareHolders;
+                return aggOutcome;
             }
             catch (Exception ex)
             {
@@ -1640,7 +1642,7 @@ namespace VerifiedXCore.Bitcoin.Services
         /// 2. Remap signature shares and nonce commitments from VFX address keys to FROST Identifier keys
         ///    (64-char hex scalars), matching the format the FROST native library expects.
         /// </summary>
-        private static async Task<(FrostSigningResult? Result, FrostCeremonyFailureCode Code, string Detail)> AggregateSignature(
+        private static async Task<(FrostSigningResult? Result, FrostCeremonyFailureCode Code, string Detail, List<string> InvalidShareHolders)> AggregateSignature(
             string sessionId,
             string messageHash,
             string scUID,
@@ -1812,7 +1814,7 @@ namespace VerifiedXCore.Bitcoin.Services
                         : "coordinator is a validator (all lookup tiers exhausted)";
                     var detail = $"pubkey package not found (ceremonyId: {ceremonyId ?? "null"}, scUID: {scUID}); {coordinatorContext}";
                     ErrorLogUtility.LogError($"FROST Signing: {detail}", "FrostMPCService.AggregateSignature");
-                    return (null, FrostCeremonyFailureCode.PubkeyPackageNotFound, detail);
+                    return (null, FrostCeremonyFailureCode.PubkeyPackageNotFound, detail, new List<string>());
                 }
 
                 // FIND-026 Fix: Remap signature shares and nonce commitments from VFX address keys
@@ -1893,15 +1895,26 @@ namespace VerifiedXCore.Bitcoin.Services
                 LogUtility.Log($"[FROST MPC] Remapped {remappedShares.Count} shares and {remappedNonces.Count} nonces from VFX addresses to FROST Identifiers", 
                     "FrostMPCService.AggregateSignature");
 
-                // Call FROST native library to aggregate signature shares
-                var (schnorrSignature, errorCode) = FrostNative.SignAggregate(
+                // Call FROST native library to aggregate signature shares. Every share is checked against its holder's
+                // verifying share, and the holders of those that fail are named: a well-formed but wrong share otherwise
+                // failed every attempt with nobody named, and the same holder was asked again.
+                var (schnorrSignature, errorCode, culpritIds) = FrostNative.SignAggregateIdentify(
                     sharesJson, noncesJson, messageHash, pubkeyPackage);
 
+                if (errorCode == FrostNative.ERROR_INVALID_SIGNATURE_SHARE)
+                {
+                    var invalid = addrToFrostId.Where(kv => culpritIds.Contains(kv.Value, StringComparer.OrdinalIgnoreCase))
+                        .Select(kv => kv.Key).OrderBy(a => a, StringComparer.Ordinal).ToList();
+                    ErrorLogUtility.LogError($"FROST signature aggregation refused {culpritIds.Count} share(s) that do not verify, from: {string.Join(", ", invalid)}.",
+                        "FrostMPCService.AggregateSignature");
+                    return (null, FrostCeremonyFailureCode.Round2InvalidShares,
+                        $"{invalid.Count} holder(s) gave a signature share that does not verify: {string.Join(", ", invalid)}", invalid);
+                }
                 if (errorCode != FrostNative.SUCCESS || string.IsNullOrEmpty(schnorrSignature))
                 {
                     ErrorLogUtility.LogError($"FROST signature aggregation failed. Error code: {errorCode}. " +
                         "This is a fail-closed result - no invalid signature will be used.", "FrostMPCService.AggregateSignature");
-                    return (null, FrostCeremonyFailureCode.NativeAggregationFailed, $"native SignAggregate returned error code {errorCode}");
+                    return (null, FrostCeremonyFailureCode.NativeAggregationFailed, $"native SignAggregate returned error code {errorCode}", new List<string>());
                 }
 
                 // Validate signature is 64 bytes (128 hex chars) - standard Schnorr signature size
@@ -1909,7 +1922,7 @@ namespace VerifiedXCore.Bitcoin.Services
                 {
                     ErrorLogUtility.LogError($"FROST: Aggregated signature unexpected length: {schnorrSignature.Length} hex chars (expected 128)",
                         "FrostMPCService.AggregateSignature");
-                    return (null, FrostCeremonyFailureCode.InvalidSignatureLength, $"aggregated signature was {schnorrSignature.Length} hex chars (expected 128)");
+                    return (null, FrostCeremonyFailureCode.InvalidSignatureLength, $"aggregated signature was {schnorrSignature.Length} hex chars (expected 128)", new List<string>());
                 }
 
                 LogUtility.Log($"[FROST MPC] Signature aggregation complete. Schnorr sig: {schnorrSignature.Substring(0, 16)}...", 
@@ -1924,12 +1937,12 @@ namespace VerifiedXCore.Bitcoin.Services
                     CompletionTimestamp = TimeUtil.GetTime(),
                     SignerAddresses = signerAddresses,
                     Threshold = threshold
-                }, FrostCeremonyFailureCode.None, string.Empty);
+                }, FrostCeremonyFailureCode.None, string.Empty, new List<string>());
             }
             catch (Exception ex)
             {
                 ErrorLogUtility.LogError($"Signature aggregation error: {ex}", "FrostMPCService.AggregateSignature");
-                return (null, FrostCeremonyFailureCode.CoordinatorException, $"aggregation exception: {ApiErrorText.For(ex)}");
+                return (null, FrostCeremonyFailureCode.CoordinatorException, $"aggregation exception: {ApiErrorText.For(ex)}", new List<string>());
             }
         }
 

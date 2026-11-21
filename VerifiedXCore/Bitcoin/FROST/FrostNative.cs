@@ -19,6 +19,8 @@ namespace VerifiedXCore.Bitcoin.FROST
         public const int ERROR_SERIALIZATION = -3;
         public const int ERROR_CRYPTO_ERROR = -4;
         public const int ERROR_INVALID_PARAMETER = -5;
+        /// <summary><see cref="frost_sign_aggregate_identify"/>: shares that do not verify; their holders are named.</summary>
+        public const int ERROR_INVALID_SIGNATURE_SHARE = -6;
 
         /// <summary>
         /// Free a string allocated by Rust
@@ -89,6 +91,20 @@ namespace VerifiedXCore.Bitcoin.FROST
             [MarshalAs(UnmanagedType.LPStr)] string messageHashHex,
             [MarshalAs(UnmanagedType.LPStr)] string pubkeyPackageJson,
             out IntPtr outSchnorrSignature);
+
+        /// <summary>
+        /// <see cref="frost_sign_aggregate"/>, checking every share against its holder's verifying share: when any fail it
+        /// returns <see cref="ERROR_INVALID_SIGNATURE_SHARE"/> and <paramref name="outCulprits"/> receives a JSON array of
+        /// their FROST identifiers.
+        /// </summary>
+        [DllImport(DllName, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
+        public static extern int frost_sign_aggregate_identify(
+            [MarshalAs(UnmanagedType.LPStr)] string signatureSharesJson,
+            [MarshalAs(UnmanagedType.LPStr)] string nonceCommitmentsJson,
+            [MarshalAs(UnmanagedType.LPStr)] string messageHashHex,
+            [MarshalAs(UnmanagedType.LPStr)] string pubkeyPackageJson,
+            out IntPtr outSchnorrSignature,
+            out IntPtr outCulprits);
 
         /// <summary>
         /// Get library version
@@ -312,6 +328,39 @@ namespace VerifiedXCore.Bitcoin.FROST
             {
                 ErrorLogUtility.LogError($"SignAggregate error: {ex.Message}", "FrostNative.SignAggregate");
                 return (string.Empty, ERROR_CRYPTO_ERROR);
+            }
+        }
+
+        /// <summary>
+        /// Aggregates the shares like <see cref="SignAggregate"/>; when shares do not verify, returns
+        /// <see cref="ERROR_INVALID_SIGNATURE_SHARE"/> with the FROST identifiers of their holders.
+        /// </summary>
+        public static (string schnorrSignature, int errorCode, List<string> culpritIdentifiers) SignAggregateIdentify(
+            string signatureSharesJson,
+            string nonceCommitmentsJson,
+            string messageHash,
+            string groupPubkey)
+        {
+            try
+            {
+                int result = frost_sign_aggregate_identify(
+                    signatureSharesJson, nonceCommitmentsJson, messageHash, groupPubkey,
+                    out var signaturePtr, out var culpritsPtr);
+                if (result == ERROR_INVALID_SIGNATURE_SHARE)
+                {
+                    var json = PtrToStringAndFree(culpritsPtr);
+                    var culprits = string.IsNullOrEmpty(json) ? new List<string>()
+                        : Newtonsoft.Json.JsonConvert.DeserializeObject<List<string>>(json) ?? new List<string>();
+                    return (string.Empty, result, culprits);
+                }
+                if (result != SUCCESS)
+                    return (string.Empty, result, new List<string>());
+                return (PtrToStringAndFree(signaturePtr), result, new List<string>());
+            }
+            catch (Exception ex)
+            {
+                ErrorLogUtility.LogError($"SignAggregateIdentify error: {ex.Message}", "FrostNative.SignAggregateIdentify");
+                return (string.Empty, ERROR_CRYPTO_ERROR, new List<string>());
             }
         }
 
