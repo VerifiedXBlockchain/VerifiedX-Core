@@ -157,6 +157,39 @@ namespace VerifiedXCore.Bitcoin.Attestation
                 : null;
         }
 
+        /// <summary>
+        /// The smallest balance a holder keeps on a watched vault from Globals.VaultMinimumPositionHeight (10,000 sats):
+        /// filling the holder limit then ties up 100,000 times this, and every position can pay for its own withdrawal.
+        /// </summary>
+        public const decimal MinPositionBtc = 0.0001M;
+
+        /// <summary>
+        /// Why a debit of <paramref name="amount"/> from <paramref name="holder"/> on a watched vault is refused, the
+        /// holder having <paramref name="available"/> before it (its balance less what the block already debits): a holder
+        /// moves at least <see cref="MinPositionBtc"/> or everything it has, and keeps nothing or at least that much. The
+        /// owner, whose address is never refused by the holder limit, is held only to the first, and only for a transfer
+        /// (the way new positions are made). So every position made from the height is nothing or at least that much, and
+        /// so is every amount escrowed or locked, and with it every refund and every unlock to the locker. A position
+        /// from before the height may still be moved whole. Null otherwise, and before the height.
+        /// </summary>
+        public static string? PositionRefusal(string scUID, string holder, decimal? available, decimal amount, bool isTransfer, long height)
+        {
+            if (height < Globals.VaultMinimumPositionHeight || amount <= 0M || !BtcAttestBalance.IsAttestedVault(scUID)) return null;
+            var contract = SmartContractStateTrei.GetSmartContractState(scUID);
+            if (contract == null) return null;
+            if (string.Equals(holder, contract.OwnerAddress, StringComparison.Ordinal))
+                return isTransfer && amount < MinPositionBtc
+                    ? $"A transfer on vault {contract.SmartContractUID} moves at least {MinPositionBtc} vBTC; this one moves {amount}."
+                    : null;
+            if (available == null) return null;
+            if (amount < MinPositionBtc && amount != available.Value)
+                return $"A holder on vault {contract.SmartContractUID} moves at least {MinPositionBtc} vBTC or all it has ({available.Value}); this moves {amount}.";
+            var left = available.Value - amount;
+            if (left > 0M && left < MinPositionBtc)
+                return $"A holder on vault {contract.SmartContractUID} keeps nothing or at least {MinPositionBtc} vBTC; moving {amount} of {available.Value} leaves {left}.";
+            return null;
+        }
+
         /// <summary>The longest sale key a watched vault's sale carries (a wallet's is 10 letters).</summary>
         public const int MaxSaleKeyLength = 64;
 

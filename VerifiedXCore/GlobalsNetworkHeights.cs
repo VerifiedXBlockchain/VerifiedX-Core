@@ -44,6 +44,7 @@ namespace VerifiedXCore
             Globals.EvolveSpecificNeedsContractHeight = Globals.IsTestNet ?Globals.EvolveSpecificNeedsContractTestnetHeight : Globals.EvolveSpecificNeedsContractHeight;
             Globals.BridgeVoidKeepsLocksHeight = Globals.IsTestNet ? Globals.BridgeVoidKeepsLocksTestnetHeight : Globals.BridgeVoidKeepsLocksHeight;
             Globals.BridgeFailKeepsLocksHeight = Globals.IsTestNet ? Globals.BridgeFailKeepsLocksTestnetHeight : Globals.BridgeFailKeepsLocksHeight;
+            Globals.VaultMinimumPositionHeight = Globals.IsTestNet ? Globals.VaultMinimumPositionTestnetHeight : Globals.VaultMinimumPositionHeight;
             Globals.ReserveRecoverReadsEveryRowHeight = Globals.IsTestNet ? Globals.LedgerRulesBatchTestnetHeight : Globals.ReserveRecoverReadsEveryRowHeight;
             Globals.VbtcEnvelopeRulesHeight = Globals.IsTestNet ? Globals.LedgerRulesBatchTestnetHeight : Globals.VbtcEnvelopeRulesHeight;
             Globals.ReserveNonTransferAmountHeight = Globals.IsTestNet ? Globals.LedgerRulesBatchTestnetHeight : Globals.ReserveNonTransferAmountHeight;
