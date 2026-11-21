@@ -154,6 +154,12 @@ namespace VerifiedXCore.Privacy
                 && (!string.IsNullOrWhiteSpace(payload.ProofB64) || !string.IsNullOrWhiteSpace(payload.FeeProofB64)))
                 return (false, PreEpochProofAdmissionReason);
 
+            // This node's wallet makes proofs only under the library's current rules, which blocks apply from
+            // Globals.PlonkCurrentRulesHeight; until then it admits no proof, so it never proposes one a block refuses.
+            if (blockHeight == null && PrivacyEpoch.ProofRulesActive(proofRulesHeight) && !PlonkProofVerifier.UsesCurrentRules(proofRulesHeight)
+                && (!string.IsNullOrWhiteSpace(payload.ProofB64) || !string.IsNullOrWhiteSpace(payload.FeeProofB64)))
+                return (false, CurrentRulesPendingReason);
+
             if (!skipPlonkProofVerification)
             {
                 var plonk = PlonkProofVerifier.TryValidatePrivateProofs(txRequest, payload!, skipHistoricalPrivacyChecks, proofRulesHeight);
@@ -200,6 +206,9 @@ namespace VerifiedXCore.Privacy
         internal const string TooManyNotesReason = "A private transaction spends at most two notes and makes at most two.";
 
         internal const string PreEpochProofAdmissionReason = "Before the proof-rules height a private transaction carries no proof.";
+
+        internal static string CurrentRulesPendingReason =>
+            $"Private transactions are paused for a network upgrade and resume at block {Globals.PlonkCurrentRulesHeight}.";
 
         private static bool ValidateVbtcPayloadFields(TransactionType t, PrivateTxPayload payload, out string? err)
         {

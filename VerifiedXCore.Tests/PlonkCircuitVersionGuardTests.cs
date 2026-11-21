@@ -12,7 +12,7 @@ namespace VerifiedXCore.Tests
     {
         private const uint PinnedVerifier = PlonkNative.CapParsePublicInputsV1 | PlonkNative.CapV1Circuits
             | PlonkNative.CapVfxPi2Verify | PlonkNative.CapV2Circuits;
-        private const uint LaterGeneration = 128;
+        private const uint LaterGeneration = 256;
 
         private static bool VerifierAvailableWith(uint caps)
         {

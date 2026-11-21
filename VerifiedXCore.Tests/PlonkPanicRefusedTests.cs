@@ -25,8 +25,8 @@ namespace VerifiedXCore.Tests
             try
             {
                 PlonkProofVerifier.ClearVerifiedProofCache();
-                PlonkProofVerifier.NativeVerify = (_, _, _) => code;
-                Assert.Equal(PlonkVerifyResult.Invalid, PlonkProofVerifier.VerifyRaw(PlonkCircuitType.Shield, new byte[] { 1, 2, 3 }, new byte[] { 4 }));
+                PlonkProofVerifier.NativeVerify = (_, _, _, _) => code;
+                Assert.Equal(PlonkVerifyResult.Invalid, PlonkProofVerifier.VerifyRaw(PlonkCircuitType.Shield, new byte[] { 1, 2, 3 }, new byte[] { 4 }, currentRules: true));
                 Assert.False(BlockValidatorService.IsStateCorruptionSignal($"{PlonkProofVerifier.FailedProofPrefix} (primary circuit)."));
             }
             finally { PlonkProofVerifier.NativeVerify = prior; }
@@ -67,12 +67,13 @@ namespace VerifiedXCore.Tests
             Assert.Equal(PlonkNative.Success, PlonkNative.plonk_prove_shield(500_000_000UL, randomness, ownerPk, proof, ref proofLen, pi, ref piLen));
             proof = proof.Take((int)proofLen).ToArray();
             pi = pi.Take((int)piLen).ToArray();
-            Assert.Equal(1, PlonkNative.plonk_verify(1, proof, (nuint)proof.Length, pi, (nuint)pi.Length));
+            Assert.Equal(1, PlonkNative.plonk_verify2(1, proof, (nuint)proof.Length, pi, (nuint)pi.Length));
 
             var crafted = WithoutCustomEvaluations(proof);
             Assert.Equal(PlonkNative.ErrPanic, PlonkNative.plonk_verify(1, crafted, (nuint)crafted.Length, pi, (nuint)pi.Length)); // the process is still here
+            Assert.Equal(0, PlonkNative.plonk_verify2(1, crafted, (nuint)crafted.Length, pi, (nuint)pi.Length)); // the current rules refuse it outright
 
-            Assert.Equal(1, PlonkNative.plonk_verify(1, proof, (nuint)proof.Length, pi, (nuint)pi.Length));
+            Assert.Equal(1, PlonkNative.plonk_verify2(1, proof, (nuint)proof.Length, pi, (nuint)pi.Length));
         }
     }
 }

@@ -31,6 +31,7 @@ namespace VerifiedXCore.Tests
         private readonly string? _priorCustomPath;
         private readonly Block _priorLastBlock;
         private readonly long _priorHeight;
+        private readonly long _priorCurrentRulesHeight = Globals.PlonkCurrentRulesHeight;
         private readonly long _priorSupplyGate;
         private readonly Func<bool> _priorAvailable;
         private readonly Dictionary<string, decimal> _priorCorrections;
@@ -49,6 +50,7 @@ namespace VerifiedXCore.Tests
             _priorCorrections = new(Globals.ShieldedSupplyCorrections, StringComparer.Ordinal);
             Globals.ShieldedSupplyCorrections.Clear();
             Globals.PrivateTxProofRulesHeight = Height;
+            Globals.PlonkCurrentRulesHeight = Height; // the epoch's proofs are the current library's
             Globals.PrivateTxSupplyRulesHeight = 1;
             DbContext.Initialize();
             var pool = ShieldedPoolService.GetOrCreateState("VFX");
@@ -63,6 +65,7 @@ namespace VerifiedXCore.Tests
             PlonkProofVerifier.VerifierAvailable = _priorAvailable;
             Globals.LastBlock = _priorLastBlock;
             Globals.PrivateTxProofRulesHeight = _priorHeight;
+            Globals.PlonkCurrentRulesHeight = _priorCurrentRulesHeight;
             Globals.PrivateTxSupplyRulesHeight = _priorSupplyGate;
             Globals.ShieldedSupplyCorrections.Clear();
             foreach (var (k, v) in _priorCorrections) Globals.ShieldedSupplyCorrections[k] = v;

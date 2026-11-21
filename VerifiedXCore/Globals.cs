@@ -751,6 +751,16 @@ namespace VerifiedXCore
         /// activation height, and nodes keep the prior params to judge blocks below it.
         /// </summary>
         public static long PrivateTxProofRulesHeight = LedgerRulesBatchHeight;
+
+        /// <summary>
+        /// From this height a private transaction's proofs are judged under the PLONK library's current rules
+        /// (<c>plonk_verify2</c>), the ones its provers follow; below it under the original rules (<c>plonk_verify</c>), as
+        /// they were judged when mined. Until the height this node admits no private transaction carrying a proof: its
+        /// wallet's proofs pass only the current rules, which blocks below the height do not apply. Set to the tip at
+        /// release. Testnet value in GlobalsNetworkHeights.
+        /// </summary>
+        public static long PlonkCurrentRulesHeight = long.MaxValue;
+        public const long PlonkCurrentRulesTestnetHeight = long.MaxValue;
         public static Dictionary<string, decimal> ForgedVfxBurns = new(StringComparer.Ordinal)
         {
             ["RB3eeBH258arkuePCJf5NMVMSaUyhyy9g6"] = 100_033.000012M,
@@ -1182,7 +1192,9 @@ namespace VerifiedXCore
         /// loaded, so until then it is not ready to produce or cast. Always true below the height.
         /// </summary>
         public static bool ProofVerifierReady =>
-            !Privacy.PrivacyEpoch.ProofRulesActive((LastBlock?.Height ?? 0) + 1) || Privacy.PlonkProofVerifier.VerifierAvailable();
+            !Privacy.PrivacyEpoch.ProofRulesActive((LastBlock?.Height ?? 0) + 1)
+            || Privacy.PlonkProofVerifier.VerifierAvailable()
+                && (!Privacy.PlonkProofVerifier.UsesCurrentRules((LastBlock?.Height ?? 0) + 1) || Privacy.PlonkProofVerifier.CurrentRulesAvailable());
 
         /// <summary>Legacy proofs, GET block fallback, optional cert skip, and seed peer injection apply only for seed casters when the tip looks stopped. Other nodes always use normal snapshot/signed paths and discovery.
         /// Phase E: additionally requires a signed ≥2-of-3 seed agreement (<see cref="Services.BootstrapCoordinationService.AgreementActive"/>) — bootstrap is never entered unilaterally.</summary>
