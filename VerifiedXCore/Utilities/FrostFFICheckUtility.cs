@@ -184,7 +184,7 @@ namespace VerifiedXCore.Utilities
         /// that may serialize or derive differently from its peers. A release that ships new binaries updates this value
         /// with them.
         /// </summary>
-        public const string PinnedLibraryVersion = "0.2.0-frost-real";
+        public const string PinnedLibraryVersion = "0.3.0-frost-real";
 
         /// <summary>Replaceable for tests: the version the loaded native library reports.</summary>
         internal static Func<string> Version = FrostNative.GetVersion;

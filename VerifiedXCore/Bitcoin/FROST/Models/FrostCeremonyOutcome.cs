@@ -32,7 +32,12 @@ namespace VerifiedXCore.Bitcoin.FROST.Models
         /// Holders gave a Round 1 commitment and no Round 2 share. Every share is made over the whole commitment set, so
         /// the set can never be aggregated; a new session without them can (<see cref="FrostCeremonyOutcome.Withholders"/>).
         /// </summary>
-        Round2SharesWithheld
+        Round2SharesWithheld,
+        /// <summary>
+        /// Holders gave Round 2 shares that do not verify against their verifying shares, so the set cannot be
+        /// aggregated; a new session without them can (<see cref="FrostCeremonyOutcome.InvalidShareHolders"/>).
+        /// </summary>
+        Round2InvalidShares
     }
 
     /// <summary>
@@ -67,6 +72,8 @@ namespace VerifiedXCore.Bitcoin.FROST.Models
         public string Detail { get; set; } = "";
         /// <summary>On <see cref="FrostCeremonyFailureCode.Round2SharesWithheld"/>: who committed in Round 1 and gave no share.</summary>
         public List<string> Withholders { get; set; } = new();
+        /// <summary>On <see cref="FrostCeremonyFailureCode.Round2InvalidShares"/>: who gave a share that does not verify.</summary>
+        public List<string> InvalidShareHolders { get; set; } = new();
 
         public bool Success => Result != null;
 
@@ -82,7 +89,9 @@ namespace VerifiedXCore.Bitcoin.FROST.Models
             || FailureCode == FrostCeremonyFailureCode.InputCountMismatch
             // A holder that withholds its share says nothing about the contract: blacklisting it for a day let one holder
             // hold up every exit drawing on it.
-            || FailureCode == FrostCeremonyFailureCode.Round2SharesWithheld;
+            || FailureCode == FrostCeremonyFailureCode.Round2SharesWithheld
+            // Nor does a holder that gives a share that does not verify: it is named and left out, as a withholder is.
+            || FailureCode == FrostCeremonyFailureCode.Round2InvalidShares;
 
         /// <summary>
         /// Compact operator-facing description: code, detail, session and response counts.

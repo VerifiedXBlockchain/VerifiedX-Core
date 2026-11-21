@@ -40,11 +40,11 @@ namespace VerifiedXCore.Tests
         }
 
         [Theory]
-        [InlineData("0.3.0-frost-real")]
+        [InlineData("0.2.0-frost-real")]
         [InlineData("0.1.0-frost-real")]
-        [InlineData("0.2.0-frost-stub")]
-        [InlineData("0.2.0-FROST-REAL")]
-        [InlineData("0.2.0-frost-real ")]
+        [InlineData("0.3.0-frost-stub")]
+        [InlineData("0.3.0-FROST-REAL")]
+        [InlineData("0.3.0-frost-real ")]
         [InlineData("Unknown")]
         [InlineData("")]
         public void ALoadableLibraryOfAnotherVersion_FailsTheCheck(string version)

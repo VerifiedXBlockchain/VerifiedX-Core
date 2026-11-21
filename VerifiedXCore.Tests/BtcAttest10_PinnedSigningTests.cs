@@ -750,6 +750,56 @@ namespace VerifiedXCore.Tests
         }
 
         /// <summary>
+        /// A holder whose Round 2 share does not verify also makes every ceremony fail. Named by the aggregation, it is left
+        /// out of the next ceremonies for the transaction, as a withholder is, while the rest still meet the threshold.
+        /// </summary>
+        [Fact]
+        public async Task AHolderWhoseShareDoesNotVerify_IsLeftOutOfTheNextCeremony_WhileTheRestMeetTheThreshold()
+        {
+            await Start();
+            var vault = await CreateVault(H1 + 1, keyHolders: Signers);
+            await Report(_btc.Mine(Pay(vault.Script, 150_000)));
+            var request = await Request(vault.Uid, 0.001M);
+            var pin = BtcAttestStore.Withdrawal(BtcWithdrawals.RefOf(request.Hash, vault.Uid))!.Pins[0];
+            var addresses = Signers.Select(s => s.Address).ToList();
+            var order = addresses.OrderBy(a => BtcWithdrawalSigner.Turn(pin.Txid, a, addresses)).ToList();
+            var me = order[0];
+            var cheaters = new Queue<string[]>(new[] { new[] { order[1] }, Array.Empty<string>() });
+            var asked = new List<string[]>();
+            var priorValidator = Globals.ValidatorAddress;
+            var priorSynced = Globals.IsChainSynced;
+            Globals.ValidatorAddress = me;
+            Globals.IsChainSynced = true;
+            BtcWithdrawalSigner.SignAndBroadcast = _realSign;
+            BtcWithdrawalSigner.KnownOnBitcoin = _ => Task.FromResult<bool?>(null);
+            BtcWithdrawalSigner.Reachable = list => Task.FromResult(list);
+            foreach (var s in Signers)
+                Globals.NetworkValidators[s.Address] = new NetworkValidator { Address = s.Address, IPAddress = "10.0.0.1", PublicKey = s.Pub };
+            BtcWithdrawalSigner.CeremonyForTests = (signers, threshold) =>
+            {
+                asked.Add(signers.Select(v => v.ValidatorAddress).OrderBy(a => a, StringComparer.Ordinal).ToArray());
+                var outcome = FrostCeremonyOutcome.Fail(FrostCeremonyFailureCode.Round2InvalidShares, "s", "invalid share");
+                outcome.InvalidShareHolders = cheaters.Dequeue().ToList();
+                return Task.FromResult((false, "", "", "invalid share", (FrostCeremonyOutcome?)outcome));
+            };
+            try
+            {
+                async Task Tick() { BtcWithdrawalSigner.ForgetAttempts(); await BtcWithdrawalSigner.TickAsync(me, pin.PinnedAtVfxHeight); }
+                await Tick();
+                Assert.Equal(addresses.OrderBy(a => a, StringComparer.Ordinal), asked[0]);         // every holder, the first time
+                await Tick();
+                Assert.DoesNotContain(order[1], asked[1]);                                        // the one whose share failed is left out
+                Assert.Contains(me, asked[1]);
+            }
+            finally
+            {
+                Globals.ValidatorAddress = priorValidator;
+                Globals.IsChainSynced = priorSynced;
+                foreach (var s in Signers) Globals.NetworkValidators.TryRemove(s.Address, out _);
+            }
+        }
+
+        /// <summary>
         /// "Nothing is pinned, so nothing is signed" holds only while the block that made the pin stays in the chain.
         /// The signers therefore leave a pin's block to settle before anyone leads or joins a ceremony for it: a
         /// signature given at once would outlive the block if it were replaced.
