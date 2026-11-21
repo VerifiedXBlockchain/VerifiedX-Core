@@ -30,8 +30,8 @@ namespace VerifiedXCore.Tests
                 Timestamp = TimeUtil.GetTime(),
                 FromAddress = v.Address,
                 ToAddress = v.Address,
-                Amount = 0M,
-                Fee = 0M,
+                Amount = 0.0M,
+                Fee = 0.0M,
                 Nonce = StateData.GetSpecificAccountStateTrei(v.Address)!.Nonce,
                 TransactionType = TransactionType.VBTC_V2_VALIDATOR_HEARTBEAT,
                 Data = JsonConvert.SerializeObject(new
