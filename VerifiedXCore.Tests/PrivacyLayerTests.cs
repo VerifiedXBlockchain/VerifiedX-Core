@@ -171,7 +171,7 @@ namespace VerifiedXCore.Tests
         public void PlonkProofVerifier_VerifyRaw_InvalidPublicInputs_IsNativeError()
         {
             if ((PlonkNative.plonk_capabilities() & PlonkNative.CapV1Circuits) != 0) return; // another test loaded the real v1 params into the process-global native state
-            var r = PlonkProofVerifier.VerifyRaw(PlonkCircuitType.Transfer, new byte[] { 1 }, new byte[] { 2 });
+            var r = PlonkProofVerifier.VerifyRaw(PlonkCircuitType.Transfer, new byte[] { 1 }, new byte[] { 2 }, currentRules: false);
             Assert.Equal(PlonkVerifyResult.NativeError, r);
         }
 
@@ -193,7 +193,7 @@ namespace VerifiedXCore.Tests
             };
             var tx = new Transaction { TransactionType = TransactionType.VFX_PRIVATE_TRANSFER, Amount = 0 };
             Assert.True(PlonkPublicInputsV1.TryBuild(tx, payload, out var pi, out var err), err);
-            var r = PlonkProofVerifier.VerifyRaw(PlonkCircuitType.Transfer, new byte[] { 1 }, pi);
+            var r = PlonkProofVerifier.VerifyRaw(PlonkCircuitType.Transfer, new byte[] { 1 }, pi, currentRules: false);
             Assert.Equal(PlonkVerifyResult.NotImplemented, r);
         }
 

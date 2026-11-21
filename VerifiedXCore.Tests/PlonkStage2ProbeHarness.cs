@@ -60,7 +60,7 @@ namespace VerifiedXCore.Tests
                 L($"shield prove: code={code} proofLen={proof?.Length} piLen={pi?.Length} in {sw.ElapsedMilliseconds} ms");
                 if (code == PlonkNative.Success && proof != null && pi != null)
                 {
-                    var vr = PlonkProofVerifier.VerifyRaw(PlonkCircuitType.Shield, proof, pi);
+                    var vr = PlonkProofVerifier.VerifyRaw(PlonkCircuitType.Shield, proof, pi, currentRules: true);
                     L($"shield verify(prover PI): {vr}");
                     L($"shield prover PI hex: {Convert.ToHexString(pi)}");
                     // What validators reconstruct for a matching transaction.
@@ -73,13 +73,13 @@ namespace VerifiedXCore.Tests
                     {
                         L($"shield VFXPI1 hex:    {Convert.ToHexString(rebuilt)}");
                         L($"shield PI equal to VFXPI1: {rebuilt.AsSpan().SequenceEqual(pi)} (pedersen code {pc}, noteHash {Convert.ToHexString(noteHash)})");
-                        L($"shield verify(VFXPI1): {PlonkProofVerifier.VerifyRaw(PlonkCircuitType.Shield, proof, rebuilt)}");
+                        L($"shield verify(VFXPI1): {PlonkProofVerifier.VerifyRaw(PlonkCircuitType.Shield, proof, rebuilt, currentRules: true)}");
                     }
                     else L($"shield VFXPI1 build failed: {err}");
                     // Tamper: a different amount must not verify.
                     var bad = (byte[])pi.Clone();
                     bad[^1] ^= 0x01;
-                    L($"shield verify(tampered PI): {PlonkProofVerifier.VerifyRaw(PlonkCircuitType.Shield, proof, bad)}");
+                    L($"shield verify(tampered PI): {PlonkProofVerifier.VerifyRaw(PlonkCircuitType.Shield, proof, bad, currentRules: true)}");
                 }
 
                 // ── 3. Unshield with the wallet's tree ────────────────────────────────────────────────────────
@@ -140,7 +140,7 @@ namespace VerifiedXCore.Tests
                 L($"[{variant}] unshield prove: code={code} proofLen={proof?.Length} piLen={pi?.Length} in {sw.ElapsedMilliseconds} ms");
                 if (code == PlonkNative.Success && proof != null && pi != null)
                 {
-                    L($"unshield verify(prover PI): {PlonkProofVerifier.VerifyRaw(PlonkCircuitType.Unshield, proof, pi)}");
+                    L($"unshield verify(prover PI): {PlonkProofVerifier.VerifyRaw(PlonkCircuitType.Unshield, proof, pi, currentRules: true)}");
                     L($"unshield prover PI hex: {Convert.ToHexString(pi)}");
                     L($"wallet tree root:       {Convert.ToHexString(treeRoot!)}");
                     var n0 = NullifierService.DeriveFromNoteHash(vk, NoteHashService.Compute(notes[0].Amount, notes[0].Rand), 0);
@@ -158,7 +158,7 @@ namespace VerifiedXCore.Tests
                     {
                         L($"unshield VFXPI1 hex:    {Convert.ToHexString(rebuilt)}");
                         L($"unshield PI equal to VFXPI1: {rebuilt.AsSpan().SequenceEqual(pi)}");
-                        L($"unshield verify(VFXPI1): {PlonkProofVerifier.VerifyRaw(PlonkCircuitType.Unshield, proof, rebuilt)}");
+                        L($"unshield verify(VFXPI1): {PlonkProofVerifier.VerifyRaw(PlonkCircuitType.Unshield, proof, rebuilt, currentRules: true)}");
                         L($"nullifier0={Convert.ToHexString(n0)} nullifier1={Convert.ToHexString(n1)}");
                     }
                     else L($"unshield VFXPI1 build failed: {err}");

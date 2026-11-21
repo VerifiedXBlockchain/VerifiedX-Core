@@ -49,6 +49,11 @@ namespace VerifiedXCore.Privacy
         /// witness formats below are the v2 ones. Fund-loss re-audit (stage 3), Oct 2026.
         /// </summary>
         public const uint CapV2Circuits = 64;
+        /// <summary>
+        /// Bit 7: <see cref="plonk_verify2"/> judges proofs under the library's current rules, the ones its provers follow;
+        /// <see cref="plonk_verify"/> keeps the original rules for proofs judged under them before.
+        /// </summary>
+        public const uint CapVerify2 = 128;
 
         /// <summary>Tree depth used by the v1 circuits (Merkle path = 32 sibling hashes).</summary>
         public const int TreeDepth = 32;
@@ -121,6 +126,10 @@ namespace VerifiedXCore.Privacy
 
         [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
         public static extern int plonk_verify(byte circuitType, byte[] proof, nuint proofLen, byte[] publicInputs, nuint publicInputsLen);
+
+        /// <summary><see cref="plonk_verify"/> under the library's current rules (<see cref="CapVerify2"/>).</summary>
+        [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
+        public static extern int plonk_verify2(byte circuitType, byte[] proof, nuint proofLen, byte[] publicInputs, nuint publicInputsLen);
 
         /// <summary>v0 prove: <paramref name="proofOut"/> must hold at least <paramref name="proofOutLen"/> bytes (in/out; grows if <see cref="ErrParam"/>).</summary>
         [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]

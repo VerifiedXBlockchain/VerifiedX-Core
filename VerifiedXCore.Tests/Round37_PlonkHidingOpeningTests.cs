@@ -52,10 +52,10 @@ namespace VerifiedXCore.Tests
             var randomness = PrivacyField.RandomCanonical();
             var code = PlonkProverV1.TryProveShield(100_000_000, randomness, PoseidonV1.OwnerPk(PrivacyField.Zero32), out var proof, out var pi);
             Assert.Equal(PlonkNative.Success, code);
-            Assert.Equal(PlonkVerifyResult.Valid, PlonkProofVerifier.VerifyRaw(PlonkCircuitType.Shield, proof!, pi!));
+            Assert.Equal(PlonkVerifyResult.Valid, PlonkProofVerifier.VerifyRaw(PlonkCircuitType.Shield, proof!, pi!, currentRules: true));
 
-            Assert.NotEqual(PlonkVerifyResult.Valid, PlonkProofVerifier.VerifyRaw(PlonkCircuitType.Shield, WithZeroHidingTerm(proof!, AwFlag), pi!));
-            Assert.NotEqual(PlonkVerifyResult.Valid, PlonkProofVerifier.VerifyRaw(PlonkCircuitType.Shield, WithZeroHidingTerm(proof!, SawFlagWhenAwHasNone), pi!));
+            Assert.NotEqual(PlonkVerifyResult.Valid, PlonkProofVerifier.VerifyRaw(PlonkCircuitType.Shield, WithZeroHidingTerm(proof!, AwFlag), pi!, currentRules: true));
+            Assert.NotEqual(PlonkVerifyResult.Valid, PlonkProofVerifier.VerifyRaw(PlonkCircuitType.Shield, WithZeroHidingTerm(proof!, SawFlagWhenAwHasNone), pi!, currentRules: true));
         }
     }
 }
