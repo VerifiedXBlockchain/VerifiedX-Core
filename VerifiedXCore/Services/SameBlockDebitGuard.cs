@@ -461,6 +461,31 @@ namespace VerifiedXCore.Services
             return (true, "");
         }
 
+        /// <summary>
+        /// Mempool admission: the smallest-position rule <see cref="TryRegister"/> applies (from
+        /// Globals.VaultMinimumPositionHeight), for this transaction alone on committed balances; null when it holds. The
+        /// block producer and every block apply the rule through TryRegister, so a transaction admitted without it was
+        /// reported as sent and then left out of every block.
+        /// </summary>
+        public static string? MinimumPositionRefusal(Transaction tx)
+        {
+            if (tx == null) return null;
+            var state = State.ForPolicy();
+            var judgedAt = state.BlockHeight ?? ((Globals.LastBlock?.Height ?? 0) + 1);
+            if (judgedAt < Globals.VaultMinimumPositionHeight || LedgerIntegrityRules.IsHonoredWhitelistEntry(tx, state.BlockHeight))
+                return null;
+            var isTransfer = IsVbtcTransfer(tx);
+            var byKey = GetDebits(tx, state.BlockHeight).Where(d => d.Key.Kind == LedgerKind.VbtcV2)
+                .GroupBy(d => Canonical(d.Key, state.CanonicalUids));
+            foreach (var debit in byKey)
+            {
+                var refusal = Bitcoin.Attestation.BtcVaultLedger.PositionRefusal(debit.Key.ContractUid, debit.Key.Holder, state.BalanceOf(debit.Key), debit.Sum(d => d.Amount), isTransfer, judgedAt);
+                if (refusal != null)
+                    return $"{MinimumPositionPrefix}: {refusal}";
+            }
+            return null;
+        }
+
         /// <summary>Whether a transaction moves vBTC V2 to another holder (single or multi), as GetDebits reads it.</summary>
         private static bool IsVbtcTransfer(Transaction tx)
         {

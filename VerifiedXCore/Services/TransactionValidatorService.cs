@@ -387,6 +387,15 @@ namespace VerifiedXCore.Services
             if (legacyFreezeRefusal != null)
                 return (false, legacyFreezeRefusal);
 
+            // At admission, the smallest-position rule the producer and every block apply (SameBlockDebitGuard): a vBTC
+            // debit under it is refused here with its reason, not admitted, reported as sent and never mined.
+            if (blockHeight == null && !blockVerify && !blockDownloads)
+            {
+                var positionRefusal = SameBlockDebitGuard.MinimumPositionRefusal(txRequest);
+                if (positionRefusal != null)
+                    return (false, positionRefusal);
+            }
+
             // Withdrawals on a vault the chain watches: no completion transaction, no vote, cancellation only before
             // the Bitcoin transaction is fixed, and a destination that is a Bitcoin address.
             // The fee raise (type 44) is new with the attestation: not accepted before the recording height, as the other

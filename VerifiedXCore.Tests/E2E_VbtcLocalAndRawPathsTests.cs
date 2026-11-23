@@ -355,6 +355,102 @@ namespace VerifiedXCore.Tests
             Assert.Null(AccountData.GetSingleAccount(_webHolder.Address));
         }
 
+        // ── The smallest position, when a transfer is sent ────────────────────────────────────
+
+        private static async Task<JObject> TrySend(string built, V signer, Func<RawVBTCTxSubmission, Task<string>> send)
+        {
+            var answer = JObject.Parse(built);
+            Assert.True((bool)answer["Success"]!, (string?)answer["Message"]);
+            var hash = (string)answer["Hash"]!;
+            return JObject.Parse(await send(new RawVBTCTxSubmission { Hash = hash, Signature = VerifiedXCore.Services.SignatureService.CreateSignature(hash, signer.Key, signer.Pub), PublicKey = signer.Pub }));
+        }
+
+        private static void RefusedForThePosition(JObject answer, string why)
+        {
+            Assert.False((bool)answer["Success"]!, "sent: " + answer.ToString(Formatting.None));
+            var message = (string)answer["Message"]!;
+            Assert.Contains(SameBlockDebitGuard.MinimumPositionPrefix, message);
+            Assert.Contains(why, message);
+        }
+
+        private async Task<string> WebVault(int sats)
+        {
+            var ceremony = CompletedCeremony(_web);
+            var unique = Guid.NewGuid().ToString("N");
+            var now = TimeUtil.GetTime();
+            var signedRequest = VerifiedXCore.Services.SignatureService.CreateSignature($"{_web.Address}Web vaulte2eVBTC{ceremony}{now}{unique}", _web.Key, _web.Pub);
+            await SignAndSend(await _api.GetRawCreateContractTxData(new VBTCContractRawPayload
+            {
+                OwnerAddress = _web.Address, Name = "Web vault", Description = "e2e", Ticker = "VBTC", CeremonyId = ceremony, Timestamp = now, UniqueId = unique, OwnerSignature = signedRequest,
+            }), _web, _api.SendRawCreateContractTx);
+            await MineOne(TransactionType.VBTC_V2_CONTRACT_CREATE);
+            await DepositOnBitcoin(BtcAttestStore.ScriptRowForVault(ceremony)!.DepositAddress, sats);
+            return ceremony;
+        }
+
+        /// <summary>
+        /// From Globals.VaultMinimumPositionHeight a transfer under a watched vault's smallest position (0.0001 vBTC) is
+        /// refused when it is sent, with the rule's reason, on the local path and the raw path, single and multi. The
+        /// producer applies the rule and every block does: before, such a transfer was answered "broadcast successfully" and
+        /// then left out of every block, for as long as it waited. One at the minimum is sent and mined on every path.
+        /// </summary>
+        [Fact]
+        public async Task ATransferUnderTheVaultMinimum_IsRefusedWhenSent_OnBothPaths_AndOneAtTheMinimumIsMined()
+        {
+            var gate = Globals.VaultMinimumPositionHeight;
+            var multiGate = Globals.V2TransferMultiHeight;
+            try
+            {
+                await Start();
+                Globals.VaultMinimumPositionHeight = H1;
+                Globals.V2TransferMultiHeight = 1; // as on testnet
+
+                var local = CompletedCeremony(Minter);
+                Ok(await _api.CreateVBTCContract(new VBTCContractPayload { OwnerAddress = Minter.Address, Name = "Local vault", Description = "e2e", CeremonyId = local }));
+                await MineOne(TransactionType.VBTC_V2_CONTRACT_CREATE);
+                await DepositOnBitcoin(BtcAttestStore.ScriptRowForVault(local)!.DepositAddress, 100_000);
+                var first = await WebVault(100_000);
+                var second = await WebVault(100_000);
+
+                // Under the minimum: refused on every path, and nothing waits in the mempool.
+                RefusedForThePosition(JObject.Parse(await _api.TransferVBTC(new VBTCTransferPayload { SmartContractUID = local, FromAddress = Minter.Address, ToAddress = _localHolder.Address, Amount = 0.00002M })),
+                    "moves at least 0.0001 vBTC");
+                RefusedForThePosition(await TrySend(await _api.GetRawTransferVBTCData(new VBTCTransferPayload { SmartContractUID = first, FromAddress = _web.Address, ToAddress = _webHolder.Address, Amount = 0.00009M }),
+                    _web, _api.SendRawTransferVBTCTx), "moves at least 0.0001 vBTC");
+                RefusedForThePosition(await TrySend(await _api.GetRawTransferVBTCMultiData(new VBTCTransferMultiRawPayload
+                {
+                    FromAddress = _web.Address, ToAddress = _webHolder.Address, TotalAmount = 0.00021M,
+                    Inputs = new List<VBTCV2MultiTransferInput> { new() { SCUID = first, Amount = 0.0002M }, new() { SCUID = second, Amount = 0.00001M } },
+                }), _web, _api.SendRawTransferVBTCTx), second);
+                Assert.Empty(TransactionData.GetPool().FindAll());
+
+                // At the minimum: sent, chosen by the producer and mined, on every path.
+                Ok(await _api.TransferVBTC(new VBTCTransferPayload { SmartContractUID = local, FromAddress = Minter.Address, ToAddress = _localHolder.Address, Amount = 0.0001M }));
+                await MineOne(TransactionType.VBTC_V2_TRANSFER);
+                await SignAndSend(await _api.GetRawTransferVBTCData(new VBTCTransferPayload { SmartContractUID = first, FromAddress = _web.Address, ToAddress = _webHolder.Address, Amount = 0.0001M }),
+                    _web, _api.SendRawTransferVBTCTx);
+                await MineOne(TransactionType.VBTC_V2_TRANSFER);
+                await SignAndSend(await _api.GetRawTransferVBTCMultiData(new VBTCTransferMultiRawPayload
+                {
+                    FromAddress = _web.Address, ToAddress = _webHolder.Address, TotalAmount = 0.0003M,
+                    Inputs = new List<VBTCV2MultiTransferInput> { new() { SCUID = first, Amount = 0.0001M }, new() { SCUID = second, Amount = 0.0002M } },
+                }), _web, _api.SendRawTransferVBTCTx);
+                await MineOne(TransactionType.VBTC_V2_TRANSFER);
+                Assert.Equal(0.0001M, await Balance(_localHolder.Address, local));
+                Assert.Equal(0.0002M, await Balance(_webHolder.Address, first));
+                Assert.Equal(0.0002M, await Balance(_webHolder.Address, second));
+
+                // A holder that would keep less than the minimum is refused when it sends too; sending all of it is not.
+                RefusedForThePosition(await TrySend(await _api.GetRawTransferVBTCData(new VBTCTransferPayload { SmartContractUID = first, FromAddress = _webHolder.Address, ToAddress = _web.Address, Amount = 0.00015M }),
+                    _webHolder, _api.SendRawTransferVBTCTx), "keeps nothing or at least 0.0001 vBTC");
+                await SignAndSend(await _api.GetRawTransferVBTCData(new VBTCTransferPayload { SmartContractUID = first, FromAddress = _webHolder.Address, ToAddress = _web.Address, Amount = 0.0002M }),
+                    _webHolder, _api.SendRawTransferVBTCTx);
+                await MineOne(TransactionType.VBTC_V2_TRANSFER);
+                Assert.Equal(0M, await Balance(_webHolder.Address, first));
+            }
+            finally { Globals.VaultMinimumPositionHeight = gate; Globals.V2TransferMultiHeight = multiGate; }
+        }
+
         // ── A vault moved to a new key, then used both ways ──────────────────────────────────
 
         [Fact]
