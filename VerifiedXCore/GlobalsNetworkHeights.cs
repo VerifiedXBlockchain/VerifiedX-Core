@@ -89,6 +89,66 @@ namespace VerifiedXCore
             Globals.VreeActivationHeight = Globals.IsTestNet ? Globals.VreeActivationTestnetHeight : Globals.VreeActivationHeight;
             Globals.BaseBridgeV4Height = Globals.IsTestNet ? Globals.BaseBridgeV4TestnetHeight : Globals.BaseBridgeV4Height;
             if (Globals.IsTestNet) Globals.ShieldedSupplyCorrections.Clear(); // the testnet pool was never forged against
+            if (Globals.IsCustomTestNet) ApplyCustomTestNetHeights();
+        }
+
+        /// <summary>
+        /// The block by which every rule is active on a custom testnet (Marigold). Such a chain starts from genesis, so
+        /// the heights the live testnet staged later (7,400, 107,700, 152,000, 205,615: that chain was already running)
+        /// start here instead: the last of the genesis-staged heights (bonds 399, fund-loss rules 400, Bitcoin
+        /// attestation 401). The heights at or below it keep their testnet values. VrfSeedHeight here puts the first
+        /// epoch's anchor at block 301: a validator produces from 401 only if registered before block 301.
+        /// </summary>
+        public const long CustomTestNetRulesHeight = BitcoinAttestationTestnetHeight;
+
+        /// <summary>
+        /// The custom testnet's heights, over the testnet ones. Config.ProcessConfig selects a custom testnet after
+        /// Program.cs and the Warden first apply the heights, so it applies them again once it has.
+        /// </summary>
+        private static void ApplyCustomTestNetHeights()
+        {
+            const long h = CustomTestNetRulesHeight;
+            Globals.TXHeightRule3 = h;
+            // Testnet 7,400 (LedgerRulesBatchTestnetHeight)
+            Globals.ReserveRecoverReadsEveryRowHeight = h;
+            Globals.VbtcEnvelopeRulesHeight = h;
+            Globals.ReserveNonTransferAmountHeight = h;
+            Globals.FeeBelowOneVfxHeight = h;
+            Globals.OneMovePerContractHeight = h;
+            Globals.VrfSeedHeight = h;
+            Globals.TxHashGuardByTimeHeight = h;
+            Globals.DataOwnerBoundHeight = h;
+            Globals.TokenTransferRecipientFirstHeight = h;
+            Globals.AdnrNameGrammarHeight = h;
+            Globals.TokenMintRulesHeight = h;
+            Globals.BlockTransactionCapHeight = h;
+            Globals.FractionalAmountRehashHeight = h;
+            Globals.RecipientNetworkByteHeight = h;
+            Globals.VoteTopicRulesHeight = h;
+            Globals.TopicAddDeterministicHeight = h;
+            Globals.LegacyNameReservedHeight = h;
+            Globals.EvolveRulesHeight = h;
+            Globals.ShieldSpendsNothingHeight = h;
+            Globals.SignerAgeFromEpochZeroHeight = h;
+            Globals.ContractPayloadArrayHeight = h;
+            Globals.BtcNameOneRecordPerAddressHeight = h;
+            Globals.BtcNameSignerOwnsAddressHeight = h;
+            // Testnet 107,700
+            Globals.VreeActivationHeight = h;
+            // Testnet 152,000
+            Globals.ContractBodyLimitsHeight = h;
+            Globals.EvolveSpecificNeedsContractHeight = h;
+            Globals.BridgeVoidKeepsLocksHeight = h;
+            // Testnet 205,615
+            Globals.SaleListingKeyHeight = h;
+            Globals.JsonCommentDataRuleHeight = h;
+            Globals.WithdrawalDestinationRecheckHeight = h;
+            Globals.BridgeFailKeepsLocksHeight = h;
+            Globals.VaultMinimumPositionHeight = h;
+            Globals.SalePaymentSharesHeight = h;
+            Globals.BridgeVoteOncePerCasterHeight = h;
+            Globals.BridgeExitCarriesTotalsHeight = h;
+            Globals.PlonkCurrentRulesHeight = h;
         }
     }
 }

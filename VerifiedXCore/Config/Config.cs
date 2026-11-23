@@ -452,6 +452,8 @@ namespace VerifiedXCore.Config
                         Count = 0,
                         FailCount = 0
                     }).ToList();
+                    // The heights were applied before this config was read; again now, with Marigold's (all rules by 401).
+                    Globals.ApplyNetworkHeights();
                 }
                 else if(config.TestNetName == "someothernet")
                 {
