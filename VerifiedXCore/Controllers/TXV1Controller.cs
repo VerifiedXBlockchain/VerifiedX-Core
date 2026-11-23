@@ -21,12 +21,43 @@ namespace VerifiedXCore.Controllers
     [ApiController]
     public class TXV1Controller : ControllerBase
     {
+        /// <summary>Why a raw transaction's Data is refused: a string that holds a JSON object or array.</summary>
+        internal const string StringifiedDataError =
+            "Data was sent as a string that holds JSON. Send Data as the JSON object or array itself, for example "
+            + "\"Data\": {\"Function\": \"TransferVBTCMultiV2()\", ...}, not \"Data\": \"{\\\"Function\\\": ...}\". "
+            + "A string is encoded a second time, so the node would hash and check it as text, not as the call it holds.";
+
         /// <summary>Raw-transaction Data as the node hashes and stores it: any JSON value as its JSON text, and a JSON
-        /// null as no data, the same as a missing Data (it hashes as empty, not as the text "null").</summary>
-        internal static void RawData(JToken txJToken)
+        /// null as no data, the same as a missing Data (it hashes as empty, not as the text "null"). Returns why the Data
+        /// is refused, or null: a string holding a JSON object or array is written a second time as a JSON string, which
+        /// no rule that reads the call can parse, so it is refused with that reason (a plain TX, whose Data is not read as
+        /// a call, keeps it as before).</summary>
+        internal static string? RawData(JToken txJToken)
         {
             var data = txJToken["Data"];
+            if (data?.Type == JTokenType.String && HoldsJsonContainer((string?)data) && !IsPlainTransfer(txJToken))
+                return StringifiedDataError;
             txJToken["Data"] = data != null && data.Type != JTokenType.Null ? data.ToString(Formatting.None) : null;
+            return null;
+        }
+
+        private static bool HoldsJsonContainer(string? text)
+        {
+            var trimmed = text?.Trim();
+            if (string.IsNullOrEmpty(trimmed) || (trimmed[0] != '{' && trimmed[0] != '['))
+                return false;
+            try
+            {
+                var parsed = JToken.Parse(trimmed);
+                return parsed.Type == JTokenType.Object || parsed.Type == JTokenType.Array;
+            }
+            catch (JsonReaderException) { return false; }
+        }
+
+        private static bool IsPlainTransfer(JToken txJToken)
+        {
+            try { return txJToken["TransactionType"]?.ToObject<TransactionType?>() == TransactionType.TX; }
+            catch (Exception) { return false; }
         }
 
         /// <summary>
@@ -843,7 +874,9 @@ namespace VerifiedXCore.Controllers
             {
                 var txJToken = JToken.Parse(jsonData.ToString());
                 Type type = typeof(string);
-                RawData(txJToken);
+                var dataError = RawData(txJToken);
+                if (dataError != null)
+                    return JsonConvert.SerializeObject(new { Result = "Fail", Message = dataError });
                 var tx = JsonConvert.DeserializeObject<Transaction>(txJToken.ToString());
 
                 var nTx = new Transaction
@@ -884,7 +917,9 @@ namespace VerifiedXCore.Controllers
             {
                 var txJToken = JToken.Parse(jsonData.ToString());
                 Type type = typeof(string);
-                RawData(txJToken);
+                var dataError = RawData(txJToken);
+                if (dataError != null)
+                    return JsonConvert.SerializeObject(new { Result = "Fail", Message = dataError });
                 var tx = JsonConvert.DeserializeObject<Transaction>(txJToken.ToString());
 
                 if(tx != null)
@@ -959,7 +994,9 @@ namespace VerifiedXCore.Controllers
             {
                 var txJToken = JToken.Parse(jsonData.ToString());
                 Type type = typeof(string);
-                RawData(txJToken);
+                var dataError = RawData(txJToken);
+                if (dataError != null)
+                    return JsonConvert.SerializeObject(new { Result = "Fail", Message = dataError });
                 var transaction = JsonConvert.DeserializeObject<Transaction>(txJToken.ToString());
 
                 if (transaction != null)
@@ -1007,7 +1044,9 @@ namespace VerifiedXCore.Controllers
             {
                 var txJToken = JToken.Parse(jsonData.ToString());
                 Type type = typeof(string);
-                RawData(txJToken);
+                var dataError = RawData(txJToken);
+                if (dataError != null)
+                    return JsonConvert.SerializeObject(new { Result = "Fail", Message = dataError });
                 var transaction = JsonConvert.DeserializeObject<Transaction>(txJToken.ToString());
                 if (transaction != null)
                 {
