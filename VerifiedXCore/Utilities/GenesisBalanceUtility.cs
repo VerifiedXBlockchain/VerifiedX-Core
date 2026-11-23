@@ -32,6 +32,25 @@
                 }; // Address, Amount in Decimal
             }
 
+            if(Globals.IsCustomTestNet)
+            {
+                balanceSheet = new Dictionary<string, decimal> {
+                    {"xMpa8DxDLdC9SQPcAFBc2vqwyPsoFtrWyC", 1_000_000M}, //bootstrap
+                    {"xBRzJUZiXjE3hkrpzGYMSpYCHU1yPpu8cj", 1_000_000M }, //bootstrap
+                    {"xBRNST9oL8oW6JctcyumcafsnWCVXbzZnr", 1_000_000M }, //bootstrap
+                    {"xEn4oAKHLfHXNSopXWZ7Re7Do8CfZxiiLU",  20_000_000M}, //treasury
+                    {"xBUKu45vK84qGGQymgpoeZ1n9dm461GDut", 5_500M }, //seed-1
+                    {"xMpWeinpFRVLm6ChNEzYBReEcK1fHoonhc", 5_500M }, //seed-2
+                    {"xTKHwN9T5fj8iKiVkuqTxhTiNZPYNBuJzV", 5_500M }, //seed-3
+                    {"x9veDmBtYNmDt8kr6LjUEcUDzKB2snN9wi", 5_500M }, //val-1
+                    {"xX5E83ny8pGCnxPuNLuauz1Q6WfcDY5qJn", 5_500M }, //val-2
+                    {"xARAfDTUYKCUsw7RDnGgDnyHoxZFm15Efo", 5_500M }, //val-3
+                    {"xFc5xE48uGarR6sZPt87f5pCrZzKTfLh2S", 5_500M }, //val-4
+                    {"xRRWKBfqJ9JosVc8UttY7tWxhFACpw5za6", 5_500M }, //val-5
+                    {"xTRAUbnJF2UNTdK1m6FnrnGewSSztCrowL", 5_500M } //val-6
+                };
+            }
+
             return balanceSheet;
         }
         

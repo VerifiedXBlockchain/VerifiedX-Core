@@ -861,8 +861,8 @@ namespace VerifiedXCore.Services
                     {
                         List<Beacons> beaconList = new List<Beacons>
                         {
-                            new Beacons { IPAddress = "144.126.152.4", Name = "Lily Beacon Marigold", Port = Globals.Port + 1 + 20000, BeaconUID = "LilyBeacon", DefaultBeacon = true, AutoDeleteAfterDownload = true, FileCachePeriodDays = 2, IsPrivateBeacon = false, SelfBeacon = false, SelfBeaconActive = false, BeaconLocator = "", Region = 1 },
-                            new Beacons { IPAddress = "207.244.232.182", Name = "Lotus Beacon Marigold", Port = Globals.Port + 1 + 20000, BeaconUID = "LotusBeaconV2", DefaultBeacon = true, AutoDeleteAfterDownload = true, FileCachePeriodDays = 2, IsPrivateBeacon = false, SelfBeacon = false, SelfBeaconActive = false, BeaconLocator = "", Region = 1 },
+                            new Beacons { IPAddress = "3.136.200.172", Name = "Lily Beacon Marigold", Port = Globals.Port + 1 + 20000, BeaconUID = "LilyBeacon", DefaultBeacon = true, AutoDeleteAfterDownload = true, FileCachePeriodDays = 2, IsPrivateBeacon = false, SelfBeacon = false, SelfBeaconActive = false, BeaconLocator = "", Region = 1 },
+                            new Beacons { IPAddress = "3.142.215.167", Name = "Lotus Beacon Marigold", Port = Globals.Port + 1 + 20000, BeaconUID = "LotusBeaconV2", DefaultBeacon = true, AutoDeleteAfterDownload = true, FileCachePeriodDays = 2, IsPrivateBeacon = false, SelfBeacon = false, SelfBeaconActive = false, BeaconLocator = "", Region = 1 },
                         };
 
                         foreach (var beacon in beaconList)

@@ -680,7 +680,7 @@ namespace VerifiedXCore.Config
                     File.AppendAllText(path + "config.txt", Environment.NewLine + "BitcoinAddressFormat=1");
                     // Base Bridge V2 defaults (devnet — Base Sepolia)
                     File.AppendAllText(path + "config.txt", Environment.NewLine + "BaseBridgeRpcUrl=https://sepolia.base.org");
-                    File.AppendAllText(path + "config.txt", Environment.NewLine + "BaseBridgeContract=0x3669EE313f9Aa14b9eBb787DfdB0E97Ca67A0510");
+                    File.AppendAllText(path + "config.txt", Environment.NewLine + "BaseBridgeContract=0x19e41519CE1Dbe9cED703E406B8a6C728D2B7a30");
                     File.AppendAllText(path + "config.txt", Environment.NewLine + "BaseBridgeChainId=84532");
                 }
                 else //testnet
