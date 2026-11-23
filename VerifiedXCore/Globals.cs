@@ -1131,8 +1131,17 @@ namespace VerifiedXCore
         /// <summary>How old the tip must be (seconds) before seed casters treat the chain as stopped and use bootstrap-only paths.</summary>
         public const int BootstrapChainStallThresholdSeconds = 120;
 
-        /// <summary>Hardcoded seed caster addresses (mainnet + testnet). Only these nodes may enter <see cref="IsBootstrapMode"/> when the tip is stale.</summary>
-        public static readonly HashSet<string> BootstrapCasterAddresses = new HashSet<string>(StringComparer.Ordinal)
+        /// <summary>
+        /// Hardcoded seed caster addresses of this network. Only these nodes may enter <see cref="IsBootstrapMode"/> when the
+        /// tip is stale; they also sign the genesis membership record and are the bridge's fallback committee. A custom
+        /// testnet (Marigold) has its own list: it shares the 'x' prefix with the live testnet, and the fallback committee
+        /// (BridgeCasterConsensus.SeedCommitteeForNetwork) tells the networks apart by prefix only, so one list holding both
+        /// would raise each network's vote threshold above what its own three seeds can reach.
+        /// </summary>
+        public static HashSet<string> BootstrapCasterAddresses => IsCustomTestNet ? CustomTestNetBootstrapCasterAddresses : MainAndTestNetBootstrapCasterAddresses;
+
+        /// <summary>Mainnet ('R') and live testnet ('x') seed casters.</summary>
+        private static readonly HashSet<string> MainAndTestNetBootstrapCasterAddresses = new HashSet<string>(StringComparer.Ordinal)
         {
             "RK28ywrBfEXV5EuARn3etyVXMtcmywNxnM",
             "RFoKrASMr19mg8S71Lf1F2suzxahG5Yj4N",
@@ -1140,6 +1149,14 @@ namespace VerifiedXCore
             "xBRzJUZiXjE3hkrpzGYMSpYCHU1yPpu8cj",
             "xMpa8DxDLdC9SQPcAFBc2vqwyPsoFtrWyC",
             "xCkUC4rrh2AnfNf78D5Ps83pMywk5vrwpi",
+        };
+
+        /// <summary>Marigold (custom testnet) seed casters: the seeds in SeedNodeService.GetBootstrapSeedPeers for that network.</summary>
+        private static readonly HashSet<string> CustomTestNetBootstrapCasterAddresses = new HashSet<string>(StringComparer.Ordinal)
+        {
+            "xBUKu45vK84qGGQymgpoeZ1n9dm461GDut",
+            "xMpWeinpFRVLm6ChNEzYBReEcK1fHoonhc",
+            "xTKHwN9T5fj8iKiVkuqTxhTiNZPYNBuJzV",
         };
 
         /// <summary>True if this node’s validating address is one of the seed casters.</summary>
