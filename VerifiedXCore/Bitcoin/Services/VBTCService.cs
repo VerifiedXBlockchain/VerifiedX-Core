@@ -988,6 +988,8 @@ namespace VerifiedXCore.Bitcoin.Services
         public const int MaxMultiTransferInputs = 25;
 
         private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, (string ScUid, decimal Amount)[]> _outflowsByData = new(StringComparer.Ordinal);
+        /// <summary>The same, read by the strict Data reader (from Globals.StrictDataReaderHeight).</summary>
+        private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, (string ScUid, decimal Amount)[]> _strictOutflowsByData = new(StringComparer.Ordinal);
 
         /// <summary>Data longer than this is read each time, not remembered (an honest 25-input transfer is about 3 KB).</summary>
         internal const int MaxRememberedOutflowData = 4096;
@@ -1009,23 +1011,29 @@ namespace VerifiedXCore.Bitcoin.Services
         /// single — that matches how pre-gate nodes validate/apply it, and post-gate the
         /// validator rejects the hybrid shape outright. Empty list on parse failure.
         /// </para>
+        /// <para>
+        /// Read at <paramref name="height"/> (the block being validated, or the next block at admission when null): from
+        /// Globals.StrictDataReaderHeight with the strict Data reader, as the validator and the apply read the transfer.
+        /// </para>
         /// </summary>
-        public static List<(string ScUid, decimal Amount)> GetVbtcV2TransferOutflows(Transaction tx)
+        public static List<(string ScUid, decimal Amount)> GetVbtcV2TransferOutflows(Transaction tx, long? height = null)
         {
             if (tx == null || tx.TransactionType != TransactionType.VBTC_V2_TRANSFER || string.IsNullOrEmpty(tx.Data))
                 return new List<(string, decimal)>();
+            var strict = ConsensusData.IsStrict(height ?? ((Globals.LastBlock?.Height ?? 0) + 1));
+            var remembered = strict ? _strictOutflowsByData : _outflowsByData;
             if (tx.Data.Length > MaxRememberedOutflowData)
-                return ReadVbtcV2TransferOutflows(tx);
-            if (_outflowsByData.TryGetValue(tx.Data, out var known))
+                return ReadVbtcV2TransferOutflows(tx, strict);
+            if (remembered.TryGetValue(tx.Data, out var known))
                 return known.ToList();
-            var read = ReadVbtcV2TransferOutflows(tx);
-            if (_outflowsByData.Count >= 50_000)
-                _outflowsByData.Clear();
-            _outflowsByData[tx.Data] = read.ToArray();
+            var read = ReadVbtcV2TransferOutflows(tx, strict);
+            if (remembered.Count >= 50_000)
+                remembered.Clear();
+            remembered[tx.Data] = read.ToArray();
             return read;
         }
 
-        private static List<(string ScUid, decimal Amount)> ReadVbtcV2TransferOutflows(Transaction tx)
+        private static List<(string ScUid, decimal Amount)> ReadVbtcV2TransferOutflows(Transaction tx, bool strict)
         {
             var outflows = new List<(string, decimal)>();
             try
@@ -1033,13 +1041,13 @@ namespace VerifiedXCore.Bitcoin.Services
                 if (tx.TransactionType != TransactionType.VBTC_V2_TRANSFER || string.IsNullOrEmpty(tx.Data))
                     return outflows;
 
-                var jobj = JObject.Parse(tx.Data);
+                var jobj = strict ? ConsensusData.Read(tx.Data) as JObject ?? throw new JsonReaderException("Data is not a JSON object.") : JObject.Parse(tx.Data);
                 var function = jobj["Function"]?.ToObject<string>();
                 var scUID = jobj["ContractUID"]?.ToObject<string>();
 
                 if (function == MultiTransferFunction && string.IsNullOrEmpty(scUID))
                 {
-                    var inputs = jobj["Inputs"]?.ToObject<List<VBTCV2MultiTransferInput>>();
+                    var inputs = jobj["Inputs"] is { } inputsToken ? (strict ? ConsensusData.ToObject<List<VBTCV2MultiTransferInput>>(inputsToken) : inputsToken.ToObject<List<VBTCV2MultiTransferInput>>()) : null;
                     if (inputs != null)
                     {
                         foreach (var input in inputs)
@@ -3407,7 +3415,7 @@ namespace VerifiedXCore.Bitcoin.Services
                     Data = txData
                 };
 
-                unlockTx.Fee = 0.00M;
+                unlockTx.Fee = VerifiedXCore.Services.LedgerIntegrityRules.SpellForNextBlock(0M, legacy: 0.00M);
 
                 // Build and sign
                 unlockTx.Build();
@@ -3505,7 +3513,7 @@ namespace VerifiedXCore.Bitcoin.Services
                     TransactionType = TransactionType.VBTC_V2_BRIDGE_EXIT_TO_BTC,
                     Data = txData
                 };
-                tx.Fee = 0.00M;
+                tx.Fee = VerifiedXCore.Services.LedgerIntegrityRules.SpellForNextBlock(0M, legacy: 0.00M);
                 tx.Build();
                 var privateKey = account.GetPrivKey;
                 var publicKey = account.PublicKey;
@@ -3594,7 +3602,7 @@ namespace VerifiedXCore.Bitcoin.Services
                 };
 
                 // Do NOT call FeeCalcService.CalculateTXFee here — bridge TXs must remain fee-free.
-                completionTx.Fee = 0.00M;
+                completionTx.Fee = VerifiedXCore.Services.LedgerIntegrityRules.SpellForNextBlock(0M, legacy: 0.00M);
                 completionTx.Build();
 
                 var signature = VerifiedXCore.Services.SignatureService.CreateSignature(completionTx.Hash, privateKey, publicKey);
@@ -3690,7 +3698,7 @@ namespace VerifiedXCore.Bitcoin.Services
                     Data = txData
                 };
 
-                failTx.Fee = 0.00M;
+                failTx.Fee = VerifiedXCore.Services.LedgerIntegrityRules.SpellForNextBlock(0M, legacy: 0.00M);
                 failTx.Build();
 
                 var signature = VerifiedXCore.Services.SignatureService.CreateSignature(failTx.Hash, privateKey, publicKey);

@@ -724,6 +724,19 @@ namespace VerifiedXCore
         public const long BridgeExitCarriesTotalsTestnetHeight = 205_615L;
 
         /// <summary>
+        /// From this height a transaction's Amount and Fee each have one accepted spelling, the shortest decimal with at
+        /// least one digit after the point ("1.0", "1.5", "0.00002", "0.0"), on admission and in blocks
+        /// (LedgerIntegrityRules.CanonicalAmountAndFee), and its carried hash is the hash of the values it carries, with no
+        /// re-spelling of a whole or zero Amount (TransactionValidatorService.StandardHashMatches). The hash covers how
+        /// the two are written, so one transaction then has one spelling and one hash. Wallets send the canonical
+        /// spelling before the height: it is accepted at every height.
+        /// Unset (long.MaxValue) on both networks until the release that activates it.
+        /// </summary>
+        public static long CanonicalInputHeight = long.MaxValue;
+        /// <summary>The same height on testnet (GlobalsNetworkHeights).</summary>
+        public const long CanonicalInputTestnetHeight = long.MaxValue;
+
+        /// <summary>
         /// Item 6: a vBTC withdrawal REQUEST may not reuse a (requester, UniqueId, contract) key under which a request was
         /// already mined. The holder chooses UniqueId, nothing in consensus read it, and the row store's save matched on
         /// that key and kept the old row's Amount and destination: a dust request with an old UniqueId reopened a
@@ -784,6 +797,20 @@ namespace VerifiedXCore
         /// </summary>
         public static long PlonkCurrentRulesHeight = long.MaxValue;
         public const long PlonkCurrentRulesTestnetHeight = 205_615L;
+
+        /// <summary>
+        /// From this height a transaction's Data is read by one strict reader, Utilities.ConsensusData: a name used twice
+        /// or in two spellings, a comment, trailing content, a number a decimal cannot hold exactly and any syntax outside
+        /// RFC 8259 are refused, decimals are never read through double and strings are never read as dates. A
+        /// non-private transaction whose Data is a JSON object or array the reader refuses is refused on admission and in
+        /// a block, and the dispatchers and the rules that read a contract call, a token call or a vBTC transfer read it
+        /// with that reader, in validation and in state application alike. Below the height Data is read as before.
+        /// Unset (long.MaxValue) on both networks until the release that activates it.
+        /// </summary>
+        public static long StrictDataReaderHeight = long.MaxValue;
+        /// <summary>The same height on testnet (GlobalsNetworkHeights).</summary>
+        public const long StrictDataReaderTestnetHeight = long.MaxValue;
+
         public static Dictionary<string, decimal> ForgedVfxBurns = new(StringComparer.Ordinal)
         {
             ["RB3eeBH258arkuePCJf5NMVMSaUyhyy9g6"] = 100_033.000012M,

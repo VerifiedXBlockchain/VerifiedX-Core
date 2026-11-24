@@ -187,6 +187,10 @@ namespace VerifiedXCore.Services
                 if (tx.FromAddress != "Coinbase_BlkRwd" && tx.FromAddress != "Coinbase_TrxFees"
                     && LedgerIntegrityRules.CanonicalPreimage(tx) is { } preimageError)
                     return $"transaction {tx.Hash}: {preimageError}";
+                // ... and Amount and Fee one way from the canonical-input height.
+                if (tx.FromAddress != "Coinbase_BlkRwd" && tx.FromAddress != "Coinbase_TrxFees"
+                    && LedgerIntegrityRules.CanonicalAmountAndFee(tx, block.Height) is { } spellingError)
+                    return $"transaction {tx.Hash}: {spellingError}";
 
                 // Sender-less, and no signature covers a reward's amount: the hash only, with its own values.
                 if (tx.FromAddress == "Coinbase_BlkRwd" || tx.FromAddress == "Coinbase_TrxFees")
@@ -250,7 +254,7 @@ namespace VerifiedXCore.Services
                     continue;
                 }
 
-                if (!HashMatchesStrictly(tx))
+                if (!HashMatchesStrictly(tx, block.Height))
                     return $"transaction {tx.Hash} does not hash to its carried hash.";
                 // The recipient and amount are joined in the hash: a whole recipient keeps digits from moving between them.
                 // A name resolves against chain state, and the state in hand is the branch being replaced, so a name is
@@ -275,15 +279,16 @@ namespace VerifiedXCore.Services
         /// <summary>
         /// The standard hash check without its zero-amount fallback for a non-whole amount: VerifyTX re-hashes such an
         /// amount as 0, so a carried fraction passes it against a signature over 0 and is refused only by later rules. Here,
-        /// before a rollback, the amount must be the one that was hashed (or its "N.0" spelling, or a zero amount).
+        /// before a rollback, the amount must be the one that was hashed (or its "N.0" spelling, or a zero amount, below
+        /// the canonical-input height).
         /// </summary>
-        private static bool HashMatchesStrictly(Transaction tx)
+        private static bool HashMatchesStrictly(Transaction tx, long height)
         {
             if (string.Equals(tx.Hash, tx.GetHash(), StringComparison.Ordinal))
                 return true;
             if (tx.Amount % 1 != 0)
                 return false;
-            return TransactionValidatorService.StandardHashMatches(tx);
+            return TransactionValidatorService.StandardHashMatches(tx, height);
         }
 
         /// <summary>Whether AddressValidateUtility.ValidateAddress would look this recipient up as a registered name.</summary>

@@ -76,6 +76,7 @@ namespace VerifiedXCore
             Globals.SalePaymentSharesHeight = Globals.IsTestNet ? Globals.SalePaymentSharesTestnetHeight : Globals.SalePaymentSharesHeight;
             Globals.BridgeVoteOncePerCasterHeight = Globals.IsTestNet ? Globals.BridgeVoteOncePerCasterTestnetHeight : Globals.BridgeVoteOncePerCasterHeight;
             Globals.BridgeExitCarriesTotalsHeight = Globals.IsTestNet ? Globals.BridgeExitCarriesTotalsTestnetHeight : Globals.BridgeExitCarriesTotalsHeight;
+            Globals.CanonicalInputHeight = Globals.IsTestNet ? Globals.CanonicalInputTestnetHeight : Globals.CanonicalInputHeight;
             Globals.WithdrawalUniqueIdRulesHeight = Globals.IsTestNet ? Globals.FundLossAuditTestnetHeight : Globals.WithdrawalUniqueIdRulesHeight;
             Globals.RoyaltyRewriteRulesHeight = Globals.IsTestNet ? Globals.FundLossAuditTestnetHeight : Globals.RoyaltyRewriteRulesHeight;
             Globals.ReserveTokenRulesHeight = Globals.IsTestNet ? Globals.FundLossAuditTestnetHeight : Globals.ReserveTokenRulesHeight;
@@ -84,6 +85,7 @@ namespace VerifiedXCore
             // Privacy stage 2 on testnet: with the fund-loss rules (reset 2026-10-13 from 1,099,400, which had passed).
             Globals.PrivateTxProofRulesHeight = Globals.IsTestNet ? Globals.FundLossAuditTestnetHeight : Globals.PrivateTxProofRulesHeight;
             Globals.PlonkCurrentRulesHeight = Globals.IsTestNet ? Globals.PlonkCurrentRulesTestnetHeight : Globals.PlonkCurrentRulesHeight;
+            Globals.StrictDataReaderHeight = Globals.IsTestNet ? Globals.StrictDataReaderTestnetHeight : Globals.StrictDataReaderHeight;
             // Bitcoin attestation (plan 8.4): observe from the tip of 2026-10-13, record with the fund-loss rules, enforce three days later.
             Globals.BitcoinAttestationObserveHeight = Globals.IsTestNet ? Globals.BitcoinAttestationObserveTestnetHeight : Globals.BitcoinAttestationObserveHeight;
             Globals.BitcoinAttestationRecordHeight = Globals.IsTestNet ? Globals.BitcoinAttestationRecordTestnetHeight : Globals.BitcoinAttestationRecordHeight;
@@ -102,6 +104,15 @@ namespace VerifiedXCore
         /// epoch's anchor at block 301: a validator produces from 401 only if registered before block 301.
         /// </summary>
         public const long CustomTestNetRulesHeight = BitcoinAttestationTestnetHeight;
+
+        /// <summary>
+        /// Rules added after Marigold was already running take effect from this later block, not from
+        /// <see cref="CustomTestNetRulesHeight"/>: a rule dated before the chain's tip would judge blocks that were
+        /// produced under the old rules, so a node syncing Marigold from block 0 would refuse its own history. 8,500 was
+        /// about 1,950 blocks past the tip (6,549) when the input-format rules reached devnet on 2026-11-24, room to
+        /// upgrade every Marigold node first.
+        /// </summary>
+        public const long CustomTestNetInputRulesHeight = 8500;
 
         /// <summary>
         /// The custom testnet's heights, over the testnet ones. Config.ProcessConfig selects a custom testnet after
@@ -151,9 +162,11 @@ namespace VerifiedXCore
             Globals.BridgeVoteOncePerCasterHeight = h;
             Globals.BridgeExitCarriesTotalsHeight = h;
             Globals.PlonkCurrentRulesHeight = h;
-            // Not yet on the live testnet
-            Globals.RawDataVerbatimHeight = h;
-            Globals.ContractBodyKeySpellingHeight = h;
+            // Not yet on the live testnet. Added while Marigold was running, so from a later block (see above).
+            Globals.CanonicalInputHeight = CustomTestNetInputRulesHeight;
+            Globals.RawDataVerbatimHeight = CustomTestNetInputRulesHeight;
+            Globals.StrictDataReaderHeight = CustomTestNetInputRulesHeight;
+            Globals.ContractBodyKeySpellingHeight = CustomTestNetInputRulesHeight;
         }
     }
 }
