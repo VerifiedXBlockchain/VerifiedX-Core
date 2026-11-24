@@ -1142,7 +1142,9 @@ namespace VerifiedXCore.Bitcoin.FROST
                             using var round1Reserved = round1Taken; // held until the commitment is kept
 
                             // FIND-016 Fix: Prevent overwrite - each participant can only submit once per round
-                            if (!session.Round1Commitments.TryAdd(commitment.ValidatorAddress, commitment.CommitmentData))
+                            var round1Kept = session.Round1Commitments.TryAdd(commitment.ValidatorAddress, commitment.CommitmentData);
+                            round1Reserved?.Dispose(); // kept or not, the room taken for it is given back: it is counted as kept now
+                            if (!round1Kept)
                             {
                                 context.Response.StatusCode = StatusCodes.Status409Conflict;
                                 await context.Response.WriteAsync(JsonConvert.SerializeObject(new
@@ -1472,6 +1474,7 @@ namespace VerifiedXCore.Bitcoin.FROST
                             session.GeneratedSharesJson = sealedShares;
                             foreach (var (identifier, ephemeral) in sealEphemerals) session.SealEphemerals[identifier] = ephemeral;
                             FrostSessionStorage.MarkDkgStage(session, FrostSessionStorage.DkgStage.Round2);
+                            round2Reserved?.Dispose(); // stored: it is counted as kept, not also as taken room
                             round2Hold.Dispose(); // stored: the answer is written without the lock (round 14)
 
                             LogUtility.Log($"[FROST] DKG Round 2 shares generated via native library for session {sessionId}", "FrostStartup.DKGRound2");

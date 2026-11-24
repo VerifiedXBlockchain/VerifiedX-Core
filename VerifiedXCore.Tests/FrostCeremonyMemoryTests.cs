@@ -189,8 +189,21 @@ namespace VerifiedXCore.Tests
             Assert.Null(none);
 
             firstRoom!.Dispose();
+            firstRoom.Dispose(); // giving it back twice gives back nothing more
             Assert.Null(FrostSessionStorage.MakeRoomForDkgState(second, share * 3 / 4, now, out var secondRoom));
             secondRoom!.Dispose();
+        }
+
+        [Fact]
+        public void The_start_route_gives_back_taken_room_as_soon_as_the_state_is_kept()
+        {
+            // Production callers: the room is given back where the state is stored, before the answer is written.
+            var source = File.ReadAllText(Path.Combine(RepoRoot(), "VerifiedXCore", "Bitcoin", "FROST", "FrostStartup.cs"));
+            var stored = source.IndexOf("FrostSessionStorage.MarkDkgStage(session, FrostSessionStorage.DkgStage.Round2);", StringComparison.Ordinal);
+            Assert.True(stored > 0);
+            Assert.InRange(source.IndexOf("round2Reserved?.Dispose();", stored, StringComparison.Ordinal) - stored, 1, 200);
+            var kept = source.IndexOf("var round1Kept = session.Round1Commitments.TryAdd", StringComparison.Ordinal);
+            Assert.InRange(source.IndexOf("round1Reserved?.Dispose();", kept, StringComparison.Ordinal) - kept, 1, 200);
         }
 
         [Fact]
