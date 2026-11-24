@@ -966,6 +966,16 @@ namespace VerifiedXCore.Bitcoin.FROST
                             if (superseded > 0)
                                 LogUtility.Log($"[FROST] DKG start for {request.SmartContractUID}: leader {request.LeaderAddress} restarted; superseded {superseded} stale session(s).", "FrostStartup.DKGStart");
 
+                            // What this start keeps (its secret package and own commitment) is counted with every other
+                            // ceremony's state before the session is kept: starts are ceremonies' state too.
+                            if (FrostSessionStorage.MakeRoomForDkgState(session, 0, dkgNow, out var startTaken) is { } startRoom)
+                            {
+                                context.Response.StatusCode = StatusCodes.Status503ServiceUnavailable;
+                                await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = startRoom }));
+                                return;
+                            }
+                            using var startReserved = startTaken; // the session's own state is counted once it is kept
+
                             if (!FrostSessionStorage.NoteDkgStart(request.SessionId, dkgNow) || !FrostSessionStorage.DKGSessions.TryAdd(request.SessionId, session))
                             {
                                 // A copy with other content, unsigned, that got here a moment earlier: the signed start takes its place.

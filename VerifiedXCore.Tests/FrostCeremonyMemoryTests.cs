@@ -202,6 +202,9 @@ namespace VerifiedXCore.Tests
             var stored = source.IndexOf("FrostSessionStorage.MarkDkgStage(session, FrostSessionStorage.DkgStage.Round2);", StringComparison.Ordinal);
             Assert.True(stored > 0);
             Assert.InRange(source.IndexOf("round2Reserved?.Dispose();", stored, StringComparison.Ordinal) - stored, 1, 200);
+            var started = source.IndexOf("FrostSessionStorage.MakeRoomForDkgState(session, 0, dkgNow, out var startTaken)", StringComparison.Ordinal);
+            Assert.True(started > 0); // a start counts what it keeps before the session is kept
+            Assert.True(source.IndexOf("FrostSessionStorage.DKGSessions.TryAdd(request.SessionId, session)", started, StringComparison.Ordinal) > started);
             var kept = source.IndexOf("var round1Kept = session.Round1Commitments.TryAdd", StringComparison.Ordinal);
             Assert.InRange(source.IndexOf("round1Reserved?.Dispose();", kept, StringComparison.Ordinal) - kept, 1, 200);
         }
