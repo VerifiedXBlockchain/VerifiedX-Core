@@ -3608,11 +3608,12 @@ namespace VerifiedXCore.Bitcoin.FROST
                                 return;
                             }
 
-                            // Size limit: 16 KB for encrypted blob
-                            if (encryptedBlob.Length > 16 * 1024)
+                            // Each field is held to what the owner's node writes, before anything is looked up: what is
+                            // stored, logged and later sent back is then a few KB a backup, whoever sent it.
+                            if (FrostPeerKeyBackup.FieldRefusal(ownerAddress, smartContractUID, encryptedBlob, plaintextHash, request["GroupPublicKey"]?.ToString()) is { } fieldRefusal)
                             {
                                 context.Response.StatusCode = StatusCodes.Status400BadRequest;
-                                await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = "EncryptedBlob exceeds 16 KB limit" }));
+                                await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = fieldRefusal }));
                                 return;
                             }
 
@@ -3769,7 +3770,16 @@ namespace VerifiedXCore.Bitcoin.FROST
                             }
 
                             // Retrieve all stored backups for this owner
-                            var backups = FrostPeerKeyBackup.GetBackupsForOwner(requesterAddress);
+                            var backups = FrostPeerKeyBackup.GetBackupsForOwnerWithinLimits(requesterAddress);
+                            // The answer is held while it is sent: answers in progress are bounded for each network and in all.
+                            using var answerPlace = FrostPeerKeyBackup.AnswersInProgress.Hold(
+                                VerifiedXCore.Utilities.RemoteIp.Group(context.Connection.RemoteIpAddress) ?? "", FrostPeerKeyBackup.AnswerBytes(backups), null);
+                            if (!answerPlace.Granted)
+                            {
+                                context.Response.StatusCode = StatusCodes.Status503ServiceUnavailable;
+                                await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = "Busy with other requests; ask again." }));
+                                return;
+                            }
 
                             var backupItems = backups.Select(b => new
                             {

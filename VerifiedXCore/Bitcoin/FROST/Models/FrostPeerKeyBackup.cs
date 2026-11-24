@@ -60,6 +60,71 @@ namespace VerifiedXCore.Bitcoin.FROST.Models
         /// </summary>
         public const long StaleGraceSeconds = 30L * 24 * 60 * 60;
 
+        /// <summary>An owner's address and a contract or ceremony id are at most as long as a ceremony's ids.</summary>
+        public const int MaxIdChars = FrostSessionStorage.MAX_SESSION_ID_LENGTH;
+        /// <summary>The encrypted key package, as the owner's node sends it.</summary>
+        public const int MaxBlobChars = 16 * 1024;
+        /// <summary>The plaintext hash is a SHA-256 in hex.</summary>
+        public const int PlaintextHashChars = 64;
+        /// <summary>A group public key in hex, compressed or not, as some nodes write it with a 0x in front.</summary>
+        public const int MaxGroupKeyChars = 132;
+
+        /// <summary>
+        /// Recovery answers this node is sending at once, counted at about what serving one holds (its rows as read and
+        /// the answer written from them), for the network the request came from and for the node. A request signed once
+        /// could be sent many times at once, each answer held while a slow reader took it. One that does not fit is
+        /// answered 503 and may be asked again; an answer for one network never waits on another's.
+        /// </summary>
+        internal static readonly BoundedJsonBodies.BodiesInProgress AnswersInProgress = new(perSource: 32L * 1024 * 1024, total: 128L * 1024 * 1024);
+
+        /// <summary>About what serving <paramref name="backups"/> in one answer holds: each row as read, and as written.</summary>
+        internal static long AnswerBytes(IEnumerable<FrostPeerKeyBackup> backups) =>
+            backups.Sum(b => 4L * ((long)b.EncryptedBlob.Length + b.SmartContractUID.Length + b.PlaintextHash.Length + 64));
+
+        /// <summary>
+        /// Why a backup with these fields is not kept, or null. Each field is held to what the owner's node writes: a row
+        /// is then at most about 16 KB, whoever sent it.
+        /// </summary>
+        public static string? FieldRefusal(string? ownerAddress, string? smartContractUID, string? encryptedBlob, string? plaintextHash, string? groupPublicKey)
+        {
+            if ((ownerAddress?.Length ?? 0) > MaxIdChars) return $"The owner address is longer than {MaxIdChars} characters.";
+            if ((smartContractUID?.Length ?? 0) > MaxIdChars) return $"The contract id is longer than {MaxIdChars} characters.";
+            if ((encryptedBlob?.Length ?? 0) > MaxBlobChars) return "EncryptedBlob exceeds 16 KB limit";
+            if (!string.IsNullOrEmpty(plaintextHash) && (plaintextHash.Length != PlaintextHashChars || !IsHex(plaintextHash)))
+                return "PlaintextHash is not a SHA-256 in hex.";
+            if (!string.IsNullOrEmpty(groupPublicKey) && (groupPublicKey.Length > MaxGroupKeyChars
+                    || !IsHex(groupPublicKey.StartsWith("0x", StringComparison.OrdinalIgnoreCase) ? groupPublicKey.Substring(2) : groupPublicKey)))
+                return "GroupPublicKey is not a public key in hex.";
+            return null;
+        }
+
+        private static bool IsHex(string text)
+        {
+            foreach (var c in text)
+                if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F'))) return false;
+            return true;
+        }
+
+        /// <summary>
+        /// The owner's backups whose fields are within <see cref="FieldRefusal"/>. A row kept before those limits that
+        /// exceeds them is deleted here: it was not what the owner's node writes.
+        /// </summary>
+        public static List<FrostPeerKeyBackup> GetBackupsForOwnerWithinLimits(string ownerAddress)
+        {
+            var kept = new List<FrostPeerKeyBackup>();
+            foreach (var backup in GetBackupsForOwner(ownerAddress))
+            {
+                if (FieldRefusal(backup.OwnerAddress, backup.SmartContractUID, backup.EncryptedBlob, backup.PlaintextHash, backup.GroupPublicKey) == null)
+                {
+                    kept.Add(backup);
+                    continue;
+                }
+                try { GetDb().Delete(backup.Id); }
+                catch (Exception ex) { ErrorLogUtility.LogError($"Deleting an over-long FROST peer backup failed: {ex.Message}", "FrostPeerKeyBackup.GetBackupsForOwnerWithinLimits"); }
+            }
+            return kept;
+        }
+
         #region Database Methods
 
         private static ILiteCollection<FrostPeerKeyBackup> GetDb()
