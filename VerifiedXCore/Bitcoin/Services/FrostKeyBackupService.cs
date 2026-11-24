@@ -81,22 +81,23 @@ namespace VerifiedXCore.Bitcoin.Services
                     return (null, null);
                 }
 
-                // Derive deterministic nonce from encryption key + contract UID
-                var nonce = DeriveNonce(encryptionKey, smartContractUID);
-
-                // Encrypt with AES-256-GCM
+                // A fresh random nonce for every encryption, kept with the blob. The nonce used to be derived from the key and
+                // the contract UID alone, so two encryptions under one UID (a UID used again for another key) reused it:
+                // the two ciphertexts then gave away each other's plaintext, and the key that authenticates them.
+                var nonce = System.Security.Cryptography.RandomNumberGenerator.GetBytes(NonceBytes);
                 var ciphertext = new byte[plaintextBytes.Length];
                 var tag = new byte[16]; // GCM tag is 16 bytes
 
                 // CrossPlatformAesGcm: AesGcm is not supported on macOS under .NET 6; the managed fallback writes the same format.
-                VerifiedXCore.Privacy.CrossPlatformAesGcm.Encrypt(encryptionKey, nonce, plaintextBytes, ciphertext, tag, null);
+                VerifiedXCore.Privacy.CrossPlatformAesGcm.Encrypt(encryptionKey, nonce, plaintextBytes, ciphertext, tag, BlobBinding(smartContractUID));
 
-                // Combine tag + ciphertext for storage (tag first for easy extraction on decrypt)
-                var combined = new byte[tag.Length + ciphertext.Length];
-                Buffer.BlockCopy(tag, 0, combined, 0, tag.Length);
-                Buffer.BlockCopy(ciphertext, 0, combined, tag.Length, ciphertext.Length);
+                // nonce, tag, ciphertext; marked as this form so a blob of the earlier form is still read as before
+                var combined = new byte[nonce.Length + tag.Length + ciphertext.Length];
+                Buffer.BlockCopy(nonce, 0, combined, 0, nonce.Length);
+                Buffer.BlockCopy(tag, 0, combined, nonce.Length, tag.Length);
+                Buffer.BlockCopy(ciphertext, 0, combined, nonce.Length + tag.Length, ciphertext.Length);
 
-                var encryptedBlob = Convert.ToBase64String(combined);
+                var encryptedBlob = RandomNonceBlobPrefix + Convert.ToBase64String(combined);
 
                 // Clear sensitive data
                 Array.Clear(encryptionKey, 0, encryptionKey.Length);
@@ -119,6 +120,10 @@ namespace VerifiedXCore.Bitcoin.Services
         {
             try
             {
+                if (encryptedBlob.StartsWith(RandomNonceBlobPrefix, StringComparison.Ordinal))
+                    return DecryptRandomNonceBlob(validatorAddress, smartContractUID, encryptedBlob.Substring(RandomNonceBlobPrefix.Length));
+
+                // A blob of the earlier form: its nonce is derived from the key and the contract UID.
                 var combined = Convert.FromBase64String(encryptedBlob);
                 if (combined.Length < 17) // minimum: 16-byte tag + 1 byte ciphertext
                 {
@@ -206,10 +211,52 @@ namespace VerifiedXCore.Bitcoin.Services
             }
         }
 
+        /// <summary>Marks a blob written with a random nonce: <c>v2:</c> then base64 of nonce, tag and ciphertext.</summary>
+        public const string RandomNonceBlobPrefix = "v2:";
+        private const int NonceBytes = 12;
+
+        /// <summary>What a blob is bound to besides its key: the contract it backs up, so it decrypts under no other UID.</summary>
+        private static byte[] BlobBinding(string smartContractUID) => Encoding.UTF8.GetBytes("vfx-frost-backup|" + smartContractUID);
+
+        private static FrostKeyBackupPlaintext? DecryptRandomNonceBlob(string validatorAddress, string smartContractUID, string base64)
+        {
+            var combined = Convert.FromBase64String(base64);
+            if (combined.Length < NonceBytes + 16 + 1) return null;
+            var nonce = combined.AsSpan(0, NonceBytes).ToArray();
+            var tag = combined.AsSpan(NonceBytes, 16).ToArray();
+            var ciphertext = combined.AsSpan(NonceBytes + 16).ToArray();
+            var encryptionKey = DeriveEncryptionKey(validatorAddress);
+            if (encryptionKey == null) return null;
+            try
+            {
+                var plaintext = new byte[ciphertext.Length];
+                VerifiedXCore.Privacy.CrossPlatformAesGcm.Decrypt(encryptionKey, nonce, ciphertext, tag, plaintext, BlobBinding(smartContractUID));
+                return JsonConvert.DeserializeObject<FrostKeyBackupPlaintext>(Encoding.UTF8.GetString(plaintext));
+            }
+            catch (CryptographicException)
+            {
+                LogUtility.Log("[FROST Backup] Decryption failed: GCM authentication tag mismatch (tampered or wrong key)", "FrostKeyBackupService.DecryptKeyPackage");
+                return null;
+            }
+            finally { Array.Clear(encryptionKey, 0, encryptionKey.Length); }
+        }
+
         /// <summary>
-        /// Derive a deterministic 12-byte nonce from the encryption key and contract UID.
-        /// nonce = first 12 bytes of HMAC-SHA256(encryption_key, smartContractUID)
-        /// Safe because each (key, contractUID) pair is unique and never reused with different plaintext.
+        /// Why a decrypted backup is not restored, or null: its group key is not the key the chain records for its
+        /// contract. A blob that decrypts is not enough when an earlier form's reused nonce may have given its key away.
+        /// </summary>
+        internal static string? GroupKeyRefusal(string smartContractUID, string? groupPublicKey)
+        {
+            var onChain = VerifiedXCore.Bitcoin.FROST.FrostDkgGuard.ResolveOnChainGroupPublicKey(smartContractUID);
+            if (string.IsNullOrEmpty(onChain)) return null; // an id that names no contract yet: nothing on chain to judge by
+            return string.Equals(VerifiedXCore.Bitcoin.FROST.FrostKeyShareBinding.NormalizeKey(onChain),
+                    VerifiedXCore.Bitcoin.FROST.FrostKeyShareBinding.NormalizeKey(groupPublicKey), StringComparison.Ordinal)
+                ? null : $"the backup's group key is not the key the chain records for {smartContractUID}";
+        }
+
+        /// <summary>
+        /// The nonce of a blob of the earlier form: the first 12 bytes of HMAC-SHA256(encryption key, contract UID). It is
+        /// only read now: two encryptions under one UID reused it.
         /// </summary>
         private static byte[] DeriveNonce(byte[] encryptionKey, string smartContractUID)
         {
@@ -616,6 +663,12 @@ namespace VerifiedXCore.Bitcoin.Services
                         {
                             LogUtility.Log($"[FROST Backup] Failed to decrypt backup for contract {backup.SmartContractUID} — skipping (may be tampered)",
                                 "FrostKeyBackupService.RecoverKeysFromPeers");
+                            continue;
+                        }
+
+                        if (GroupKeyRefusal(backup.SmartContractUID, plaintext.GroupPublicKey) is { } keyRefusal)
+                        {
+                            LogUtility.Log($"[FROST Backup] Not restoring a backup for {backup.SmartContractUID}: {keyRefusal}", "FrostKeyBackupService.RecoverKeysFromPeers");
                             continue;
                         }
 
