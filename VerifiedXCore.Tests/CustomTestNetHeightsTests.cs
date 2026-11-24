@@ -97,6 +97,20 @@ namespace VerifiedXCore.Tests
             Assert.Equal(Globals.FundLossAuditTestnetHeight - 1, Globals.ValidatorBondHeight);
             Assert.Equal(Globals.FundLossAuditTestnetHeight, Globals.PrivateTxProofRulesHeight);
             Assert.Equal(Globals.BitcoinAttestationTestnetHeight, Globals.BitcoinAttestationHeight);
+            // Not yet on the live testnet or mainnet, active here.
+            Assert.Equal(401, Globals.RawDataVerbatimHeight);
+        }
+
+        [Fact]
+        public void RawDataVerbatim_IsUnsetOnMainnetAndTheLiveTestnet()
+        {
+            Globals.IsTestNet = false;
+            Globals.IsCustomTestNet = false;
+            Globals.ApplyNetworkHeights();
+            Assert.Equal(long.MaxValue, Globals.RawDataVerbatimHeight);
+
+            StartTestnetNode(new Config.Config { TestNet = true });
+            Assert.Equal(long.MaxValue, Globals.RawDataVerbatimHeight);
         }
 
         [Fact]

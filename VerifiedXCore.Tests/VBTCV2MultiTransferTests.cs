@@ -425,7 +425,7 @@ namespace VerifiedXCore.Tests
 
             var applyMulti = typeof(StateData).GetMethod("TransferVBTCV2Multi", BindingFlags.NonPublic | BindingFlags.Static);
             Assert.NotNull(applyMulti);
-            applyMulti!.Invoke(null, new object[] { tx });
+            applyMulti!.Invoke(null, new object[] { tx, tx.Height });
 
             foreach (var (scUid, amount, priorBalance) in new[] { ("multiapply:1", 0.4M, 0.5M), ("multiapply:2", 0.2M, 0.3M) })
             {

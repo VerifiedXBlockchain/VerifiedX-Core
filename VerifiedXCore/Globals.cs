@@ -451,6 +451,17 @@ namespace VerifiedXCore
         public const long VaultMinimumPositionTestnetHeight = 205_615L;
 
         /// <summary>
+        /// From this height (the next block's, as the API sees the tip) the raw-transaction routes keep a Data sent as a
+        /// JSON object or array exactly as it appears in the request body: the same text is hashed and stored, with no
+        /// re-serialization. Below it the node writes such a Data back in its own form (numbers through double, whitespace
+        /// removed, escapes decoded, date-like strings in the node's time zone), which clients that check the node's hash
+        /// mirror today. Not a block rule: the stored Data is what was hashed either way. Unset (long.MaxValue) on both
+        /// networks until the release that activates it. Testnet value in GlobalsNetworkHeights.
+        /// </summary>
+        public static long RawDataVerbatimHeight = long.MaxValue;
+        public const long RawDataVerbatimTestnetHeight = long.MaxValue;
+
+        /// <summary>
         /// From this height a reserve's Recover() reads each pending NFT_TX row's call as the dispatchers read it. Below it
         /// a row whose Data was not an array of objects made the recovery throw part-way, so every later row, the balance
         /// sweep, the contract re-own and the vBTC sweep never ran, and the reserve stayed under its vault key. Active from LedgerRulesBatchHeight.
@@ -775,6 +786,20 @@ namespace VerifiedXCore
         /// </summary>
         public static long PlonkCurrentRulesHeight = long.MaxValue;
         public const long PlonkCurrentRulesTestnetHeight = 205_615L;
+
+        /// <summary>
+        /// From this height a transaction's Data is read by one strict reader, Utilities.ConsensusData: a name used twice
+        /// or in two spellings, a comment, trailing content, a number a decimal cannot hold exactly and any syntax outside
+        /// RFC 8259 are refused, decimals are never read through double and strings are never read as dates. A
+        /// non-private transaction whose Data is a JSON object or array the reader refuses is refused on admission and in
+        /// a block, and the dispatchers and the rules that read a contract call, a token call or a vBTC transfer read it
+        /// with that reader, in validation and in state application alike. Below the height Data is read as before.
+        /// Unset (long.MaxValue) on both networks until the release that activates it.
+        /// </summary>
+        public static long StrictDataReaderHeight = long.MaxValue;
+        /// <summary>The same height on testnet (GlobalsNetworkHeights).</summary>
+        public const long StrictDataReaderTestnetHeight = long.MaxValue;
+
         public static Dictionary<string, decimal> ForgedVfxBurns = new(StringComparer.Ordinal)
         {
             ["RB3eeBH258arkuePCJf5NMVMSaUyhyy9g6"] = 100_033.000012M,

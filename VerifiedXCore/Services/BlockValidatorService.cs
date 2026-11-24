@@ -1217,7 +1217,7 @@ namespace VerifiedXCore.Services
                         List<(string ScUid, decimal Amount)> VbtcOutflows(Transaction t)
                         {
                             if (!vbtcOutflowsOf.TryGetValue(t, out var known))
-                                vbtcOutflowsOf[t] = known = Bitcoin.Services.VBTCService.GetVbtcV2TransferOutflows(t);
+                                vbtcOutflowsOf[t] = known = Bitcoin.Services.VBTCService.GetVbtcV2TransferOutflows(t, block.Height);
                             return known;
                         }
 

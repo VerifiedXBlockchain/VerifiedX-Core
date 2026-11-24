@@ -542,14 +542,23 @@ namespace VerifiedXCore.Data
                             string function = "";
                             bool skip = false;
                             JToken? scData = null;
+                            if (ConsensusData.IsStrict(block.Height))
+                            {
+                                // Read by the strict reader, as validation reads it (LedgerIntegrityRules.DispatchedCall).
+                                (function, scUID) = LedgerIntegrityRules.DispatchedCall(tx.Data, block.Height);
+                                skip = true;
+                            }
                             try
                             {
-                                var scDataArray = JsonConvert.DeserializeObject<JArray>(tx.Data);
-                                scData = scDataArray[0];
+                                if (!skip)
+                                {
+                                    var scDataArray = JsonConvert.DeserializeObject<JArray>(tx.Data);
+                                    scData = scDataArray[0];
 
-                                function = (string?)scData["Function"];
-                                scUID = (string?)scData["ContractUID"];
-                                skip = true;
+                                    function = (string?)scData["Function"];
+                                    scUID = (string?)scData["ContractUID"];
+                                    skip = true;
+                                }
                             }
                             catch { }
 
@@ -569,27 +578,27 @@ namespace VerifiedXCore.Data
                                 switch (function)
                                 {
                                     case "Mint()":
-                                        AddNewlyMintedContract(tx);
+                                        AddNewlyMintedContract(tx, block.Height);
                                         // A vault created from the recording height on has its deposit script watched.
                                         VerifiedXCore.Bitcoin.Attestation.BtcAttestApply.RegisterVaultIfAny(scUID, block.Height);
                                         break;
                                     case "Update()":
-                                        UpdateSmartContract(tx);
+                                        UpdateSmartContract(tx, block.Height);
                                         break;
                                     case "Transfer()":
-                                        TransferSmartContract(tx);
+                                        TransferSmartContract(tx, block.Height);
                                         break;
                                     case "Burn()":
                                         BurnSmartContract(tx, block.Height);
                                         break;
                                     case "Evolve()":
-                                        EvolveSC(tx);
+                                        EvolveSC(tx, block.Height);
                                         break;
                                     case "Devolve()":
-                                        DevolveSC(tx);
+                                        DevolveSC(tx, block.Height);
                                         break;
                                     case "ChangeEvolveStateSpecific()":
-                                        EvolveDevolveSpecific(tx);
+                                        EvolveDevolveSpecific(tx, block.Height);
                                         break;
                                     case "TokenDeploy()":
                                         // VX-02: awaited. It was fire-and-forget, so a later TX in the same
@@ -603,25 +612,25 @@ namespace VerifiedXCore.Data
                                         await TokenTransfer(tx, block); // NEW-12: awaited (ran concurrently with the rest of the block)
                                         break;
                                     case "TokenMint()":
-                                        await TokenMint(tx); // NEW-12: awaited (ran concurrently with the rest of the block)
+                                        await TokenMint(tx, block.Height); // NEW-12: awaited (ran concurrently with the rest of the block)
                                         break;
                                     case "TokenBurn()":
-                                        await TokenBurn(tx); // NEW-12: awaited (ran concurrently with the rest of the block)
+                                        await TokenBurn(tx, block.Height); // NEW-12: awaited (ran concurrently with the rest of the block)
                                         break;
                                     case "TokenPause()":
-                                        TokenPause(tx);
+                                        TokenPause(tx, block.Height);
                                         break;
                                     case "TokenBanAddress()":
-                                        await TokenBanAddress(tx); // NEW-12: awaited (ran concurrently with the rest of the block)
+                                        await TokenBanAddress(tx, block.Height); // NEW-12: awaited (ran concurrently with the rest of the block)
                                         break;
                                     case "TokenContractOwnerChange()":
-                                        TokenContractOwnerChange(tx);
+                                        TokenContractOwnerChange(tx, block.Height);
                                         break;
                                     case "TokenVoteTopicCreate()":
-                                        TokenVoteTopicCreate(tx);
+                                        TokenVoteTopicCreate(tx, block.Height);
                                         break;
                                     case "TokenVoteTopicCast()":
-                                        TokenVoteTopicCast(tx);
+                                        TokenVoteTopicCast(tx, block.Height);
                                         break;
                                     case "TransferCoin()":
                                         TransferCoin(tx);
@@ -630,7 +639,7 @@ namespace VerifiedXCore.Data
                                         TransferCoinMulti(tx);
                                         break;
                                     case "TransferVBTCV2()":
-                                        TransferVBTCV2(tx);
+                                        TransferVBTCV2(tx, block.Height);
                                         break;
                                     case "TransferVBTC()":
                                         TransferVBTC(tx);
@@ -820,12 +829,12 @@ namespace VerifiedXCore.Data
                                 // and new nodes during a mixed-fleet window). xRBX never reaches
                                 // here for multi — the validator rejects reserve multi senders.
                                 string? vbtcV2Fn = null;
-                                try { vbtcV2Fn = JObject.Parse(tx.Data)["Function"]?.ToObject<string?>(); } catch { }
+                                try { vbtcV2Fn = ConsensusData.ParseObject(tx.Data, block.Height)["Function"]?.ToObject<string?>(); } catch { }
 
                                 if (vbtcV2Fn == Bitcoin.Services.VBTCService.MultiTransferFunction && block.Height >= Globals.V2TransferMultiHeight)
-                                    TransferVBTCV2Multi(tx);
+                                    TransferVBTCV2Multi(tx, block.Height);
                                 else
-                                    TransferVBTCV2(tx);
+                                    TransferVBTCV2(tx, block.Height);
                             }
                         }
 
@@ -2177,7 +2186,7 @@ namespace VerifiedXCore.Data
             }
         }
 
-        private static void AddNewlyMintedContract(Transaction tx)
+        private static void AddNewlyMintedContract(Transaction tx, long height)
         {
             SmartContractStateTrei scST = new SmartContractStateTrei();
             
@@ -2189,15 +2198,24 @@ namespace VerifiedXCore.Data
             bool skip = false;
             JToken? scData = null;
             
+            if (ConsensusData.IsStrict(height))
+            {
+                // Read by the strict reader, as validation reads the mint (SmartContractDeployBinding.ReadPayload).
+                (function, scUID, data, md5List) = SmartContractDeployBinding.ReadPayload(tx.Data, height);
+                skip = true;
+            }
             try
             {
-                var scDataArray = JsonConvert.DeserializeObject<JArray>(tx.Data);
-                scData = scDataArray[0];
-                function = (string?)scData["Function"];
-                data = (string?)scData["Data"];
-                scUID = (string?)scData["ContractUID"];
-                md5List = (string?)scData["MD5List"];
-                skip = true;
+                if (!skip)
+                {
+                    var scDataArray = JsonConvert.DeserializeObject<JArray>(tx.Data);
+                    scData = scDataArray[0];
+                    function = (string?)scData["Function"];
+                    data = (string?)scData["Data"];
+                    scUID = (string?)scData["ContractUID"];
+                    md5List = (string?)scData["MD5List"];
+                    skip = true;
+                }
             }
             catch { }
             
@@ -2253,12 +2271,12 @@ namespace VerifiedXCore.Data
                 SmartContractStateTrei.SaveSmartContract(scST);
             }
         }
-        private static void UpdateSmartContract(Transaction tx)
+        private static void UpdateSmartContract(Transaction tx, long height)
         {
             try
             {
                 SmartContractStateTrei scST = new SmartContractStateTrei();
-                var scDataArray = JsonConvert.DeserializeObject<JArray>(tx.Data);
+                var scDataArray = ConsensusData.ParseArray(tx.Data, height);
                 var scData = scDataArray[0];
                 if (scData != null)
                 {
@@ -2287,16 +2305,16 @@ namespace VerifiedXCore.Data
         /// then has no effect, as it always had (it threw before reading anything), without reporting the block's state as
         /// failed on every node.
         /// </summary>
-        private static JToken? ArrayFormCall(Transaction tx)
+        private static JToken? ArrayFormCall(Transaction tx, long height)
         {
-            try { return JsonConvert.DeserializeObject<JArray>(tx.Data)?[0] as JObject; }
+            try { return ConsensusData.ParseArray(tx.Data, height)?[0] as JObject; }
             catch { return null; }
         }
 
-        private static void TransferSmartContract(Transaction tx)
+        private static void TransferSmartContract(Transaction tx, long height)
         {
             SmartContractStateTrei scST = new SmartContractStateTrei();
-            var scData = ArrayFormCall(tx);
+            var scData = ArrayFormCall(tx, height);
             if (scData == null) return;
 
             var function = (string?)scData["Function"];
@@ -2348,7 +2366,7 @@ namespace VerifiedXCore.Data
         private static void BurnSmartContract(Transaction tx, long height)
         {
             SmartContractStateTrei scST = new SmartContractStateTrei();
-            var scData = ArrayFormCall(tx);
+            var scData = ArrayFormCall(tx, height);
             if (scData == null) return;
             var function = (string?)scData["Function"];
             var data = (string?)scData["Data"];
@@ -2373,10 +2391,10 @@ namespace VerifiedXCore.Data
 
         }
 
-        private static void EvolveSC(Transaction tx)
+        private static void EvolveSC(Transaction tx, long height)
         {
             SmartContractStateTrei scST = new SmartContractStateTrei();
-            var scData = ArrayFormCall(tx);
+            var scData = ArrayFormCall(tx, height);
             if (scData == null) return;
 
             var data = (string?)scData["Data"];
@@ -2392,10 +2410,10 @@ namespace VerifiedXCore.Data
             }
         }
 
-        private static void DevolveSC(Transaction tx)
+        private static void DevolveSC(Transaction tx, long height)
         {
             SmartContractStateTrei scST = new SmartContractStateTrei();
-            var scData = ArrayFormCall(tx);
+            var scData = ArrayFormCall(tx, height);
             if (scData == null) return;
 
             var data = (string?)scData["Data"];
@@ -2411,10 +2429,10 @@ namespace VerifiedXCore.Data
             }
         }
 
-        private static void EvolveDevolveSpecific(Transaction tx)
+        private static void EvolveDevolveSpecific(Transaction tx, long height)
         {
             SmartContractStateTrei scST = new SmartContractStateTrei();
-            var scData = ArrayFormCall(tx);
+            var scData = ArrayFormCall(tx, height);
             if (scData == null) return;
 
             var data = (string?)scData["Data"];
@@ -2444,7 +2462,7 @@ namespace VerifiedXCore.Data
         {
             try
             {
-                var (_, scUID, data, md5List) = SmartContractDeployBinding.ReadPayload(tx.Data);
+                var (_, scUID, data, md5List) = SmartContractDeployBinding.ReadPayload(tx.Data, block.Height);
                 if (string.IsNullOrEmpty(scUID))
                 {
                     ErrorLogUtility.LogError($"DeployTokenContract: missing ContractUID. TX: {tx.Hash}", "StateData.DeployTokenContract()");
@@ -2556,10 +2574,10 @@ namespace VerifiedXCore.Data
                 ErrorLogUtility.LogError($"DeployTokenContract error: {ex.Message}. TX: {tx.Hash}", "StateData.DeployTokenContract()");
             }
         }
-        private static void TokenContractOwnerChange(Transaction tx)
+        private static void TokenContractOwnerChange(Transaction tx, long height)
         {
             var txData = tx.Data;
-            var jobj = JObject.Parse(txData);
+            var jobj = ConsensusData.ParseObject(txData, height);
             var function = (string?)jobj["Function"];
 
             var scUID = jobj["ContractUID"]?.ToObject<string?>();
@@ -2589,10 +2607,10 @@ namespace VerifiedXCore.Data
             }
         }
 
-        private static void TokenVoteTopicCreate(Transaction tx)
+        private static void TokenVoteTopicCreate(Transaction tx, long height)
         {
             var txData = tx.Data;
-            var jobj = JObject.Parse(txData);
+            var jobj = ConsensusData.ParseObject(txData, height);
             var function = (string?)jobj["Function"];
 
             var scUID = jobj["ContractUID"]?.ToObject<string?>();
@@ -2622,10 +2640,10 @@ namespace VerifiedXCore.Data
             }
         }
 
-        private static void TokenVoteTopicCast(Transaction tx)
+        private static void TokenVoteTopicCast(Transaction tx, long height)
         {
             var txData = tx.Data;
-            var jobj = JObject.Parse(txData);
+            var jobj = ConsensusData.ParseObject(txData, height);
             var function = (string?)jobj["Function"];
 
             var scUID = jobj["ContractUID"]?.ToObject<string?>();
@@ -2676,10 +2694,10 @@ namespace VerifiedXCore.Data
                 }
             }
         }
-        private static async Task TokenBanAddress(Transaction tx)
+        private static async Task TokenBanAddress(Transaction tx, long height)
         {
             var txData = tx.Data;
-            var jobj = JObject.Parse(txData);
+            var jobj = ConsensusData.ParseObject(txData, height);
 
             var function = (string?)jobj["Function"];
 
@@ -2710,10 +2728,10 @@ namespace VerifiedXCore.Data
             }
 
         }
-        private static void TokenPause(Transaction tx)
+        private static void TokenPause(Transaction tx, long height)
         {
             var txData = tx.Data;
-            var jobj = JObject.Parse(txData);
+            var jobj = ConsensusData.ParseObject(txData, height);
             
             var function = (string?)jobj["Function"];
 
@@ -2732,13 +2750,13 @@ namespace VerifiedXCore.Data
             }
 
         }
-        private static async Task TokenMint(Transaction tx)
+        private static async Task TokenMint(Transaction tx, long height)
         {
             SmartContractStateTrei scST = new SmartContractStateTrei();
             var txData = tx.Data;
             var stDB = GetAccountStateTrei();
 
-            var jobj = JObject.Parse(txData);
+            var jobj = ConsensusData.ParseObject(txData, height);
 
             var function = (string?)jobj["Function"];
             var scUID = jobj["ContractUID"]?.ToObject<string?>();
@@ -2792,7 +2810,7 @@ namespace VerifiedXCore.Data
             var txData = tx.Data;
             var stDB = GetAccountStateTrei();
 
-            var jobj = JObject.Parse(txData);
+            var jobj = ConsensusData.ParseObject(txData, block.Height);
 
             var function = (string?)jobj["Function"];
 
@@ -2950,13 +2968,13 @@ namespace VerifiedXCore.Data
             }
         }
 
-        private static async Task TokenBurn(Transaction tx)
+        private static async Task TokenBurn(Transaction tx, long height)
         {
             SmartContractStateTrei scST = new SmartContractStateTrei();
             var txData = tx.Data;
             var stDB = GetAccountStateTrei();
 
-            var jobj = JObject.Parse(txData);
+            var jobj = ConsensusData.ParseObject(txData, height);
 
             var function = (string?)jobj["Function"];
 
@@ -3605,12 +3623,12 @@ namespace VerifiedXCore.Data
             }
         }
 
-        private static void TransferVBTCV2(Transaction tx)
+        private static void TransferVBTCV2(Transaction tx, long height)
         {
             try
             {
                 // Parse transaction data for ContractUID and Amount only
-                var jobj = JObject.Parse(tx.Data);
+                var jobj = ConsensusData.ParseObject(tx.Data, height);
                 var scUID = jobj["ContractUID"]?.ToObject<string?>();
                 var amount = jobj["Amount"]?.ToObject<decimal?>();
 
@@ -3643,12 +3661,12 @@ namespace VerifiedXCore.Data
         /// CONSENSUS SAFETY: sender/recipient come from tx.FromAddress/tx.ToAddress (bound to the
         /// signer) — never from addresses embedded in tx.Data.
         /// </summary>
-        private static void TransferVBTCV2Multi(Transaction tx)
+        private static void TransferVBTCV2Multi(Transaction tx, long height)
         {
             try
             {
-                var jobj = JObject.Parse(tx.Data);
-                var inputs = jobj["Inputs"]?.ToObject<List<VBTCV2MultiTransferInput>?>();
+                var jobj = ConsensusData.ParseObject(tx.Data, height);
+                var inputs = jobj["Inputs"] is { } inputsToken ? ConsensusData.ToObject<List<VBTCV2MultiTransferInput>?>(inputsToken, height) : null;
 
                 if (inputs == null || !inputs.Any())
                 {

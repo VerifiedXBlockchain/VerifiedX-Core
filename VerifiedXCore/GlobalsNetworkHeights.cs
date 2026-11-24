@@ -45,6 +45,7 @@ namespace VerifiedXCore
             Globals.BridgeVoidKeepsLocksHeight = Globals.IsTestNet ? Globals.BridgeVoidKeepsLocksTestnetHeight : Globals.BridgeVoidKeepsLocksHeight;
             Globals.BridgeFailKeepsLocksHeight = Globals.IsTestNet ? Globals.BridgeFailKeepsLocksTestnetHeight : Globals.BridgeFailKeepsLocksHeight;
             Globals.VaultMinimumPositionHeight = Globals.IsTestNet ? Globals.VaultMinimumPositionTestnetHeight : Globals.VaultMinimumPositionHeight;
+            Globals.RawDataVerbatimHeight = Globals.IsTestNet ? Globals.RawDataVerbatimTestnetHeight : Globals.RawDataVerbatimHeight;
             Globals.ReserveRecoverReadsEveryRowHeight = Globals.IsTestNet ? Globals.LedgerRulesBatchTestnetHeight : Globals.ReserveRecoverReadsEveryRowHeight;
             Globals.VbtcEnvelopeRulesHeight = Globals.IsTestNet ? Globals.LedgerRulesBatchTestnetHeight : Globals.VbtcEnvelopeRulesHeight;
             Globals.ReserveNonTransferAmountHeight = Globals.IsTestNet ? Globals.LedgerRulesBatchTestnetHeight : Globals.ReserveNonTransferAmountHeight;
@@ -83,6 +84,7 @@ namespace VerifiedXCore
             // Privacy stage 2 on testnet: with the fund-loss rules (reset 2026-10-13 from 1,099,400, which had passed).
             Globals.PrivateTxProofRulesHeight = Globals.IsTestNet ? Globals.FundLossAuditTestnetHeight : Globals.PrivateTxProofRulesHeight;
             Globals.PlonkCurrentRulesHeight = Globals.IsTestNet ? Globals.PlonkCurrentRulesTestnetHeight : Globals.PlonkCurrentRulesHeight;
+            Globals.StrictDataReaderHeight = Globals.IsTestNet ? Globals.StrictDataReaderTestnetHeight : Globals.StrictDataReaderHeight;
             // Bitcoin attestation (plan 8.4): observe from the tip of 2026-10-13, record with the fund-loss rules, enforce three days later.
             Globals.BitcoinAttestationObserveHeight = Globals.IsTestNet ? Globals.BitcoinAttestationObserveTestnetHeight : Globals.BitcoinAttestationObserveHeight;
             Globals.BitcoinAttestationRecordHeight = Globals.IsTestNet ? Globals.BitcoinAttestationRecordTestnetHeight : Globals.BitcoinAttestationRecordHeight;
@@ -150,8 +152,10 @@ namespace VerifiedXCore
             Globals.BridgeVoteOncePerCasterHeight = h;
             Globals.BridgeExitCarriesTotalsHeight = h;
             Globals.PlonkCurrentRulesHeight = h;
-            // Not yet set on the live testnet
+            // Not yet on the live testnet
             Globals.CanonicalInputHeight = h;
+            Globals.RawDataVerbatimHeight = h;
+            Globals.StrictDataReaderHeight = h;
         }
     }
 }
