@@ -762,6 +762,20 @@ namespace VerifiedXCore
         /// </summary>
         public static long PlonkCurrentRulesHeight = long.MaxValue;
         public const long PlonkCurrentRulesTestnetHeight = 205_615L;
+
+        /// <summary>
+        /// From this height a transaction's Data is read by one strict reader, Utilities.ConsensusData: a name used twice
+        /// or in two spellings, a comment, trailing content, a number a decimal cannot hold exactly and any syntax outside
+        /// RFC 8259 are refused, decimals are never read through double and strings are never read as dates. A
+        /// non-private transaction whose Data is a JSON object or array the reader refuses is refused on admission and in
+        /// a block, and the dispatchers and the rules that read a contract call, a token call or a vBTC transfer read it
+        /// with that reader, in validation and in state application alike. Below the height Data is read as before.
+        /// Unset (long.MaxValue) on both networks until the release that activates it.
+        /// </summary>
+        public static long StrictDataReaderHeight = long.MaxValue;
+        /// <summary>The same height on testnet (GlobalsNetworkHeights).</summary>
+        public const long StrictDataReaderTestnetHeight = long.MaxValue;
+
         public static Dictionary<string, decimal> ForgedVfxBurns = new(StringComparer.Ordinal)
         {
             ["RB3eeBH258arkuePCJf5NMVMSaUyhyy9g6"] = 100_033.000012M,
