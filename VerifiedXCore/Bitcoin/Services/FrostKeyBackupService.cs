@@ -616,11 +616,13 @@ namespace VerifiedXCore.Bitcoin.Services
                     {
                         var requestPayload = SignedRecoveryRequest(validatorAddress);
                         if (requestPayload == null) { lock (merge) { result.PeersAsked++; result.PeersFailed++; } return; }
-                        var backups = await FetchBackupsFromPeer(validator, requestPayload);
+                        var answer = await FetchBackupsFromPeer(validator, requestPayload);
+                        var backups = answer?.Items;
                         lock (merge)
                         {
                             result.PeersAsked++;
                             if (backups == null) { result.PeersFailed++; return; }
+                            if (!answer!.Complete) result.PeersIncomplete.Add(validator.ValidatorAddress);
                             result.FromPeer[validator.ValidatorAddress] = backups.Count;
                             var fromThisPeer = new HashSet<string>(StringComparer.Ordinal);
                             foreach (var backup in backups.Where(x => x != null && !string.IsNullOrEmpty(x.SmartContractUID)))
@@ -740,7 +742,10 @@ namespace VerifiedXCore.Bitcoin.Services
         public static async Task<PeerRecoveryResult> RecoverKeysFromPeersWithRetry(string validatorAddress, List<VBTCValidator> validators)
         {
             var first = await RecoverKeysFromPeers(validatorAddress, validators);
-            if (first.PeersFailed == 0) return first;
+            if (first.PeersIncomplete.Count > 0)
+                ErrorLogUtility.LogError($"[FROST Backup] {first.PeersIncomplete.Count} peer(s) sent answers longer than any honest one; they were read only in part: {string.Join(", ", first.PeersIncomplete)}",
+                    "FrostKeyBackupService.RecoverKeysFromPeersWithRetry");
+            if (first.PeersFailed == 0 && first.PeersIncomplete.Count == 0) return first;
             LogUtility.Log($"[FROST Backup] {first.PeersFailed} of {first.PeersAsked} peers did not answer; asking every peer once more",
                 "FrostKeyBackupService.RecoverKeysFromPeersWithRetry");
             var second = await RecoverKeysFromPeers(validatorAddress, validators);
@@ -755,10 +760,32 @@ namespace VerifiedXCore.Bitcoin.Services
         /// <summary>The backups a peer holds for the requester, an empty list when it holds none, null when it did not answer.</summary>
         /// <summary>Peers asked at once during a recovery.</summary>
         public const int PeersAskedAtOnce = 4;
-        /// <summary>Items read from one peer's answer, counted whether kept or not. A peer keeps one backup a contract for an owner.</summary>
-        public const int MaxItemsPerAnswer = 20_000;
-        /// <summary>Bytes read from one peer's answer.</summary>
-        public const long MaxAnswerBytes = 32L * 1024 * 1024;
+        /// <summary>
+        /// Items read from one peer's answer, counted whether kept or not: at least this many, and as many as an honest
+        /// answer can hold (<see cref="HonestAnswerItems"/>), so a validator with shares in many vaults is never cut short.
+        /// </summary>
+        public const int MinItemsPerAnswer = 20_000;
+        /// <summary>Bytes read from one peer's answer: at least this, and an honest answer's most at the longest rows.</summary>
+        public const long MinAnswerBytes = 32L * 1024 * 1024;
+        private const long MaxItemBytes = 20 * 1024;
+
+        /// <summary>
+        /// The most items an honest answer holds: a peer keeps one backup a contract for an owner, so one for each contract on
+        /// chain and each key of a watched vault, and the unbound ones.
+        /// </summary>
+        internal static int HonestAnswerItems()
+        {
+            long contracts = 0, keys = 0;
+            try { contracts = VerifiedXCore.Models.SmartContractStateTrei.GetSCST()?.Count() ?? 0; } catch { }
+            try { keys = VerifiedXCore.Bitcoin.Attestation.BtcAttestStore.Db.GetCollection<VerifiedXCore.Bitcoin.Attestation.VaultDepositScriptRow>(VerifiedXCore.Bitcoin.Attestation.BtcAttestStore.Scripts).Count(); } catch { }
+            return (int)Math.Min(int.MaxValue, contracts + keys + MaxUnboundItemsPerAnswer + 64);
+        }
+
+        public static int MaxItemsPerAnswer => Math.Max(MinItemsPerAnswer, HonestAnswerItems());
+        public static long MaxAnswerBytes => Math.Max(MinAnswerBytes, (long)MaxItemsPerAnswer * MaxItemBytes);
+
+        /// <summary>One peer's answer as read: the items kept, and whether the whole answer was read.</summary>
+        public sealed record RecoveryAnswer(List<BackupRecoveryItem> Items, bool Complete);
         /// <summary>How long one peer has to answer in full: the request, and every read of its body.</summary>
         public static readonly TimeSpan AnswerDeadline = TimeSpan.FromSeconds(60);
         /// <summary>Items one answer may carry under ids that name no contract on chain (a ceremony's id before its vault exists).</summary>
@@ -784,14 +811,16 @@ namespace VerifiedXCore.Bitcoin.Services
         /// and any later one for it is not; items under ids that name no contract on chain are kept up to
         /// <see cref="MaxUnboundItemsPerAnswer"/>. What is kept is therefore one item a contract, whatever the peer sends.
         /// </summary>
-        internal static async Task<List<BackupRecoveryItem>?> ReadRecoveryAnswerAsync(Stream body, CancellationToken deadline = default, Func<string, bool>? namesAContract = null)
+        internal static async Task<RecoveryAnswer?> ReadRecoveryAnswerAsync(Stream body, CancellationToken deadline = default, Func<string, bool>? namesAContract = null,
+            int? maxItems = null, long? maxBytes = null)
         {
+            var itemLimit = maxItems ?? MaxItemsPerAnswer;
             namesAContract ??= uid => !string.IsNullOrEmpty(VerifiedXCore.Bitcoin.FROST.FrostDkgGuard.ResolveOnChainGroupPublicKey(uid));
             var items = new List<BackupRecoveryItem>();
             var seen = new HashSet<string>(StringComparer.Ordinal);
             var unbound = 0;
             var read = 0;
-            using var limited = new BoundedReadStream(body, MaxAnswerBytes, deadline);
+            using var limited = new BoundedReadStream(body, maxBytes ?? MaxAnswerBytes, deadline);
             using var text = new StreamReader(limited, Encoding.UTF8);
             using var json = new JsonTextReader(text) { MaxDepth = 8 };
             var serializer = JsonSerializer.CreateDefault();
@@ -807,7 +836,7 @@ namespace VerifiedXCore.Bitcoin.Services
                     if (!await json.ReadAsync(deadline) || json.TokenType != JsonToken.StartArray) continue;
                     while (await json.ReadAsync(deadline) && json.TokenType != JsonToken.EndArray)
                     {
-                        if (++read > MaxItemsPerAnswer) return items;
+                        if (++read > itemLimit) return new RecoveryAnswer(items, Complete: false);
                         var item = serializer.Deserialize<BackupRecoveryItem>(json);
                         if (item == null || string.IsNullOrEmpty(item.SmartContractUID)) continue;
                         if (item.SmartContractUID.Length > VerifiedXCore.Bitcoin.FROST.Models.FrostPeerKeyBackup.MaxIdChars
@@ -819,8 +848,8 @@ namespace VerifiedXCore.Bitcoin.Services
                     }
                 }
             }
-            catch (BoundedReadStream.LimitReached) { return items; } // the answer was longer than any honest one: what came first is kept
-            return success == false ? null : items;
+            catch (BoundedReadStream.LimitReached) { return new RecoveryAnswer(items, Complete: false); } // longer than any honest one: what came first is kept
+            return success == false ? null : new RecoveryAnswer(items, Complete: true);
         }
 
         /// <summary>A stream that ends with <see cref="LimitReached"/> once more than its limit has been read.</summary>
@@ -861,9 +890,9 @@ namespace VerifiedXCore.Bitcoin.Services
             }
         }
 
-        private static async Task<List<BackupRecoveryItem>?> FetchBackupsFromPeer(VBTCValidator validator, string requestPayload)
+        private static async Task<RecoveryAnswer?> FetchBackupsFromPeer(VBTCValidator validator, string requestPayload)
         {
-            if (FetchFromPeerForTests != null) return await FetchFromPeerForTests(validator);
+            if (FetchFromPeerForTests != null) return await FetchFromPeerForTests(validator) is { } given ? new RecoveryAnswer(given, Complete: true) : null;
             try
             {
                 var url = $"http://{validator.IPAddress}:{Globals.FrostValidatorPort}/frost/backup/recover";
@@ -891,6 +920,11 @@ namespace VerifiedXCore.Bitcoin.Services
             public int Restored => RestoredContracts.Count;
             public int PeersAsked { get; set; }
             public int PeersFailed { get; set; }
+            /// <summary>
+            /// Peers whose answer was longer than any honest one and was read only in part: what they hold past that may be
+            /// missing. The recovery reports it and asks again.
+            /// </summary>
+            public HashSet<string> PeersIncomplete { get; } = new(StringComparer.Ordinal);
             /// <summary>Backups each answering peer returned.</summary>
             public Dictionary<string, int> FromPeer { get; } = new(StringComparer.Ordinal);
         }

@@ -99,9 +99,10 @@ namespace VerifiedXCore.Tests
                     new { SmartContractUID = "sc-big", EncryptedBlob = new string('b', 200_000), PlaintextHash = "", Version = 1 },
                 },
             });
-            var items = await FrostKeyBackupService.ReadRecoveryAnswerAsync(new MemoryStream(Encoding.UTF8.GetBytes(answer)));
-            Assert.Single(items!);
-            Assert.Equal("sc-read", items![0].SmartContractUID);
+            var read = await FrostKeyBackupService.ReadRecoveryAnswerAsync(new MemoryStream(Encoding.UTF8.GetBytes(answer)), default, _ => true);
+            Assert.True(read!.Complete);
+            Assert.Single(read.Items);
+            Assert.Equal("sc-read", read.Items[0].SmartContractUID);
 
             var refused = await FrostKeyBackupService.ReadRecoveryAnswerAsync(new MemoryStream(Encoding.UTF8.GetBytes("{\"Success\":false,\"Message\":\"no\"}")));
             Assert.Null(refused);
@@ -147,19 +148,45 @@ namespace VerifiedXCore.Tests
             for (var i = 0; i < 1_000; i++) items.Add(new { SmartContractUID = "sc-real", EncryptedBlob = "junk" + i, PlaintextHash = "", Version = 1 });
             for (var i = 0; i < 1_000; i++) items.Add(new { SmartContractUID = "made-up-" + i, EncryptedBlob = "x", PlaintextHash = "", Version = 1 });
             var answer = JsonConvert.SerializeObject(new { Success = true, Backups = items });
-            var kept = await FrostKeyBackupService.ReadRecoveryAnswerAsync(new MemoryStream(Encoding.UTF8.GetBytes(answer)), default, uid => uid == "sc-real");
-            Assert.Single(kept!, i => i.SmartContractUID == "sc-real");
-            Assert.Equal(FrostKeyBackupService.MaxUnboundItemsPerAnswer, kept!.Count(i => i.SmartContractUID.StartsWith("made-up-")));
+            var kept = (await FrostKeyBackupService.ReadRecoveryAnswerAsync(new MemoryStream(Encoding.UTF8.GetBytes(answer)), default, uid => uid == "sc-real"))!.Items;
+            Assert.Single(kept, i => i.SmartContractUID == "sc-real");
+            Assert.Equal(FrostKeyBackupService.MaxUnboundItemsPerAnswer, kept.Count(i => i.SmartContractUID.StartsWith("made-up-")));
+        }
+
+        private static string AnswerOf(int contracts) => "{\"Success\":true,\"Backups\":[" + string.Join(",", Enumerable.Range(0, contracts).Select(i =>
+            JsonConvert.SerializeObject(new { SmartContractUID = "sc-" + i, EncryptedBlob = new string('e', 16 * 1024), PlaintextHash = "", Version = 1 }))) + "]}";
+
+        [Fact]
+        public async Task An_answer_longer_than_any_honest_one_is_read_no_further_and_is_marked_incomplete()
+        {
+            var big = AnswerOf(300);
+            var read = await FrostKeyBackupService.ReadRecoveryAnswerAsync(new MemoryStream(Encoding.UTF8.GetBytes(big)), default, _ => true, maxItems: 1_000, maxBytes: 1024 * 1024);
+            Assert.False(read!.Complete);
+            Assert.InRange(read.Items.Count, 1, 1024 * 1024 / (16 * 1024));
         }
 
         [Fact]
-        public async Task An_answer_longer_than_any_honest_one_is_read_no_further()
+        public async Task An_honest_answer_for_every_contract_on_chain_is_read_in_full()
         {
-            var big = "{\"Success\":true,\"Backups\":[" + string.Join(",", Enumerable.Range(0, 3_000).Select(i =>
-                JsonConvert.SerializeObject(new { SmartContractUID = "sc-" + i, EncryptedBlob = new string('e', 16 * 1024), PlaintextHash = "", Version = 1 }))) + "]}";
-            Assert.True(big.Length > FrostKeyBackupService.MaxAnswerBytes);
-            var kept = await FrostKeyBackupService.ReadRecoveryAnswerAsync(new MemoryStream(Encoding.UTF8.GetBytes(big)), default, _ => true);
-            Assert.InRange(kept!.Count, 1, (int)(FrostKeyBackupService.MaxAnswerBytes / (16 * 1024)));
+            // As many full-size backups as the bounds allow for this chain: all of them are read.
+            var contracts = 2_000;
+            var read = await FrostKeyBackupService.ReadRecoveryAnswerAsync(new MemoryStream(Encoding.UTF8.GetBytes(AnswerOf(contracts))), default, _ => true,
+                maxItems: contracts + 16, maxBytes: (long)(contracts + 16) * 20 * 1024);
+            Assert.True(read!.Complete);
+            Assert.Equal(contracts, read.Items.Count);
+            Assert.True(FrostKeyBackupService.MaxItemsPerAnswer >= FrostKeyBackupService.MinItemsPerAnswer);
+        }
+
+        [Fact]
+        public async Task A_recovery_with_a_peer_read_only_in_part_reports_it_and_asks_again()
+        {
+            var calls = 0;
+            FrostKeyBackupService.FetchFromPeerForTests = _ => { Interlocked.Increment(ref calls); return Task.FromResult<List<FrostKeyBackupService.BackupRecoveryItem>?>(new()); };
+            var result = await FrostKeyBackupService.RecoverKeysFromPeersWithRetry(_address, Peers(2));
+            Assert.Empty(result.PeersIncomplete);
+            Assert.Equal(2, calls); // complete answers: asked once
+            var source = File.ReadAllText(Path.Combine(RepoRoot(), "VerifiedXCore", "Bitcoin", "Services", "FrostKeyBackupService.cs"));
+            Assert.Contains("if (first.PeersFailed == 0 && first.PeersIncomplete.Count == 0) return first;", source);
         }
 
         [Fact]
