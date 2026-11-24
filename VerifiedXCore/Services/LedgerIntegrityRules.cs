@@ -1058,7 +1058,10 @@ namespace VerifiedXCore.Services
             var alsoRefused = height >= Globals.PathAuditRulesHeight ? ProcessBoundBuiltins : Array.Empty<string>();
             // The size, nesting and call limits: always at admission, in a block from ContractBodyLimitsHeight.
             var limits = !inBlock || height >= Globals.ContractBodyLimitsHeight;
-            foreach (var body in CarriedContractBodies(tx?.Data))
+            // Every spelling of the key the code that runs the body reads: always at admission, in a block from
+            // ContractBodyKeySpellingHeight. Below it a block's bodies are found as they always were.
+            var everySpelling = !inBlock || height >= Globals.ContractBodyKeySpellingHeight;
+            foreach (var body in everySpelling ? CarriedContractBodies(tx?.Data) : CarriedContractBodiesBeforeKeySpelling(tx?.Data))
             {
                 string text;
                 byte[]? unpacked;
@@ -1180,8 +1183,31 @@ namespace VerifiedXCore.Services
             return (n == 0 ? 0 : depth.Max(), Math.Max(globals, n == 0 ? 0 : calls.Max()));
         }
 
-        /// <summary>Every string "Data" value in the payload (array or object shape) - the contract bodies a transaction carries.</summary>
-        private static IEnumerable<string> CarriedContractBodies(string? txData)
+        /// <summary>
+        /// Every contract body a transaction carries: each string value under a key read as "Data" in any letter case, in
+        /// the payload's object or array shape. The payload is parsed as the code that runs the body parses it, so a key
+        /// written with an escape (<c>"\u0044ata"</c>), in single quotes or bare is found too. Every value under such a
+        /// key is returned, so a reader that takes the first, the last or another casing never runs a body the rules did
+        /// not judge.
+        /// </summary>
+        internal static IEnumerable<string> CarriedContractBodies(string? txData)
+        {
+            if (string.IsNullOrEmpty(txData)) yield break;
+            JToken root;
+            try { root = JToken.Parse(txData); } catch { yield break; }
+            var items = root is JArray arr ? arr.ToList() : new List<JToken> { root };
+            foreach (var item in items)
+            {
+                if (item is not JObject obj) continue;
+                foreach (var property in obj.Properties())
+                    if (string.Equals(property.Name, "Data", StringComparison.OrdinalIgnoreCase)
+                        && property.Value is JValue v && v.Type == JTokenType.String && !string.IsNullOrEmpty((string?)v))
+                        yield return (string)v!;
+            }
+        }
+
+        /// <summary>The bodies as blocks below ContractBodyKeySpellingHeight were judged: under the exact text "Data" only.</summary>
+        private static IEnumerable<string> CarriedContractBodiesBeforeKeySpelling(string? txData)
         {
             if (string.IsNullOrEmpty(txData) || !txData.Contains("\"Data\"")) yield break;
             JToken root;

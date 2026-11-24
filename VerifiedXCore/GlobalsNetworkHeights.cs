@@ -46,6 +46,7 @@ namespace VerifiedXCore
             Globals.BridgeFailKeepsLocksHeight = Globals.IsTestNet ? Globals.BridgeFailKeepsLocksTestnetHeight : Globals.BridgeFailKeepsLocksHeight;
             Globals.VaultMinimumPositionHeight = Globals.IsTestNet ? Globals.VaultMinimumPositionTestnetHeight : Globals.VaultMinimumPositionHeight;
             Globals.RawDataVerbatimHeight = Globals.IsTestNet ? Globals.RawDataVerbatimTestnetHeight : Globals.RawDataVerbatimHeight;
+            Globals.ContractBodyKeySpellingHeight = Globals.IsTestNet ? Globals.ContractBodyKeySpellingTestnetHeight : Globals.ContractBodyKeySpellingHeight;
             Globals.ReserveRecoverReadsEveryRowHeight = Globals.IsTestNet ? Globals.LedgerRulesBatchTestnetHeight : Globals.ReserveRecoverReadsEveryRowHeight;
             Globals.VbtcEnvelopeRulesHeight = Globals.IsTestNet ? Globals.LedgerRulesBatchTestnetHeight : Globals.VbtcEnvelopeRulesHeight;
             Globals.ReserveNonTransferAmountHeight = Globals.IsTestNet ? Globals.LedgerRulesBatchTestnetHeight : Globals.ReserveNonTransferAmountHeight;
@@ -152,6 +153,7 @@ namespace VerifiedXCore
             Globals.PlonkCurrentRulesHeight = h;
             // Not yet on the live testnet
             Globals.RawDataVerbatimHeight = h;
+            Globals.ContractBodyKeySpellingHeight = h;
         }
     }
 }

@@ -462,6 +462,17 @@ namespace VerifiedXCore
         public const long RawDataVerbatimTestnetHeight = long.MaxValue;
 
         /// <summary>
+        /// From this height a block's contract bodies are found as the code that runs them reads Data: a body under the
+        /// key written as <c>"\u0044ata"</c>, <c>'Data'</c>, a bare <c>Data</c> or in another letter case is judged by
+        /// the contract-body rules, where below it the rules looked only for the exact text <c>"Data"</c> and passed such a
+        /// body unread while the node still ran it. Mempool admission finds them so at every height. A tightening rule: a
+        /// node without it accepts every block a node with it does. Unset (long.MaxValue) on both networks until the
+        /// release that activates it. Testnet value in GlobalsNetworkHeights.
+        /// </summary>
+        public static long ContractBodyKeySpellingHeight = long.MaxValue;
+        public const long ContractBodyKeySpellingTestnetHeight = long.MaxValue;
+
+        /// <summary>
         /// From this height a reserve's Recover() reads each pending NFT_TX row's call as the dispatchers read it. Below it
         /// a row whose Data was not an array of objects made the recovery throw part-way, so every later row, the balance
         /// sweep, the contract re-own and the vBTC sweep never ran, and the reserve stayed under its vault key. Active from LedgerRulesBatchHeight.

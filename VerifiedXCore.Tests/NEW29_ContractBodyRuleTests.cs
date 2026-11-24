@@ -72,6 +72,41 @@ namespace VerifiedXCore.Tests
             return tx;
         }
 
+        /// <summary>The payload with its body under the key spelled as <paramref name="key"/> (a JSON fragment: quotes included).</summary>
+        private string SpelledKey(string key, string body) =>
+            "[{\"Function\":\"Mint()\",\"ContractUID\":\"" + Uid + "\"," + key + ":" + JsonConvert.SerializeObject(body) + "}]";
+
+        [Theory]
+        [InlineData("\"\\u0044ata\"")]
+        [InlineData("'Data'")]
+        [InlineData("Data")]
+        [InlineData("\"data\"")]
+        [InlineData("\"DATA\"")]
+        public void A_body_under_any_spelling_of_the_key_is_judged_at_admission(string key)
+        {
+            var mint = Tx("Mint()", Plain());
+            mint.Data = SpelledKey(key, With(CallsRand));
+            Assert.Equal("Contract code may not call rand().", LedgerIntegrityRules.ContractBodyAllowed(mint));
+        }
+
+        [Fact]
+        public void In_a_block_any_spelling_of_the_key_is_judged_from_its_height_and_not_below()
+        {
+            var prior = Globals.ContractBodyKeySpellingHeight;
+            try
+            {
+                Globals.ContractBodyKeySpellingHeight = 1_000;
+                var mint = Tx("Mint()", Plain());
+                mint.Data = SpelledKey("\"\\u0044ata\"", With(CallsRand));
+                Assert.Null(LedgerIntegrityRules.ContractBodyAllowed(mint, 999, inBlock: true));   // a block mined below it keeps its verdict
+                Assert.Equal("Contract code may not call rand().", LedgerIntegrityRules.ContractBodyAllowed(mint, 1_000, inBlock: true));
+
+                var exact = Tx("Mint()", With(CallsRand)); // the exact key was judged before the height too
+                Assert.Equal("Contract code may not call rand().", LedgerIntegrityRules.ContractBodyAllowed(exact, 999, inBlock: true));
+            }
+            finally { Globals.ContractBodyKeySpellingHeight = prior; }
+        }
+
         public const string CallsRand = "function Lucky() : int { return rand(10) }";
         public const string CallsInput = "function Ask() : string { return input() }";
         public const string DoWhile = "function Spin() : int { var i = 0 do { i = i + 1 } while true return i }";
