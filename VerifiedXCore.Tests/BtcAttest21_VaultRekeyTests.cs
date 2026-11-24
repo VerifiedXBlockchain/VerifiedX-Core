@@ -306,6 +306,14 @@ namespace VerifiedXCore.Tests
             Assert.Equal(stillHere.Select(s => s.Address).OrderBy(a => a, StringComparer.Ordinal), current.Holders);
             Assert.Equal(2, current.MinSigners);           // 67% of three, never all three (RekeyThreshold)
             Assert.Equal(vault.Uid, BtcVaultKeys.VaultOf(ceremony.KeyUid));
+            // A signing session names the key. Every check about the vault's exits and withdrawals maps it to the vault:
+            // an exit pinned on the new key's coins is judged as the vault's, never refused for naming another contract.
+            Assert.Equal(vault.Uid, VerifiedXCore.Bitcoin.FROST.FrostSigningAuthorization.VaultOf(ceremony.KeyUid));
+            var exitReference = BtcWithdrawals.ExitSigningReference(new string('a', 64), vault.Uid);
+            Assert.DoesNotContain("prefix does not match", VerifiedXCore.Bitcoin.FROST.FrostSigningAuthorization.BridgeExitNoLongerSignable(exitReference, ceremony.KeyUid) ?? "");
+            Assert.DoesNotContain("prefix does not match", VerifiedXCore.Bitcoin.FROST.FrostSigningAuthorization.ResolveBtcExitForContract(exitReference, ceremony.KeyUid).Reason);
+            Assert.Equal(VerifiedXCore.Bitcoin.FROST.FrostSigningAuthorization.ResolveBtcExitForContract(exitReference, vault.Uid).Reason,
+                VerifiedXCore.Bitcoin.FROST.FrostSigningAuthorization.ResolveBtcExitForContract(exitReference, ceremony.KeyUid).Reason);
             Assert.Equal(current.Holders, BtcWithdrawalSigner.SignersOf(ceremony.KeyUid));
             Assert.Equal(Signers.Count, BtcWithdrawalSigner.SignersOf(vault.Uid).Count); // the vault's UID still names its first key
 
