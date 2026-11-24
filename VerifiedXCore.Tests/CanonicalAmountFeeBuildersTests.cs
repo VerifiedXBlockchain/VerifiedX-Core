@@ -157,6 +157,40 @@ namespace VerifiedXCore.Tests
             Assert.Empty(Offenders("Example.cs", canonicalBeforeBuild, out _));
         }
 
+        private static bool IsCoinbase(string file, string initializer) =>
+            file == "BlockchainData.cs" && Regex.IsMatch(initializer, @"FromAddress\s*=\s*""Coinbase_(BlkRwd|TrxFees)""");
+
+        /// <summary>
+        /// The block producer's coinbases (CraftNewBlock_New, CraftBlock_V4, CraftBlock_V5, CraftSpecialBlock) keep the
+        /// spelling they have always had: a Fee of 0.00M, and an Amount of the block reward, 0.00M, or the special
+        /// block's balance. Coinbases are not judged by the canonical rule, which leaves them as they were.
+        /// </summary>
+        [Fact]
+        public void CoinbasesKeepTheirHistoricalSpelling()
+        {
+            var file = Path.Combine(Path.GetDirectoryName(Path.GetDirectoryName(ThisFile()))!, "VerifiedXCore", "Data", "BlockchainData.cs");
+            var text = File.ReadAllText(file);
+            var coinbases = new List<Dictionary<string, string>>();
+            foreach (Match m in Construction.Matches(text))
+            {
+                var bodyStart = m.Index + m.Length;
+                var body = text[bodyStart..ClosingBrace(text, bodyStart)];
+                if (!IsCoinbase("BlockchainData.cs", body)) continue;
+                var fields = new Dictionary<string, string>(StringComparer.Ordinal);
+                foreach (var member in TopLevelMembers(body))
+                {
+                    var eq = Regex.Match(member, @"^\s*(Amount|Fee)\s*=\s*(.+?)\s*$", RegexOptions.Singleline);
+                    if (eq.Success) fields[eq.Groups[1].Value] = Collapse(eq.Groups[2].Value);
+                }
+                coinbases.Add(fields);
+            }
+
+            Assert.Equal(5, coinbases.Count);
+            Assert.All(coinbases, c => Assert.Equal("0.00M", c["Fee"]));
+            Assert.All(coinbases, c => Assert.Contains(c["Amount"], new[] { "GetBlockReward()", "0.00M", "postMineBalance" }));
+            Assert.Equal(2, ((decimal.GetBits(0.00M)[3] >> 16) & 0xFF)); // 0.00M carries two places
+        }
+
         private static List<string> Offenders(string name, string text, out int builders)
         {
             var offenders = new List<string>();
@@ -166,8 +200,12 @@ namespace VerifiedXCore.Tests
                 var bodyStart = m.Index + m.Length;
                 var bodyEnd = ClosingBrace(text, bodyStart);
                 if (bodyEnd < 0) continue;
+                var body = text[bodyStart..bodyEnd];
+                // Coinbases are exempt from the canonical rule and keep their historical spelling (0.00M), as the
+                // block producer in BlockchainData has always written them; CoinbasesKeepTheirHistoricalSpelling holds it.
+                if (IsCoinbase(name, body)) continue;
                 var fields = new Dictionary<string, string>(StringComparer.Ordinal);
-                foreach (var member in TopLevelMembers(text[bodyStart..bodyEnd]))
+                foreach (var member in TopLevelMembers(body))
                 {
                     var eq = Regex.Match(member, @"^\s*(Amount|Fee)\s*=\s*(.+?)\s*$", RegexOptions.Singleline);
                     if (eq.Success) fields[eq.Groups[1].Value] = Collapse(eq.Groups[2].Value);

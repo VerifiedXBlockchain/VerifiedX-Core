@@ -100,9 +100,9 @@ namespace VerifiedXCore.Data
 
                     var coinbase_tx2 = new Transaction
                     {
-                        Amount = LedgerIntegrityRules.CanonicalDecimal(GetBlockReward()),
+                        Amount = GetBlockReward(),
                         ToAddress = validator,
-                        Fee = 0.0M,
+                        Fee = 0.00M,
                         Timestamp = timestamp,
                         FromAddress = "Coinbase_BlkRwd",
                         TransactionType = TransactionType.TX
@@ -228,9 +228,9 @@ namespace VerifiedXCore.Data
 
                     var coinbase_tx2 = new Transaction
                     {
-                        Amount = LedgerIntegrityRules.CanonicalDecimal(GetBlockReward()),
+                        Amount = GetBlockReward(),
                         ToAddress = validator,
-                        Fee = 0.0M,
+                        Fee = 0.00M,
                         Timestamp = timestamp,
                         FromAddress = "Coinbase_BlkRwd",
                         TransactionType = TransactionType.TX
@@ -370,9 +370,9 @@ namespace VerifiedXCore.Data
 
                     var coinbase_tx2 = new Transaction
                     {
-                        Amount = 0.0M,
+                        Amount = 0.00M,
                         ToAddress = validator,
-                        Fee = 0.0M,
+                        Fee = 0.00M,
                         Timestamp = timestamp,
                         FromAddress = "Coinbase_BlkRwd",
                         TransactionType = TransactionType.TX
@@ -487,9 +487,9 @@ namespace VerifiedXCore.Data
 
                     var coinbase_tx2 = new Transaction
                     {
-                        Amount = 0.0M,
+                        Amount = 0.00M,
                         ToAddress = validator,
-                        Fee = 0.0M,
+                        Fee = 0.00M,
                         Timestamp = timestamp,
                         FromAddress = "Coinbase_BlkRwd",
                         TransactionType = TransactionType.TX
@@ -497,9 +497,9 @@ namespace VerifiedXCore.Data
 
                     var coinbase_special = new Transaction
                     {
-                        Amount = LedgerIntegrityRules.CanonicalDecimal(postMineBalance),
+                        Amount = postMineBalance,
                         ToAddress = Globals.GenesisValidator,
-                        Fee = 0.0M,
+                        Fee = 0.00M,
                         Timestamp = timestamp,
                         FromAddress = "Coinbase_BlkRwd",
                         TransactionType = TransactionType.TX
