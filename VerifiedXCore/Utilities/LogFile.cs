@@ -14,32 +14,56 @@ namespace VerifiedXCore.Utilities
         /// <summary>The size at which a log file is moved aside and started again.</summary>
         public const long MaxFileBytes = 20L * 1024 * 1024;
 
-        private static readonly ConcurrentDictionary<string, SemaphoreSlim> Gates = new(StringComparer.OrdinalIgnoreCase);
+        /// <summary>
+        /// Writes that may wait for one log file at once. A write past it is dropped: when the disk falls behind, the
+        /// lines waiting for it are what hold memory.
+        /// </summary>
+        public const int MaxWaitingWrites = 2_000;
+
+        private sealed class Gate
+        {
+            public readonly SemaphoreSlim Lock = new(1, 1);
+            public int Waiting;
+        }
+
+        private static readonly ConcurrentDictionary<string, Gate> Gates = new(StringComparer.OrdinalIgnoreCase);
 
         /// <summary>Appends <paramref name="text"/> to the log at <paramref name="path"/>.</summary>
         public static async Task AppendAsync(string path, string text)
         {
-            var gate = Gates.GetOrAdd(path, _ => new SemaphoreSlim(1, 1));
-            await gate.WaitAsync();
+            text = Bounded(text); // cut before waiting: a write waits holding only what will be written
+            var gate = Gates.GetOrAdd(path, _ => new Gate());
+            if (Interlocked.Increment(ref gate.Waiting) > MaxWaitingWrites) { Interlocked.Decrement(ref gate.Waiting); return; }
             try
             {
-                RotateIfFull(path);
-                await File.AppendAllTextAsync(path, Bounded(text));
+                await gate.Lock.WaitAsync();
+                try
+                {
+                    RotateIfFull(path);
+                    await File.AppendAllTextAsync(path, text);
+                }
+                finally { gate.Lock.Release(); }
             }
-            finally { gate.Release(); }
+            finally { Interlocked.Decrement(ref gate.Waiting); }
         }
 
         /// <summary>Appends <paramref name="text"/> to the log at <paramref name="path"/>, waiting for it.</summary>
         public static void Append(string path, string text)
         {
-            var gate = Gates.GetOrAdd(path, _ => new SemaphoreSlim(1, 1));
-            gate.Wait();
+            text = Bounded(text);
+            var gate = Gates.GetOrAdd(path, _ => new Gate());
+            if (Interlocked.Increment(ref gate.Waiting) > MaxWaitingWrites) { Interlocked.Decrement(ref gate.Waiting); return; }
             try
             {
-                RotateIfFull(path);
-                File.AppendAllText(path, Bounded(text));
+                gate.Lock.Wait();
+                try
+                {
+                    RotateIfFull(path);
+                    File.AppendAllText(path, text);
+                }
+                finally { gate.Lock.Release(); }
             }
-            finally { gate.Release(); }
+            finally { Interlocked.Decrement(ref gate.Waiting); }
         }
 
         /// <summary>Appends each of <paramref name="lines"/>, each followed by a line break.</summary>

@@ -39,6 +39,18 @@ namespace VerifiedXCore.Tests
         }
 
         [Fact]
+        public async Task Writes_waiting_for_a_file_are_bounded_and_hold_only_what_they_will_write()
+        {
+            var path = Path.Combine(_dir, "flooded.txt");
+            var big = Environment.NewLine + new string('D', 1_000_000);
+            var writes = Enumerable.Range(0, 3 * LogFile.MaxWaitingWrites).Select(_ => LogFile.AppendAsync(path, big)).ToList();
+            await Task.WhenAll(writes);
+            var length = new FileInfo(path).Length + (File.Exists(path + ".1") ? new FileInfo(path + ".1").Length : 0);
+            // Every write kept only its first characters, and no more were waiting at once than the bound.
+            Assert.True(length <= (long)3 * LogFile.MaxWaitingWrites * (LogUtility.MaxMessageChars + 128));
+        }
+
+        [Fact]
         public void Lines_written_together_are_each_cut()
         {
             var path = Path.Combine(_dir, "casterlog.txt");
