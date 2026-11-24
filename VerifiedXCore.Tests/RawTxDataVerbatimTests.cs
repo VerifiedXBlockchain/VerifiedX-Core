@@ -20,8 +20,9 @@ namespace VerifiedXCore.Tests
     /// From Globals.RawDataVerbatimHeight the raw-transaction routes keep a Data sent as a JSON object or array exactly as
     /// it appears in the request body: that text is hashed and stored. Below it the node writes such a Data back after a
     /// default parse (numbers through double, whitespace removed, escapes decoded, date-like strings in the node's time
-    /// zone). A JSON string, null or missing Data reads as before at every height, and a string holding JSON is still
-    /// refused on a call-type transaction.
+    /// zone); from it a Data sent as a JSON string is the string's decoded value, with no quotes, date or number
+    /// conversion. Null or missing Data reads as before at every height, and a string holding JSON is still refused on a
+    /// call-type transaction. Run the class with TZ set to a zone away from UTC to see that nothing depends on it.
     /// </summary>
     [Collection("DbContextSequential")]
     public class RawTxDataVerbatimTests : IDisposable
@@ -89,7 +90,7 @@ namespace VerifiedXCore.Tests
         }
 
         /// <summary>A transfer carrying <paramref name="data"/> as its Data, hashed and signed over it.</summary>
-        private Transaction Transfer(string? data, TransactionType type = TransactionType.TX)
+        private Transaction Transfer(string? data, TransactionType type = TransactionType.TX, long nonce = 0)
         {
             var tx = new Transaction
             {
@@ -98,7 +99,7 @@ namespace VerifiedXCore.Tests
                 ToAddress = _receiver.Address,
                 Amount = type == TransactionType.TX ? 1M.ToNormalizeDecimal() : 0.0M,
                 Fee = 0.0002M,
-                Nonce = 0,
+                Nonce = nonce,
                 TransactionType = type,
                 Data = data,
             };
@@ -224,22 +225,92 @@ namespace VerifiedXCore.Tests
             Assert.Equal(tx.Hash, (string?)answer["Hash"]);
         }
 
+        /// <summary>Data sent as a JSON string, and the value a client means by it.</summary>
+        public static IEnumerable<object[]> StringDataTexts => new[]
+        {
+            new object[] { "\"memo  x\"", "memo  x" },                                                     // plain text, inner spaces
+            new object[] { "\"2026-11-24T10:00:00.1234567+01:00\"", "2026-11-24T10:00:00.1234567+01:00" }, // date with an offset
+            new object[] { "\"2026-11-24T10:00:00-05:00\"", "2026-11-24T10:00:00-05:00" },                 // date with a negative offset
+            new object[] { "\"2026-11-24T10:00:00Z\"", "2026-11-24T10:00:00Z" },                           // date in UTC
+            new object[] { "\"\\u0041\\u00e9\\/ \\\"q\\\" \\n\"", "A\u00e9/ \"q\" \n" },               // escapes
+            new object[] { "\"1.50\"", "1.50" },                                                           // a number in a string
+            new object[] { "\"{\\\"memo\\\":\\\"hello\\\"}\"", "{\"memo\":\"hello\"}" },                // JSON in a string, on a plain TX
+        };
+
+        [Theory]
+        [MemberData(nameof(StringDataTexts))]
+        public async Task FromTheHeight_AStringData_IsItsDecodedValue(string dataJson, string value)
+        {
+            var tx = Transfer(value);
+            var bodyText = BodyText(tx, dataJson);
+            var bound = Bound(bodyText);
+
+            var token = JToken.Parse(bound.ToString()!);
+            Assert.Null(TXV1Controller.RawData(token, bound));
+            Assert.Equal(value, (string?)token["Data"]);
+            // The route's own read of the token keeps it (no date conversion on the way to Transaction.Data).
+            Assert.Equal(value, JsonConvert.DeserializeObject<Transaction>(token.ToString())!.Data);
+
+            var answer = JObject.Parse(await new TXV1Controller().GetTxHash(bound));
+            Assert.Equal("Success", (string?)answer["Result"]);
+            Assert.Equal(tx.Hash, (string?)answer["Hash"]);
+        }
+
+        [Theory]
+        [MemberData(nameof(StringDataTexts))]
+        public async Task BelowTheHeight_AStringData_IsWrittenBackAsBefore(string dataJson, string value)
+        {
+            Globals.RawDataVerbatimHeight = Tip + 2;
+            var template = Transfer(value);
+            var bodyText = BodyText(template, dataJson);
+            var before = JToken.Parse(bodyText)["Data"]!.ToString(Formatting.None);
+
+            var answer = JObject.Parse(await new TXV1Controller().GetTxHash(Bound(bodyText)));
+
+            Assert.Equal(HashOver(template, before), (string?)answer["Hash"]);
+            Assert.NotEqual(value, before); // quoted, at the least
+        }
+
         [Fact]
-        public async Task FromTheHeight_OtherDataValues_ReadAsBefore()
+        public async Task FromTheHeight_SendRawTransaction_StoresTheStringGetTxHashHashed()
+        {
+            const string value = "paid 2026-11-24T10:00:00+01:00";
+            const string dateOnly = "2026-11-24T10:00:00+01:00";
+            var api = new TXV1Controller();
+            foreach (var (text, nonce) in new[] { (value, 0L), (dateOnly, 1L) })
+            {
+                var tx = Transfer(text, nonce: nonce);
+                var bodyText = BodyText(tx, JsonConvert.SerializeObject(text));
+
+                var hash = JObject.Parse(await api.GetTxHash(Bound(bodyText)));
+                var sent = JObject.Parse(await api.SendRawTransaction(Bound(bodyText)));
+
+                Assert.Equal(tx.Hash, (string?)hash["Hash"]);
+                Assert.True("Success" == (string?)sent["Result"], sent.ToString());
+                Assert.Equal(tx.Hash, (string?)sent["Hash"]);
+                var pooled = TransactionData.GetPool().FindOne(x => x.Hash == tx.Hash);
+                Assert.Equal(text, pooled.Data);
+            }
+        }
+
+        [Fact]
+        public async Task FromTheHeight_NullAndMissingData_ReadAsBefore()
         {
             var api = new TXV1Controller();
-
-            // A string: its JSON text, as before.
-            var withString = Transfer(JsonConvert.SerializeObject("memo  x"));
-            var stringBody = BodyText(withString, "\"memo  x\"");
-            Assert.Equal(withString.Hash, (string?)JObject.Parse(await api.GetTxHash(Bound(stringBody)))["Hash"]);
-
-            // Null and missing: no Data.
             var withoutData = Transfer(null);
             Assert.Equal(withoutData.Hash, (string?)JObject.Parse(await api.GetTxHash(Bound(BodyText(withoutData, "null"))))["Hash"]);
             var missing = JObject.Parse(JsonConvert.SerializeObject(withoutData));
             missing.Remove("Data");
             Assert.Equal(withoutData.Hash, (string?)JObject.Parse(await api.GetTxHash(Bound(missing.ToString(Formatting.None))))["Hash"]);
+        }
+
+        [Fact]
+        public void FromTheHeight_AStringThatIsNotValidText_IsRefused()
+        {
+            const string bodyText = "{\"TransactionType\":0,\"Data\":\"\\ud800\"}"; // a lone surrogate
+            var token = JToken.Parse(bodyText);
+
+            Assert.Equal(TXV1Controller.DataNotReadableAsSentError, TXV1Controller.RawData(token, Bound(bodyText)));
         }
 
         [Fact]
