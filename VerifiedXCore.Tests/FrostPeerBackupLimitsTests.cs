@@ -87,7 +87,7 @@ namespace VerifiedXCore.Tests
         }
 
         [Fact]
-        public void A_row_kept_before_the_limits_that_exceeds_them_is_deleted_when_it_is_read()
+        public void A_row_kept_before_the_limits_that_is_longer_than_any_owner_writes_is_deleted_when_it_is_read_and_no_other_is()
         {
             Assert.True(FrostPeerKeyBackup.SaveBackup(new FrostPeerKeyBackup
             {
@@ -97,10 +97,15 @@ namespace VerifiedXCore.Tests
             {
                 OwnerAddress = "xOwner", SmartContractUID = "sc-honest", EncryptedBlob = "blob", PlaintextHash = Hash, GroupPublicKey = GroupKey,
             }));
+            // Honest lengths in another form (a key with spaces around it, a hash in capitals) is still a backup: kept.
+            Assert.True(FrostPeerKeyBackup.SaveBackup(new FrostPeerKeyBackup
+            {
+                OwnerAddress = "xOwner", SmartContractUID = "sc-other-form", EncryptedBlob = "blob", PlaintextHash = Hash.ToUpperInvariant(), GroupPublicKey = " " + GroupKey + " ",
+            }));
 
             var kept = FrostPeerKeyBackup.GetBackupsForOwnerWithinLimits("xOwner");
-            Assert.Equal(new[] { "sc-honest" }, kept.Select(b => b.SmartContractUID));
-            Assert.Single(FrostPeerKeyBackup.GetBackupsForOwner("xOwner"));
+            Assert.Equal(new[] { "sc-honest", "sc-other-form" }, kept.Select(b => b.SmartContractUID).OrderBy(u => u));
+            Assert.Equal(2, FrostPeerKeyBackup.GetBackupsForOwner("xOwner").Count);
         }
 
         [Fact]

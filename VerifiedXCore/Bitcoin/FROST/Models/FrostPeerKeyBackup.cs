@@ -105,16 +105,22 @@ namespace VerifiedXCore.Bitcoin.FROST.Models
             return true;
         }
 
+        /// <summary>Whether a stored row has a field longer than any owner's node writes. Its form is not judged here.</summary>
+        public static bool ExceedsLengths(FrostPeerKeyBackup backup) =>
+            backup.OwnerAddress.Length > MaxIdChars || backup.SmartContractUID.Length > MaxIdChars || backup.EncryptedBlob.Length > MaxBlobChars
+            || backup.PlaintextHash.Length > PlaintextHashChars || backup.GroupPublicKey.Length > MaxGroupKeyChars;
+
         /// <summary>
-        /// The owner's backups whose fields are within <see cref="FieldRefusal"/>. A row kept before those limits that
-        /// exceeds them is deleted here: it was not what the owner's node writes.
+        /// The owner's backups. A row kept before the field limits that is longer than any owner's node writes is deleted
+        /// here: it is not a backup. A row of honest lengths is kept and sent whatever the form of its fields, so no real
+        /// backup is lost to these limits.
         /// </summary>
         public static List<FrostPeerKeyBackup> GetBackupsForOwnerWithinLimits(string ownerAddress)
         {
             var kept = new List<FrostPeerKeyBackup>();
             foreach (var backup in GetBackupsForOwner(ownerAddress))
             {
-                if (FieldRefusal(backup.OwnerAddress, backup.SmartContractUID, backup.EncryptedBlob, backup.PlaintextHash, backup.GroupPublicKey) == null)
+                if (!ExceedsLengths(backup))
                 {
                     kept.Add(backup);
                     continue;
