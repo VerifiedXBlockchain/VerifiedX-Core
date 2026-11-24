@@ -74,7 +74,15 @@ namespace VerifiedXCore.Extensions
             return unixTime;
         }
 
-        public static decimal ToNormalizeDecimal(this decimal value)
+        /// <summary>
+        /// A transaction amount or fee as this node writes it into a transaction built now. Below
+        /// Globals.CanonicalInputHeight a whole number is given one place ("1" as 1.0) and anything else is kept as it is
+        /// ("1.50" stays 1.50); from the height it is the one accepted spelling ("1.50" as 1.5). The value does not change.
+        /// </summary>
+        public static decimal ToNormalizeDecimal(this decimal value) => LedgerIntegrityRules.SpellForNextBlock(value, legacy: LegacyNormalizeDecimal(value));
+
+        /// <summary>ToNormalizeDecimal as it has always been, kept below Globals.CanonicalInputHeight.</summary>
+        internal static decimal LegacyNormalizeDecimal(decimal value)
         {
             var amountCheck = value % 1 == 0;
             var amountFormat = 0M;

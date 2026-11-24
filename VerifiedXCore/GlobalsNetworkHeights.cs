@@ -75,6 +75,7 @@ namespace VerifiedXCore
             Globals.SalePaymentSharesHeight = Globals.IsTestNet ? Globals.SalePaymentSharesTestnetHeight : Globals.SalePaymentSharesHeight;
             Globals.BridgeVoteOncePerCasterHeight = Globals.IsTestNet ? Globals.BridgeVoteOncePerCasterTestnetHeight : Globals.BridgeVoteOncePerCasterHeight;
             Globals.BridgeExitCarriesTotalsHeight = Globals.IsTestNet ? Globals.BridgeExitCarriesTotalsTestnetHeight : Globals.BridgeExitCarriesTotalsHeight;
+            Globals.CanonicalInputHeight = Globals.IsTestNet ? Globals.CanonicalInputTestnetHeight : Globals.CanonicalInputHeight;
             Globals.WithdrawalUniqueIdRulesHeight = Globals.IsTestNet ? Globals.FundLossAuditTestnetHeight : Globals.WithdrawalUniqueIdRulesHeight;
             Globals.RoyaltyRewriteRulesHeight = Globals.IsTestNet ? Globals.FundLossAuditTestnetHeight : Globals.RoyaltyRewriteRulesHeight;
             Globals.ReserveTokenRulesHeight = Globals.IsTestNet ? Globals.FundLossAuditTestnetHeight : Globals.ReserveTokenRulesHeight;
@@ -152,6 +153,7 @@ namespace VerifiedXCore
             Globals.BridgeExitCarriesTotalsHeight = h;
             Globals.PlonkCurrentRulesHeight = h;
             // Not yet on the live testnet
+            Globals.CanonicalInputHeight = h;
             Globals.RawDataVerbatimHeight = h;
             Globals.StrictDataReaderHeight = h;
         }

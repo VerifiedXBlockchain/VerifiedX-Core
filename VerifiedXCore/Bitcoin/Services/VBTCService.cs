@@ -3415,7 +3415,7 @@ namespace VerifiedXCore.Bitcoin.Services
                     Data = txData
                 };
 
-                unlockTx.Fee = 0.00M;
+                unlockTx.Fee = VerifiedXCore.Services.LedgerIntegrityRules.SpellForNextBlock(0M, legacy: 0.00M);
 
                 // Build and sign
                 unlockTx.Build();
@@ -3513,7 +3513,7 @@ namespace VerifiedXCore.Bitcoin.Services
                     TransactionType = TransactionType.VBTC_V2_BRIDGE_EXIT_TO_BTC,
                     Data = txData
                 };
-                tx.Fee = 0.00M;
+                tx.Fee = VerifiedXCore.Services.LedgerIntegrityRules.SpellForNextBlock(0M, legacy: 0.00M);
                 tx.Build();
                 var privateKey = account.GetPrivKey;
                 var publicKey = account.PublicKey;
@@ -3602,7 +3602,7 @@ namespace VerifiedXCore.Bitcoin.Services
                 };
 
                 // Do NOT call FeeCalcService.CalculateTXFee here — bridge TXs must remain fee-free.
-                completionTx.Fee = 0.00M;
+                completionTx.Fee = VerifiedXCore.Services.LedgerIntegrityRules.SpellForNextBlock(0M, legacy: 0.00M);
                 completionTx.Build();
 
                 var signature = VerifiedXCore.Services.SignatureService.CreateSignature(completionTx.Hash, privateKey, publicKey);
@@ -3698,7 +3698,7 @@ namespace VerifiedXCore.Bitcoin.Services
                     Data = txData
                 };
 
-                failTx.Fee = 0.00M;
+                failTx.Fee = VerifiedXCore.Services.LedgerIntegrityRules.SpellForNextBlock(0M, legacy: 0.00M);
                 failTx.Build();
 
                 var signature = VerifiedXCore.Services.SignatureService.CreateSignature(failTx.Hash, privateKey, publicKey);

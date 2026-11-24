@@ -314,14 +314,14 @@ namespace VerifiedXCore.Bitcoin.Services
                     Timestamp = TimeUtil.GetTime(),
                     FromAddress = signerAddress,
                     ToAddress = signerAddress,
-                    Amount = 0.00M,
-                    Fee = 0.00M,
+                    Amount = VerifiedXCore.Services.LedgerIntegrityRules.SpellForNextBlock(0M, legacy: 0.00M),
+                    Fee = VerifiedXCore.Services.LedgerIntegrityRules.SpellForNextBlock(0M, legacy: 0.00M),
                     Nonce = AccountStateTrei.GetNextNonce(signerAddress),
                     TransactionType = TransactionType.VBTC_V2_BRIDGE_POOL_UNLOCK,
                     Data = txData
                 };
 
-                poolUnlockTx.Fee = 0.00M;
+                poolUnlockTx.Fee = VerifiedXCore.Services.LedgerIntegrityRules.SpellForNextBlock(0M, legacy: 0.00M);
 
                 poolUnlockTx.Build();
                 var txHash = poolUnlockTx.Hash;

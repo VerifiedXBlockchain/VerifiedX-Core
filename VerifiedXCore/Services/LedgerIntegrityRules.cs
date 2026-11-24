@@ -1333,6 +1333,69 @@ namespace VerifiedXCore.Services
             return tx.Fee >= 1M ? "A transaction's fee must be below 1 VFX (ambiguous hash)." : null;
         }
 
+        internal const string NonCanonicalAmountReason =
+            "A transaction's Amount must be written as the shortest decimal with at least one digit after the point (for example 1.0, 1.5 or 0.0).";
+        internal const string NonCanonicalFeeReason =
+            "A transaction's Fee must be written as the shortest decimal with at least one digit after the point (for example 0.000006 or 0.0).";
+
+        /// <summary>
+        /// From Globals.CanonicalInputHeight a transaction's Amount and Fee are each written one way: the shortest decimal
+        /// with at least one digit after the point. The hash covers how the two are written, and a decimal keeps the
+        /// number of places it was read with, so "1", "1.0" and "1.00" were three spellings, and three hashes, of one
+        /// amount. Judged on the value as it arrived, before admission gives it a block's spelling. A shield hashes its
+        /// Amount as written but its Fee by value; the other private transactions hash neither, so only a shield's Amount
+        /// is held to it among them. Null when the rule passes.
+        /// </summary>
+        public static string? CanonicalAmountAndFee(Transaction tx, long height)
+        {
+            if (tx == null || height < Globals.CanonicalInputHeight) return null;
+            var isPrivate = VerifiedXCore.Privacy.PrivateTransactionTypes.IsPrivateTransaction(tx.TransactionType);
+            if (isPrivate && !VerifiedXCore.Privacy.PrivateTransactionTypes.IsTransparentShield(tx.TransactionType)) return null;
+            if (!IsCanonicalDecimal(tx.Amount)) return NonCanonicalAmountReason;
+            if (!isPrivate && !IsCanonicalDecimal(tx.Fee)) return NonCanonicalFeeReason;
+            return null;
+        }
+
+        /// <summary>
+        /// Whether a decimal is written the one accepted way: with at least one place, and with no trailing zero unless
+        /// that zero is its only place ("1.0", "1.5", "0.00002", "0.0"; not "1", "1.00" or "0.000006000"). Read from the
+        /// decimal's scale and digits, never its value, since every spelling of a number has the same value.
+        /// </summary>
+        public static bool IsCanonicalDecimal(decimal value)
+        {
+            var bits = decimal.GetBits(value);
+            var scale = (bits[3] >> 16) & 0xFF;
+            if (scale == 0) return false;
+            if (scale == 1) return true;
+            var digits = ((System.Numerics.BigInteger)(uint)bits[2] << 64) | ((System.Numerics.BigInteger)(uint)bits[1] << 32) | (uint)bits[0];
+            return !(digits % 10).IsZero;
+        }
+
+        /// <summary>The height a transaction this node builds now is judged for: the next block.</summary>
+        public static long NextBlockHeight => (Globals.LastBlock?.Height ?? 0) + 1;
+
+        /// <summary>
+        /// The Amount or Fee this node writes into a transaction it builds for <paramref name="height"/>: from
+        /// Globals.CanonicalInputHeight the canonical spelling of <paramref name="value"/>; below it
+        /// <paramref name="legacy"/>, the value exactly as Core has always written it, decimal places included. Below the
+        /// height nothing Core builds changes.
+        /// </summary>
+        public static decimal SpellForHeight(decimal value, decimal legacy, long height) =>
+            height >= Globals.CanonicalInputHeight ? CanonicalDecimal(value) : legacy;
+
+        /// <summary>As <see cref="SpellForHeight"/>, for a transaction built now (judged for the next block).</summary>
+        public static decimal SpellForNextBlock(decimal value, decimal legacy) => SpellForHeight(value, legacy, NextBlockHeight);
+
+        /// <summary>
+        /// The one accepted spelling of a decimal (see <see cref="IsCanonicalDecimal"/>): its trailing zeros removed, and a
+        /// whole number given one place. The value does not change. For transactions this node builds.
+        /// </summary>
+        public static decimal CanonicalDecimal(decimal value)
+        {
+            var shortest = value / 1.000000000000000000000000000000000m;
+            return ((decimal.GetBits(shortest)[3] >> 16) & 0xFF) == 0 ? shortest + 0.0M : shortest;
+        }
+
         // ── NEW-17: NFT sale amounts ─────────────────────────────────────────────────────────────────────────────
 
         /// <summary>
