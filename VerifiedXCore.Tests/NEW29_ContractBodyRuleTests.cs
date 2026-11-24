@@ -89,6 +89,19 @@ namespace VerifiedXCore.Tests
             Assert.Equal("Contract code may not call rand().", LedgerIntegrityRules.ContractBodyAllowed(mint));
         }
 
+        [Theory]
+        [InlineData(true)]
+        [InlineData(false)]
+        public void Every_copy_of_a_key_written_twice_is_judged(bool badFirst)
+        {
+            var bad = JsonConvert.SerializeObject(With(CallsRand));
+            var good = JsonConvert.SerializeObject(Plain());
+            var mint = Tx("Mint()", Plain());
+            mint.Data = "[{\"Function\":\"Mint()\",\"ContractUID\":\"" + Uid + "\",\"Data\":" + (badFirst ? bad : good) + ",\"Data\":" + (badFirst ? good : bad) + "}]";
+            Assert.Equal("Contract code may not call rand().", LedgerIntegrityRules.ContractBodyAllowed(mint));
+            Assert.Equal(2, LedgerIntegrityRules.CarriedContractBodies(mint.Data).Count());
+        }
+
         [Fact]
         public void In_a_block_any_spelling_of_the_key_is_judged_from_its_height_and_not_below()
         {
