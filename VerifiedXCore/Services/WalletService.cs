@@ -209,8 +209,8 @@ namespace VerifiedXCore.Services
                 Timestamp = TimeUtil.GetTime(),
                 FromAddress = FromAddress,
                 ToAddress = ToAddress,
-                Amount = Amount,
-                Fee = NewFee,
+                Amount = LedgerIntegrityRules.CanonicalDecimal(Amount),
+                Fee = LedgerIntegrityRules.CanonicalDecimal(NewFee),
                 Nonce = originalTx.Nonce, // Use same nonce as original TX
                 TransactionType = TransactionType.TX,
                 Data = $"[RBF:{ReplacingTxHash}]" // RBF marker with original hash

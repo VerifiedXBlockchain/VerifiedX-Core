@@ -884,7 +884,7 @@ namespace VerifiedXCore.Controllers
                     Timestamp = tx.Timestamp,
                     FromAddress = tx.FromAddress,
                     ToAddress = tx.ToAddress.ToAddressNormalize(),
-                    Amount = tx.Amount + 0.0M,
+                    Amount = LedgerIntegrityRules.CanonicalDecimal(tx.Amount),
                     Fee = 0,
                     Nonce = AccountStateTrei.GetNextNonce(tx.FromAddress),
                     TransactionType = tx.TransactionType,
