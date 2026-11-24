@@ -622,16 +622,17 @@ namespace VerifiedXCore.Bitcoin.Services
                             result.PeersAsked++;
                             if (backups == null) { result.PeersFailed++; return; }
                             result.FromPeer[validator.ValidatorAddress] = backups.Count;
+                            var fromThisPeer = new HashSet<string>(StringComparer.Ordinal);
                             foreach (var backup in backups.Where(x => x != null && !string.IsNullOrEmpty(x.SmartContractUID)))
                             {
-                                // A few distinct copies a contract, compared by a hash of the blob: one peer's answer of many
-                                // distinct items under one id cost a comparison with every copy kept for it.
+                                if (!fromThisPeer.Add(backup.SmartContractUID)) continue; // a peer keeps one backup a contract for an owner
+                                // One copy a contract from each peer (the reader keeps no more), distinct copies compared by a
+                                // hash of the blob: no peer can take the places of another peer's copy.
                                 if (!blobsByContract.TryGetValue(backup.SmartContractUID, out var seen))
                                 {
                                     blobsByContract[backup.SmartContractUID] = seen = new HashSet<string>(StringComparer.Ordinal);
                                     copiesByContract[backup.SmartContractUID] = new List<BackupRecoveryItem>();
                                 }
-                                if (seen.Count >= MaxCopiesPerContract) continue;
                                 if (seen.Add(Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(backup.EncryptedBlob)))))
                                     copiesByContract[backup.SmartContractUID].Add(backup);
                             }
@@ -753,11 +754,15 @@ namespace VerifiedXCore.Bitcoin.Services
 
         /// <summary>The backups a peer holds for the requester, an empty list when it holds none, null when it did not answer.</summary>
         /// <summary>Peers asked at once during a recovery.</summary>
-        public const int PeersAskedAtOnce = 8;
-        /// <summary>Distinct copies of one contract's backup kept from all answers together.</summary>
-        public const int MaxCopiesPerContract = 8;
-        /// <summary>Items read from one peer's answer; an owner's own backups are one a contract it holds a share of.</summary>
-        public const int MaxItemsPerAnswer = 100_000;
+        public const int PeersAskedAtOnce = 4;
+        /// <summary>Items read from one peer's answer, counted whether kept or not. A peer keeps one backup a contract for an owner.</summary>
+        public const int MaxItemsPerAnswer = 20_000;
+        /// <summary>Bytes read from one peer's answer.</summary>
+        public const long MaxAnswerBytes = 32L * 1024 * 1024;
+        /// <summary>How long one peer has to answer in full: the request, and every read of its body.</summary>
+        public static readonly TimeSpan AnswerDeadline = TimeSpan.FromSeconds(60);
+        /// <summary>Items one answer may carry under ids that name no contract on chain (a ceremony's id before its vault exists).</summary>
+        public const int MaxUnboundItemsPerAnswer = VerifiedXCore.Bitcoin.FROST.Models.FrostPeerKeyBackup.MaxUnboundBackupsPerOwner;
 
         /// <summary>A recovery request signed now, for one peer; null when this node cannot sign.</summary>
         private static string? SignedRecoveryRequest(string validatorAddress)
@@ -773,35 +778,87 @@ namespace VerifiedXCore.Bitcoin.Services
         }
 
         /// <summary>
-        /// One peer's answer, read item by item as it arrives: at most <see cref="MaxItemsPerAnswer"/> items, each with
-        /// fields no longer than an owner's node writes, so neither its size nor its count holds this node.
+        /// One peer's answer, read item by item as it arrives, within <see cref="MaxAnswerBytes"/> and
+        /// <see cref="MaxItemsPerAnswer"/> items (every item counted, kept or not), each with fields no longer than an
+        /// owner's node writes. A peer keeps one backup a contract for an owner, so the first item for a contract is kept
+        /// and any later one for it is not; items under ids that name no contract on chain are kept up to
+        /// <see cref="MaxUnboundItemsPerAnswer"/>. What is kept is therefore one item a contract, whatever the peer sends.
         /// </summary>
-        internal static async Task<List<BackupRecoveryItem>?> ReadRecoveryAnswerAsync(Stream body)
+        internal static async Task<List<BackupRecoveryItem>?> ReadRecoveryAnswerAsync(Stream body, CancellationToken deadline = default, Func<string, bool>? namesAContract = null)
         {
+            namesAContract ??= uid => !string.IsNullOrEmpty(VerifiedXCore.Bitcoin.FROST.FrostDkgGuard.ResolveOnChainGroupPublicKey(uid));
             var items = new List<BackupRecoveryItem>();
-            using var text = new StreamReader(body, Encoding.UTF8);
+            var seen = new HashSet<string>(StringComparer.Ordinal);
+            var unbound = 0;
+            var read = 0;
+            using var limited = new BoundedReadStream(body, MaxAnswerBytes, deadline);
+            using var text = new StreamReader(limited, Encoding.UTF8);
             using var json = new JsonTextReader(text) { MaxDepth = 8 };
             var serializer = JsonSerializer.CreateDefault();
             bool? success = null;
-            while (await json.ReadAsync())
+            try
             {
-                if (json.TokenType != JsonToken.PropertyName || json.Depth != 1) continue;
-                var name = (string?)json.Value;
-                if (string.Equals(name, "Success", StringComparison.OrdinalIgnoreCase)) { success = await json.ReadAsBooleanAsync(); continue; }
-                if (!string.Equals(name, "Backups", StringComparison.OrdinalIgnoreCase)) continue;
-                if (!await json.ReadAsync() || json.TokenType != JsonToken.StartArray) continue;
-                while (await json.ReadAsync() && json.TokenType != JsonToken.EndArray)
+                while (await json.ReadAsync(deadline))
                 {
-                    if (items.Count >= MaxItemsPerAnswer) return items;
-                    var item = serializer.Deserialize<BackupRecoveryItem>(json);
-                    if (item == null) continue;
-                    if (item.SmartContractUID.Length > VerifiedXCore.Bitcoin.FROST.Models.FrostPeerKeyBackup.MaxIdChars
-                        || item.EncryptedBlob.Length > VerifiedXCore.Bitcoin.FROST.Models.FrostPeerKeyBackup.MaxBlobChars + RandomNonceBlobPrefix.Length + 64
-                        || item.PlaintextHash.Length > VerifiedXCore.Bitcoin.FROST.Models.FrostPeerKeyBackup.PlaintextHashChars) continue;
-                    items.Add(item);
+                    if (json.TokenType != JsonToken.PropertyName || json.Depth != 1) continue;
+                    var name = (string?)json.Value;
+                    if (string.Equals(name, "Success", StringComparison.OrdinalIgnoreCase)) { success = await json.ReadAsBooleanAsync(deadline); continue; }
+                    if (!string.Equals(name, "Backups", StringComparison.OrdinalIgnoreCase)) continue;
+                    if (!await json.ReadAsync(deadline) || json.TokenType != JsonToken.StartArray) continue;
+                    while (await json.ReadAsync(deadline) && json.TokenType != JsonToken.EndArray)
+                    {
+                        if (++read > MaxItemsPerAnswer) return items;
+                        var item = serializer.Deserialize<BackupRecoveryItem>(json);
+                        if (item == null || string.IsNullOrEmpty(item.SmartContractUID)) continue;
+                        if (item.SmartContractUID.Length > VerifiedXCore.Bitcoin.FROST.Models.FrostPeerKeyBackup.MaxIdChars
+                            || item.EncryptedBlob.Length > VerifiedXCore.Bitcoin.FROST.Models.FrostPeerKeyBackup.MaxBlobChars + RandomNonceBlobPrefix.Length + 64
+                            || item.PlaintextHash.Length > VerifiedXCore.Bitcoin.FROST.Models.FrostPeerKeyBackup.PlaintextHashChars) continue;
+                        if (!seen.Add(item.SmartContractUID)) continue; // one a contract from one peer
+                        if (!namesAContract(item.SmartContractUID) && ++unbound > MaxUnboundItemsPerAnswer) continue;
+                        items.Add(item);
+                    }
                 }
             }
+            catch (BoundedReadStream.LimitReached) { return items; } // the answer was longer than any honest one: what came first is kept
             return success == false ? null : items;
+        }
+
+        /// <summary>A stream that ends with <see cref="LimitReached"/> once more than its limit has been read.</summary>
+        private sealed class BoundedReadStream : Stream
+        {
+            public sealed class LimitReached : IOException { public LimitReached() : base("The answer is longer than any honest one.") { } }
+            private readonly Stream _inner;
+            private readonly long _limit;
+            private readonly CancellationToken _deadline;
+            private long _read;
+            /// <param name="deadline">Applies to every read: the reader above passes no token of its own down to the stream.</param>
+            public BoundedReadStream(Stream inner, long limit, CancellationToken deadline) { _inner = inner; _limit = limit; _deadline = deadline; }
+            public override bool CanRead => true;
+            public override bool CanSeek => false;
+            public override bool CanWrite => false;
+            public override long Length => throw new NotSupportedException();
+            public override long Position { get => _read; set => throw new NotSupportedException(); }
+            public override void Flush() { }
+            public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+            public override void SetLength(long value) => throw new NotSupportedException();
+            public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+            public override int Read(byte[] buffer, int offset, int count) => Count(_inner.Read(buffer, offset, count));
+            public override async Task<int> ReadAsync(byte[] buffer, int offset, int count, CancellationToken cancellationToken)
+            {
+                using var both = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, _deadline);
+                return Count(await _inner.ReadAsync(buffer, offset, count, both.Token));
+            }
+            public override async ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default)
+            {
+                using var both = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, _deadline);
+                return Count(await _inner.ReadAsync(buffer, both.Token));
+            }
+            private int Count(int n)
+            {
+                _read += n;
+                if (_read > _limit) throw new LimitReached();
+                return n;
+            }
         }
 
         private static async Task<List<BackupRecoveryItem>?> FetchBackupsFromPeer(VBTCValidator validator, string requestPayload)
@@ -810,11 +867,14 @@ namespace VerifiedXCore.Bitcoin.Services
             try
             {
                 var url = $"http://{validator.IPAddress}:{Globals.FrostValidatorPort}/frost/backup/recover";
+                // One deadline for the request and every read of its body: a peer that sends its headers and then holds
+                // the body open is given up on at the deadline.
+                using var deadline = new CancellationTokenSource(AnswerDeadline);
                 using var request = new HttpRequestMessage(HttpMethod.Post, url) { Content = new StringContent(requestPayload, Encoding.UTF8, "application/json") };
-                using var response = await _backupHttpClient.SendAsync(request, HttpCompletionOption.ResponseHeadersRead);
+                using var response = await _backupHttpClient.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, deadline.Token);
                 if (!response.IsSuccessStatusCode) return null;
-                await using var body = await response.Content.ReadAsStreamAsync();
-                return await ReadRecoveryAnswerAsync(body);
+                await using var body = await response.Content.ReadAsStreamAsync(deadline.Token);
+                return await ReadRecoveryAnswerAsync(body, deadline.Token);
             }
             catch (Exception ex)
             {

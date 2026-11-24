@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Threading;
 using System.Text;
 using Newtonsoft.Json;
 using VerifiedXCore.Bitcoin.FROST.Models;
@@ -104,6 +105,61 @@ namespace VerifiedXCore.Tests
 
             var refused = await FrostKeyBackupService.ReadRecoveryAnswerAsync(new MemoryStream(Encoding.UTF8.GetBytes("{\"Success\":false,\"Message\":\"no\"}")));
             Assert.Null(refused);
+        }
+
+        private sealed class EndlessStream : Stream
+        {
+            private readonly byte[] _start;
+            private int _at;
+            public EndlessStream(string start) => _start = Encoding.UTF8.GetBytes(start);
+            public override bool CanRead => true;
+            public override bool CanSeek => false;
+            public override bool CanWrite => false;
+            public override long Length => throw new NotSupportedException();
+            public override long Position { get => 0; set => throw new NotSupportedException(); }
+            public override void Flush() { }
+            public override long Seek(long o, SeekOrigin s) => throw new NotSupportedException();
+            public override void SetLength(long v) => throw new NotSupportedException();
+            public override void Write(byte[] b, int o, int c) => throw new NotSupportedException();
+            public override int Read(byte[] b, int o, int c) => throw new NotSupportedException();
+            public override async Task<int> ReadAsync(byte[] b, int o, int c, CancellationToken t)
+            {
+                if (_at < _start.Length) { var n = Math.Min(c, _start.Length - _at); Array.Copy(_start, _at, b, o, n); _at += n; return n; }
+                await Task.Delay(Timeout.Infinite, t); // the body is held open
+                return 0;
+            }
+        }
+
+        [Fact]
+        public async Task A_peer_that_holds_its_answer_open_is_given_up_on_at_the_deadline()
+        {
+            using var deadline = new CancellationTokenSource(TimeSpan.FromMilliseconds(300));
+            var clock = Stopwatch.StartNew();
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
+                FrostKeyBackupService.ReadRecoveryAnswerAsync(new EndlessStream("{\"Success\":true,\"Backups\":["), deadline.Token, _ => true));
+            Assert.True(clock.ElapsedMilliseconds < 3_000);
+        }
+
+        [Fact]
+        public async Task An_answer_keeps_one_item_a_contract_and_few_under_ids_that_name_none()
+        {
+            var items = new List<object>();
+            for (var i = 0; i < 1_000; i++) items.Add(new { SmartContractUID = "sc-real", EncryptedBlob = "junk" + i, PlaintextHash = "", Version = 1 });
+            for (var i = 0; i < 1_000; i++) items.Add(new { SmartContractUID = "made-up-" + i, EncryptedBlob = "x", PlaintextHash = "", Version = 1 });
+            var answer = JsonConvert.SerializeObject(new { Success = true, Backups = items });
+            var kept = await FrostKeyBackupService.ReadRecoveryAnswerAsync(new MemoryStream(Encoding.UTF8.GetBytes(answer)), default, uid => uid == "sc-real");
+            Assert.Single(kept!, i => i.SmartContractUID == "sc-real");
+            Assert.Equal(FrostKeyBackupService.MaxUnboundItemsPerAnswer, kept!.Count(i => i.SmartContractUID.StartsWith("made-up-")));
+        }
+
+        [Fact]
+        public async Task An_answer_longer_than_any_honest_one_is_read_no_further()
+        {
+            var big = "{\"Success\":true,\"Backups\":[" + string.Join(",", Enumerable.Range(0, 3_000).Select(i =>
+                JsonConvert.SerializeObject(new { SmartContractUID = "sc-" + i, EncryptedBlob = new string('e', 16 * 1024), PlaintextHash = "", Version = 1 }))) + "]}";
+            Assert.True(big.Length > FrostKeyBackupService.MaxAnswerBytes);
+            var kept = await FrostKeyBackupService.ReadRecoveryAnswerAsync(new MemoryStream(Encoding.UTF8.GetBytes(big)), default, _ => true);
+            Assert.InRange(kept!.Count, 1, (int)(FrostKeyBackupService.MaxAnswerBytes / (16 * 1024)));
         }
 
         [Fact]
