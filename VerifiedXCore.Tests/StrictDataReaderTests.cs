@@ -357,12 +357,12 @@ namespace VerifiedXCore.Tests
             return (key, pub, AccountData.GetHumanAddress(pub));
         }
 
-        private Transaction Signed(TransactionType type, string to, decimal amount, string data)
+        private Transaction Signed(TransactionType type, string to, decimal amount, string data, long nonce = 0)
         {
             var tx = new Transaction
             {
-                Timestamp = TimeUtil.GetTime(), FromAddress = _holder.Address, ToAddress = to, Amount = amount, Fee = 0, Nonce = 0,
-                TransactionType = type, Data = data,
+                Timestamp = TimeUtil.GetTime(), FromAddress = _holder.Address, ToAddress = to, Amount = amount, Fee = 0,
+                TransactionType = type, Data = data, Nonce = nonce,
             };
             tx.Fee = FeeCalcService.CalculateTXFee(tx);
             tx.Build();
@@ -438,6 +438,27 @@ namespace VerifiedXCore.Tests
             Assert.True(await StateData.UpdateTreis(new Block { Height = Tip + 1, StateRoot = "root", Transactions = new List<Transaction> { tx } }));
             Assert.Equal(expected, TokenBalance(_recipient.Address));
             Assert.Equal(1000M - expected, TokenBalance(_holder.Address));
+        }
+
+        /// <summary>
+        /// The same-block debit guard reads the amounts the validator and the apply read: from the height two transfers of
+        /// 500.000000000000000001 (over the balance of 1,000 together) are not both let into one block, as they were when
+        /// the guard read each as 500 through double.
+        /// </summary>
+        [Theory]
+        [InlineData(true)]
+        [InlineData(false)]
+        public void TheSameBlockGuard_ReadsTheExactAmounts(bool strict)
+        {
+            Globals.StrictDataReaderHeight = strict ? Tip + 1 : Tip + 2;
+            var first = Signed(TransactionType.FTKN_TX, _recipient.Address, 0M, TransferData("500.000000000000000001"));
+            var second = Signed(TransactionType.FTKN_TX, _recipient.Address, 0M, TransferData("500.000000000000000001"), nonce: 1);
+            Assert.Equal(strict ? 500.000000000000000001M : 500M, SameBlockDebitGuard.GetDebits(first, Tip + 1).Single(d => d.Key.Kind == SameBlockDebitGuard.LedgerKind.Token).Amount);
+
+            var state = new SameBlockDebitGuard.State { BlockHeight = Tip + 1 };
+            Assert.True(SameBlockDebitGuard.TryRegister(first, state).Ok);
+            var (secondOk, secondWhy) = SameBlockDebitGuard.TryRegister(second, state);
+            Assert.True(secondOk == !strict, secondWhy);
         }
 
         /// <summary>From the height an amount with more decimal places than the token allows is read as sent, and refused.</summary>
