@@ -192,6 +192,12 @@ namespace VerifiedXCore.Tests
             firstRoom.Dispose(); // giving it back twice gives back nothing more
             Assert.Null(FrostSessionStorage.MakeRoomForDkgState(second, share * 3 / 4, now, out var secondRoom));
             secondRoom!.Dispose();
+            Assert.Equal(0, FrostSessionStorage.DkgReservedCount); // nothing stays held once the requests end
+
+            // A start takes no room of its own (its state is counted as kept): it leaves nothing held either.
+            Assert.Null(FrostSessionStorage.MakeRoomForDkgState(Receiving(), 0, now, out var startRoom));
+            startRoom!.Dispose();
+            Assert.Equal(0, FrostSessionStorage.DkgReservedCount);
         }
 
         [Fact]
