@@ -27,18 +27,74 @@ namespace VerifiedXCore.Controllers
             + "\"Data\": {\"Function\": \"TransferVBTCMultiV2()\", ...}, not \"Data\": \"{\\\"Function\\\": ...}\". "
             + "A string is encoded a second time, so the node would hash and check it as text, not as the call it holds.";
 
+        /// <summary>Why a raw transaction's Data is refused from Globals.RawDataVerbatimHeight: the node could not find the
+        /// Data object or array in the request body to keep it as sent.</summary>
+        internal const string DataNotReadableAsSentError =
+            "Data could not be read as it was sent. Send the transaction as one JSON object whose Data property is the JSON object or array itself.";
+
         /// <summary>Raw-transaction Data as the node hashes and stores it: any JSON value as its JSON text, and a JSON
-        /// null as no data, the same as a missing Data (it hashes as empty, not as the text "null"). Returns why the Data
-        /// is refused, or null: a string holding a JSON object or array is written a second time as a JSON string, which
-        /// no rule that reads the call can parse, so it is refused with that reason (a plain TX, whose Data is not read as
-        /// a call, keeps it as before).</summary>
-        internal static string? RawData(JToken txJToken)
+        /// null as no data, the same as a missing Data (it hashes as empty, not as the text "null"). From
+        /// Globals.RawDataVerbatimHeight a Data sent as a JSON object or array is the exact text of that value in
+        /// <paramref name="body"/> (the request body as bound: a System.Text.Json element, or its text), with no
+        /// re-serialization; below it, and for any other JSON value, it is the parsed token written back. Returns why the
+        /// Data is refused, or null: a string holding a JSON object or array is written a second time as a JSON string,
+        /// which no rule that reads the call can parse, so it is refused with that reason (a plain TX, whose Data is not
+        /// read as a call, keeps it as before).</summary>
+        internal static string? RawData(JToken txJToken, object? body = null)
         {
             var data = txJToken["Data"];
             if (data?.Type == JTokenType.String && HoldsJsonContainer((string?)data) && !IsPlainTransfer(txJToken))
                 return StringifiedDataError;
+            if ((data?.Type == JTokenType.Object || data?.Type == JTokenType.Array) && RawDataVerbatimActive())
+            {
+                var asSent = DataTextAsSent(body);
+                if (asSent == null)
+                    return DataNotReadableAsSentError;
+                txJToken["Data"] = asSent;
+                return null;
+            }
             txJToken["Data"] = data != null && data.Type != JTokenType.Null ? data.ToString(Formatting.None) : null;
             return null;
+        }
+
+        /// <summary>Whether the raw routes keep a JSON object or array Data as sent: from RawDataVerbatimHeight, judged
+        /// for the next block.</summary>
+        internal static bool RawDataVerbatimActive() => Globals.LastBlock.Height + 1 >= Globals.RawDataVerbatimHeight;
+
+        /// <summary>The exact text of the body's Data when it is a JSON object or array, or null. The body is read as
+        /// System.Text.Json reads it (the API binds [FromBody] object to a JsonElement, which keeps the request's text);
+        /// of repeated Data properties the last counts, as in the parsed token.</summary>
+        private static string? DataTextAsSent(object? body)
+        {
+            switch (body)
+            {
+                case System.Text.Json.JsonElement element:
+                    return ContainerDataText(element);
+                case string text:
+                    try
+                    {
+                        using var document = System.Text.Json.JsonDocument.Parse(text);
+                        return ContainerDataText(document.RootElement);
+                    }
+                    catch (System.Text.Json.JsonException) { return null; }
+                default:
+                    return null;
+            }
+        }
+
+        private static string? ContainerDataText(System.Text.Json.JsonElement root)
+        {
+            if (root.ValueKind != System.Text.Json.JsonValueKind.Object)
+                return null;
+            System.Text.Json.JsonElement? data = null;
+            foreach (var property in root.EnumerateObject())
+            {
+                if (property.NameEquals("Data"))
+                    data = property.Value;
+            }
+            return data is { ValueKind: System.Text.Json.JsonValueKind.Object or System.Text.Json.JsonValueKind.Array } value
+                ? value.GetRawText()
+                : null;
         }
 
         private static bool HoldsJsonContainer(string? text)
@@ -874,7 +930,7 @@ namespace VerifiedXCore.Controllers
             {
                 var txJToken = JToken.Parse(jsonData.ToString());
                 Type type = typeof(string);
-                var dataError = RawData(txJToken);
+                var dataError = RawData(txJToken, jsonData);
                 if (dataError != null)
                     return JsonConvert.SerializeObject(new { Result = "Fail", Message = dataError });
                 var tx = JsonConvert.DeserializeObject<Transaction>(txJToken.ToString());
@@ -917,7 +973,7 @@ namespace VerifiedXCore.Controllers
             {
                 var txJToken = JToken.Parse(jsonData.ToString());
                 Type type = typeof(string);
-                var dataError = RawData(txJToken);
+                var dataError = RawData(txJToken, jsonData);
                 if (dataError != null)
                     return JsonConvert.SerializeObject(new { Result = "Fail", Message = dataError });
                 var tx = JsonConvert.DeserializeObject<Transaction>(txJToken.ToString());
@@ -994,7 +1050,7 @@ namespace VerifiedXCore.Controllers
             {
                 var txJToken = JToken.Parse(jsonData.ToString());
                 Type type = typeof(string);
-                var dataError = RawData(txJToken);
+                var dataError = RawData(txJToken, jsonData);
                 if (dataError != null)
                     return JsonConvert.SerializeObject(new { Result = "Fail", Message = dataError });
                 var transaction = JsonConvert.DeserializeObject<Transaction>(txJToken.ToString());
@@ -1044,7 +1100,7 @@ namespace VerifiedXCore.Controllers
             {
                 var txJToken = JToken.Parse(jsonData.ToString());
                 Type type = typeof(string);
-                var dataError = RawData(txJToken);
+                var dataError = RawData(txJToken, jsonData);
                 if (dataError != null)
                     return JsonConvert.SerializeObject(new { Result = "Fail", Message = dataError });
                 var transaction = JsonConvert.DeserializeObject<Transaction>(txJToken.ToString());
