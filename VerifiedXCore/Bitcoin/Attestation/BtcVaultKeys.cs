@@ -262,7 +262,7 @@ namespace VerifiedXCore.Bitcoin.Attestation
             if (ceremonyError != null) return ceremonyError;
 
             string scriptHex;
-            try { scriptHex = BitcoinAddress.Create(feature.DepositAddress, FrostDkgAttestation.ConsensusNetwork).ScriptPubKey.ToHex().ToLowerInvariant(); }
+            try { scriptHex = VerifiedXCore.Utilities.BoundedDecode.BitcoinAddress(feature.DepositAddress, FrostDkgAttestation.ConsensusNetwork).ScriptPubKey.ToHex().ToLowerInvariant(); }
             catch { return "the new key's address is not an address on this network"; }
             if (BtcAttestStore.ScriptRow(scriptHex, db) != null) return "the new key's address is already a vault's";
 

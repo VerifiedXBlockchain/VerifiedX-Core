@@ -112,7 +112,7 @@ namespace VerifiedXCore.Bitcoin.FROST
                 if (string.IsNullOrWhiteSpace(depositAddress)) return (false, "Contract deposit address could not be resolved");
 
                 Script depositScript;
-                try { depositScript = BitcoinAddress.Create(depositAddress, Globals.BTCNetwork).ScriptPubKey; }
+                try { depositScript = VerifiedXCore.Utilities.BoundedDecode.BitcoinAddress(depositAddress, Globals.BTCNetwork).ScriptPubKey; }
                 catch (Exception ex) { return (false, $"Contract deposit address invalid: {ApiErrorText.For(ex)}"); }
 
                 for (int i = 0; i < inputCount; i++)
@@ -235,7 +235,7 @@ namespace VerifiedXCore.Bitcoin.FROST
                 {
                     destinationScript = pinnedDestinationScriptHex != null
                         ? Script.FromHex(pinnedDestinationScriptHex)
-                        : BitcoinAddress.Create(destination, Globals.BTCNetwork).ScriptPubKey;
+                        : VerifiedXCore.Utilities.BoundedDecode.BitcoinAddress(destination, Globals.BTCNetwork).ScriptPubKey;
                 }
                 catch (Exception ex) { return (false, $"Authorized destination invalid: {ApiErrorText.For(ex)}"); }
 

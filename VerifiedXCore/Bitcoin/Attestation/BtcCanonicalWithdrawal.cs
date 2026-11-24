@@ -71,7 +71,7 @@ namespace VerifiedXCore.Bitcoin.Attestation
         /// The longest a Bitcoin address can be: a Bech32 string is at most 90 characters, and a Base58 string longer
         /// than that decodes to more than an address's 25 bytes. The decoder's cost grows with the square of the length.
         /// </summary>
-        public const int MaxAddressChars = 90;
+        public const int MaxAddressChars = VerifiedXCore.Utilities.BoundedDecode.MaxBitcoinAddressChars;
 
         /// <summary>The script a Bitcoin address pays to, on the network this chain follows; false when it is not an address there.</summary>
         public static bool TryDestinationScript(string? address, out string scriptHex)
@@ -82,7 +82,7 @@ namespace VerifiedXCore.Bitcoin.Attestation
             if (trimmed.Length > MaxAddressChars) return false; // not an address, and not decoded to find that out
             try
             {
-                scriptHex = BitcoinAddress.Create(trimmed, FrostDkgAttestation.ConsensusNetwork).ScriptPubKey.ToHex().ToLowerInvariant();
+                scriptHex = VerifiedXCore.Utilities.BoundedDecode.BitcoinAddress(trimmed, FrostDkgAttestation.ConsensusNetwork).ScriptPubKey.ToHex().ToLowerInvariant();
                 return scriptHex.Length > 0;
             }
             catch { return false; }

@@ -117,7 +117,7 @@ namespace VerifiedXCore.Bitcoin.Attestation
                 if (string.IsNullOrWhiteSpace(address)) return;
 
                 string scriptHex;
-                try { scriptHex = BitcoinAddress.Create(address.Trim(), FrostDkgAttestation.ConsensusNetwork).ScriptPubKey.ToHex().ToLowerInvariant(); }
+                try { scriptHex = VerifiedXCore.Utilities.BoundedDecode.BitcoinAddress(address.Trim(), FrostDkgAttestation.ConsensusNetwork).ScriptPubKey.ToHex().ToLowerInvariant(); }
                 catch
                 {
                     ErrorLogUtility.LogError($"Vault {scUID} carries a deposit address that is not valid on this network ({address}); it is not watched.", "BtcAttestApply.RegisterVaultIfAny()");

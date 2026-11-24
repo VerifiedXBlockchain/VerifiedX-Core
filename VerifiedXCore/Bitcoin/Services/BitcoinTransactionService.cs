@@ -197,7 +197,7 @@ namespace VerifiedXCore.Bitcoin.Services
             string scriptHash;
             try
             {
-                var bitcoinAddress = BitcoinAddress.Create(taprootAddress, Globals.BTCNetwork);
+                var bitcoinAddress = VerifiedXCore.Utilities.BoundedDecode.BitcoinAddress(taprootAddress, Globals.BTCNetwork);
                 scriptHash = Client.GetScriptHash(bitcoinAddress);
             }
             catch (Exception ex)
@@ -396,8 +396,8 @@ namespace VerifiedXCore.Bitcoin.Services
                 
                 try
                 {
-                    fromAddress = BitcoinAddress.Create(taprootAddress, Globals.BTCNetwork);
-                    toAddress = BitcoinAddress.Create(destinationAddress, Globals.BTCNetwork);
+                    fromAddress = VerifiedXCore.Utilities.BoundedDecode.BitcoinAddress(taprootAddress, Globals.BTCNetwork);
+                    toAddress = VerifiedXCore.Utilities.BoundedDecode.BitcoinAddress(destinationAddress, Globals.BTCNetwork);
                 }
                 catch (Exception ex)
                 {
@@ -1048,8 +1048,8 @@ namespace VerifiedXCore.Bitcoin.Services
                 var ops = outpoints.Select(o => (o ?? "").Trim().ToLowerInvariant()).Where(o => o.Length > 0).Distinct().ToList();
                 if (ops.Count == 0)
                     return (OutpointSpendVerdict.NotSpentByConfirmed, "no outpoints");
-                var depositScript = BitcoinAddress.Create(depositAddress, Globals.BTCNetwork).ScriptPubKey;
-                var scriptHash = Client.GetScriptHash(BitcoinAddress.Create(depositAddress, Globals.BTCNetwork));
+                var depositScript = VerifiedXCore.Utilities.BoundedDecode.BitcoinAddress(depositAddress, Globals.BTCNetwork).ScriptPubKey;
+                var scriptHash = Client.GetScriptHash(VerifiedXCore.Utilities.BoundedDecode.BitcoinAddress(depositAddress, Globals.BTCNetwork));
                 var exclude = (signedTxId ?? "").Trim().ToLowerInvariant();
 
                 int proofs = 0, notSpent = 0, inconclusive = 0;

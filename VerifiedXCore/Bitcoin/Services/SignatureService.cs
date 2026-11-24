@@ -41,7 +41,7 @@ namespace VerifiedXCore.Bitcoin.Services
                 var parts = signatureHex.Split(".");
                 if (parts.Length != 2) return false;
                 var publicKey = new PubKey(parts[1]);
-                var target = BitcoinAddress.Create(btcAddress, network).ScriptPubKey;
+                var target = VerifiedXCore.Utilities.BoundedDecode.BitcoinAddress(btcAddress, network).ScriptPubKey;
 
                 if (publicKey.GetScriptPubKey(ScriptPubKeyType.Legacy) == target
                     || publicKey.GetScriptPubKey(ScriptPubKeyType.Segwit) == target

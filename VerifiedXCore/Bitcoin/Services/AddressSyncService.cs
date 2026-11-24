@@ -54,7 +54,7 @@ namespace VerifiedXCore.Bitcoin.Services
                             var timestampUnix = TimeUtil.GetTime(reversedTimestampHex);
                             var rawTx = await client.GetRawTx(bTx.TxHash);
                             var tx = Transaction.Parse(rawTx.RawTx, Globals.BTCNetwork);
-                            var bitcoinAddress = BitcoinAddress.Create(address, Globals.BTCNetwork);
+                            var bitcoinAddress = VerifiedXCore.Utilities.BoundedDecode.BitcoinAddress(address, Globals.BTCNetwork);
                             List<BitcoinAddress> outgoingAddrs = new List<BitcoinAddress>();
                             foreach (var input in tx.Inputs)
                             {

@@ -60,8 +60,8 @@ namespace VerifiedXCore.Bitcoin.Services
                 if (string.IsNullOrEmpty(senderPrivateKeyHex))
                     return (false, "You must type in your encryption password first!");
 
-                BitcoinAddress senderAddress = BitcoinAddress.Create(sender, Globals.BTCNetwork);
-                BitcoinAddress recipientAddress = BitcoinAddress.Create(receiver, Globals.BTCNetwork);
+                BitcoinAddress senderAddress = VerifiedXCore.Utilities.BoundedDecode.BitcoinAddress(sender, Globals.BTCNetwork);
+                BitcoinAddress recipientAddress = VerifiedXCore.Utilities.BoundedDecode.BitcoinAddress(receiver, Globals.BTCNetwork);
 
                 ulong amountToSend = Convert.ToUInt32(sendAmount * BTCMultiplier);
                 ulong feeEstimate = 0;
@@ -240,8 +240,8 @@ namespace VerifiedXCore.Bitcoin.Services
                 // VX-18: fee estimation needs no key (it never signs). The key read here made the estimate fail while
                 // the wallet was locked, although the route is allowed then.
 
-                BitcoinAddress senderAddress = BitcoinAddress.Create(sender, Globals.BTCNetwork);
-                BitcoinAddress recipientAddress = BitcoinAddress.Create(receiver, Globals.BTCNetwork);
+                BitcoinAddress senderAddress = VerifiedXCore.Utilities.BoundedDecode.BitcoinAddress(sender, Globals.BTCNetwork);
+                BitcoinAddress recipientAddress = VerifiedXCore.Utilities.BoundedDecode.BitcoinAddress(receiver, Globals.BTCNetwork);
 
                 ulong amountToSend = Convert.ToUInt32(sendAmount * BTCMultiplier);
                 ulong feeEstimate = 0;
@@ -365,7 +365,7 @@ namespace VerifiedXCore.Bitcoin.Services
                 if (original.GetHash().ToString() != transaction.Hash)
                     return JsonConvert.SerializeObject(new { Success = false, Message = "The stored transaction data does not match its TXID, so it cannot be replaced." });
 
-                BitcoinAddress senderAddress = BitcoinAddress.Create(transaction.FromAddress, Globals.BTCNetwork);
+                BitcoinAddress senderAddress = VerifiedXCore.Utilities.BoundedDecode.BitcoinAddress(transaction.FromAddress, Globals.BTCNetwork);
 
                 var originalCoins = new List<Coin>();
                 foreach (var input in original.Inputs)
@@ -497,7 +497,7 @@ namespace VerifiedXCore.Bitcoin.Services
                 if (changeAddress != sender)
                     return await SCLogUtility.LogAndReturn($"Change Address did not equal sender.", "TransactionService.SendMultiSigTransactions()", false);
 
-                BitcoinAddress recipientAddress = BitcoinAddress.Create(toAddress, Globals.BTCNetwork);
+                BitcoinAddress recipientAddress = VerifiedXCore.Utilities.BoundedDecode.BitcoinAddress(toAddress, Globals.BTCNetwork);
 
                 //var sendAmount = new Money(amount, MoneyUnit.BTC);
 
@@ -748,7 +748,7 @@ namespace VerifiedXCore.Bitcoin.Services
                 if (changeAddress != sender)
                     return await SCLogUtility.LogAndReturn($"Change Address did not equal sender.", "TransactionService.SendMultiSigTransactions()", false);
 
-                BitcoinAddress recipientAddress = BitcoinAddress.Create(toAddress, Globals.BTCNetwork);
+                BitcoinAddress recipientAddress = VerifiedXCore.Utilities.BoundedDecode.BitcoinAddress(toAddress, Globals.BTCNetwork);
 
                 ulong amountToSend = Convert.ToUInt32(sendAmount * BTCMultiplier);
                 ulong feeEstimate = 0;
