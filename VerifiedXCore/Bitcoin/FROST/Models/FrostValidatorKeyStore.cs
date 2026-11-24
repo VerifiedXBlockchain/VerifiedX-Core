@@ -41,6 +41,13 @@ namespace VerifiedXCore.Bitcoin.FROST.Models
         /// <summary>Timestamp when this key was created</summary>
         public long CreatedTimestamp { get; set; }
 
+        /// <summary>
+        /// When this share was restored from peers' backups on a node that did not hold it (unix seconds); 0 for a share
+        /// this node made or kept. A node's records of what it signed are not in those backups: from that moment it
+        /// knows nothing of what it signed before.
+        /// </summary>
+        public long RestoredFromPeersAt { get; set; }
+
         #region Database Methods
 
         private static ILiteCollection<FrostValidatorKeyStore> GetDb()

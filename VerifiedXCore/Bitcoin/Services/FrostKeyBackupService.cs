@@ -693,7 +693,9 @@ namespace VerifiedXCore.Bitcoin.Services
                             }
                         }
 
-                        // Save to local FrostValidatorKeyStore
+                        // Save to local FrostValidatorKeyStore. A share this node did not hold is marked restored: its
+                        // signing records were not in the backups, and it gives no share for a payment opened before now.
+                        var held = FrostValidatorKeyStore.GetKeyPackage(backup.SmartContractUID, validatorAddress);
                         var keyStoreRecord = new FrostValidatorKeyStore
                         {
                             SmartContractUID = backup.SmartContractUID,
@@ -702,7 +704,8 @@ namespace VerifiedXCore.Bitcoin.Services
                             PubkeyPackage = plaintext.PubkeyPackage,
                             GroupPublicKey = plaintext.GroupPublicKey,
                             ParticipantOrderJson = plaintext.ParticipantOrderJson,
-                            CreatedTimestamp = TimeUtil.GetTime()
+                            CreatedTimestamp = TimeUtil.GetTime(),
+                            RestoredFromPeersAt = held != null ? held.RestoredFromPeersAt : TimeUtil.GetTime(),
                         };
 
                         if (FrostValidatorKeyStore.SaveKeyPackage(keyStoreRecord))
