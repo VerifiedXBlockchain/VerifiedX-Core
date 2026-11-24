@@ -600,50 +600,46 @@ namespace VerifiedXCore.Bitcoin.Services
                 LogUtility.Log($"[FROST Backup] Starting key recovery for {validatorAddress} from {validators.Count} peers",
                     "FrostKeyBackupService.RecoverKeysFromPeers");
 
-                // Sign recovery request
-                var timestamp = TimeUtil.GetTime();
-                var signMessage = $"frost-recovery.{validatorAddress}.{timestamp}";
-                var signature = VerifiedXCore.Services.SignatureService.AddressSignature(validatorAddress, signMessage);
-                if (signature == "ERROR")
-                {
-                    ErrorLogUtility.LogError("Failed to sign recovery request",
-                        "FrostKeyBackupService.RecoverKeysFromPeers");
-                    return result;
-                }
-
-                var requestPayload = JsonConvert.SerializeObject(new
-                {
-                    RequesterAddress = validatorAddress,
-                    Timestamp = timestamp,
-                    Signature = signature
-                });
-
-                // Every peer is asked: each holds the backups that reached it, and one peer's answer can be missing
-                // shares another holds. The answers are joined per contract (the owner is this validator).
+                // Every peer is asked, several at once and in an order no peer chooses, each with a request signed for it
+                // alone: a request signed once was accepted for five minutes, so one peer that answered slowly made it
+                // expire for every peer asked after it. The answers are joined per contract (the owner is this validator).
                 var copiesByContract = new Dictionary<string, List<BackupRecoveryItem>>(StringComparer.Ordinal);
-                foreach (var validator in validators)
+                var blobsByContract = new Dictionary<string, HashSet<string>>(StringComparer.Ordinal);
+                var merge = new object();
+                var peers = validators.Where(v => v.ValidatorAddress != validatorAddress && !string.IsNullOrEmpty(v.IPAddress))
+                    .OrderBy(_ => System.Security.Cryptography.RandomNumberGenerator.GetInt32(int.MaxValue)).ToList();
+                using var asking = new SemaphoreSlim(PeersAskedAtOnce);
+                await Task.WhenAll(peers.Select(async validator =>
                 {
-                    if (validator.ValidatorAddress == validatorAddress) continue;
-                    if (string.IsNullOrEmpty(validator.IPAddress)) continue;
-
-                    result.PeersAsked++;
-                    var backups = await FetchBackupsFromPeer(validator, requestPayload);
-                    if (backups == null)
+                    await asking.WaitAsync();
+                    try
                     {
-                        result.PeersFailed++;
-                        continue;
+                        var requestPayload = SignedRecoveryRequest(validatorAddress);
+                        if (requestPayload == null) { lock (merge) { result.PeersAsked++; result.PeersFailed++; } return; }
+                        var backups = await FetchBackupsFromPeer(validator, requestPayload);
+                        lock (merge)
+                        {
+                            result.PeersAsked++;
+                            if (backups == null) { result.PeersFailed++; return; }
+                            result.FromPeer[validator.ValidatorAddress] = backups.Count;
+                            foreach (var backup in backups.Where(x => x != null && !string.IsNullOrEmpty(x.SmartContractUID)))
+                            {
+                                // A few distinct copies a contract, compared by a hash of the blob: one peer's answer of many
+                                // distinct items under one id cost a comparison with every copy kept for it.
+                                if (!blobsByContract.TryGetValue(backup.SmartContractUID, out var seen))
+                                {
+                                    blobsByContract[backup.SmartContractUID] = seen = new HashSet<string>(StringComparer.Ordinal);
+                                    copiesByContract[backup.SmartContractUID] = new List<BackupRecoveryItem>();
+                                }
+                                if (seen.Count >= MaxCopiesPerContract) continue;
+                                if (seen.Add(Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(backup.EncryptedBlob)))))
+                                    copiesByContract[backup.SmartContractUID].Add(backup);
+                            }
+                        }
+                        LogUtility.Log($"[FROST Backup] Peer {validator.ValidatorAddress} returned {backups?.Count ?? 0} backup(s)", "FrostKeyBackupService.RecoverKeysFromPeers");
                     }
-                    result.FromPeer[validator.ValidatorAddress] = backups.Count;
-                    LogUtility.Log($"[FROST Backup] Peer {validator.ValidatorAddress} returned {backups.Count} backup(s)",
-                        "FrostKeyBackupService.RecoverKeysFromPeers");
-                    foreach (var backup in backups.Where(x => x != null && !string.IsNullOrEmpty(x.SmartContractUID)))
-                    {
-                        if (!copiesByContract.TryGetValue(backup.SmartContractUID, out var copies))
-                            copiesByContract[backup.SmartContractUID] = copies = new List<BackupRecoveryItem>();
-                        if (!copies.Any(c => c.EncryptedBlob == backup.EncryptedBlob))
-                            copies.Add(backup);
-                    }
-                }
+                    finally { asking.Release(); }
+                }));
 
                 if (copiesByContract.Count == 0)
                 {
@@ -756,18 +752,69 @@ namespace VerifiedXCore.Bitcoin.Services
         internal static Func<VBTCValidator, Task<List<BackupRecoveryItem>?>>? FetchFromPeerForTests;
 
         /// <summary>The backups a peer holds for the requester, an empty list when it holds none, null when it did not answer.</summary>
+        /// <summary>Peers asked at once during a recovery.</summary>
+        public const int PeersAskedAtOnce = 8;
+        /// <summary>Distinct copies of one contract's backup kept from all answers together.</summary>
+        public const int MaxCopiesPerContract = 8;
+        /// <summary>Items read from one peer's answer; an owner's own backups are one a contract it holds a share of.</summary>
+        public const int MaxItemsPerAnswer = 100_000;
+
+        /// <summary>A recovery request signed now, for one peer; null when this node cannot sign.</summary>
+        private static string? SignedRecoveryRequest(string validatorAddress)
+        {
+            var timestamp = TimeUtil.GetTime();
+            var signature = VerifiedXCore.Services.SignatureService.AddressSignature(validatorAddress, $"frost-recovery.{validatorAddress}.{timestamp}");
+            if (signature == "ERROR")
+            {
+                ErrorLogUtility.LogError("Failed to sign recovery request", "FrostKeyBackupService.RecoverKeysFromPeers");
+                return null;
+            }
+            return JsonConvert.SerializeObject(new { RequesterAddress = validatorAddress, Timestamp = timestamp, Signature = signature });
+        }
+
+        /// <summary>
+        /// One peer's answer, read item by item as it arrives: at most <see cref="MaxItemsPerAnswer"/> items, each with
+        /// fields no longer than an owner's node writes, so neither its size nor its count holds this node.
+        /// </summary>
+        internal static async Task<List<BackupRecoveryItem>?> ReadRecoveryAnswerAsync(Stream body)
+        {
+            var items = new List<BackupRecoveryItem>();
+            using var text = new StreamReader(body, Encoding.UTF8);
+            using var json = new JsonTextReader(text) { MaxDepth = 8 };
+            var serializer = JsonSerializer.CreateDefault();
+            bool? success = null;
+            while (await json.ReadAsync())
+            {
+                if (json.TokenType != JsonToken.PropertyName || json.Depth != 1) continue;
+                var name = (string?)json.Value;
+                if (string.Equals(name, "Success", StringComparison.OrdinalIgnoreCase)) { success = await json.ReadAsBooleanAsync(); continue; }
+                if (!string.Equals(name, "Backups", StringComparison.OrdinalIgnoreCase)) continue;
+                if (!await json.ReadAsync() || json.TokenType != JsonToken.StartArray) continue;
+                while (await json.ReadAsync() && json.TokenType != JsonToken.EndArray)
+                {
+                    if (items.Count >= MaxItemsPerAnswer) return items;
+                    var item = serializer.Deserialize<BackupRecoveryItem>(json);
+                    if (item == null) continue;
+                    if (item.SmartContractUID.Length > VerifiedXCore.Bitcoin.FROST.Models.FrostPeerKeyBackup.MaxIdChars
+                        || item.EncryptedBlob.Length > VerifiedXCore.Bitcoin.FROST.Models.FrostPeerKeyBackup.MaxBlobChars + RandomNonceBlobPrefix.Length + 64
+                        || item.PlaintextHash.Length > VerifiedXCore.Bitcoin.FROST.Models.FrostPeerKeyBackup.PlaintextHashChars) continue;
+                    items.Add(item);
+                }
+            }
+            return success == false ? null : items;
+        }
+
         private static async Task<List<BackupRecoveryItem>?> FetchBackupsFromPeer(VBTCValidator validator, string requestPayload)
         {
             if (FetchFromPeerForTests != null) return await FetchFromPeerForTests(validator);
             try
             {
                 var url = $"http://{validator.IPAddress}:{Globals.FrostValidatorPort}/frost/backup/recover";
-                var content = new StringContent(requestPayload, Encoding.UTF8, "application/json");
-                var response = await _backupHttpClient.PostAsync(url, content);
+                using var request = new HttpRequestMessage(HttpMethod.Post, url) { Content = new StringContent(requestPayload, Encoding.UTF8, "application/json") };
+                using var response = await _backupHttpClient.SendAsync(request, HttpCompletionOption.ResponseHeadersRead);
                 if (!response.IsSuccessStatusCode) return null;
-                var responseObj = JsonConvert.DeserializeObject<BackupRecoveryResponse>(await response.Content.ReadAsStringAsync());
-                if (responseObj == null) return null;
-                return responseObj.Backups ?? new List<BackupRecoveryItem>();
+                await using var body = await response.Content.ReadAsStreamAsync();
+                return await ReadRecoveryAnswerAsync(body);
             }
             catch (Exception ex)
             {
