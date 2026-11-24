@@ -114,10 +114,10 @@ namespace VerifiedXCore.Tests
         private static readonly Regex Construction = new(@"(?:(?<var>\w+)\s*=\s*)?new\s+(?:Models\.)?Transaction\s*(?:\(\s*\))?\s*\{", RegexOptions.Compiled);
 
         /// <summary>
-        /// Reads every <c>new Transaction { ... }</c> in Core and the Amount and Fee it ends up with: its initializer's, or
-        /// the last assignment to that variable's field in the next lines. Each is canonical by construction: a decimal
-        /// literal written canonically, a Globals constant whose value is canonical, the fee calculator, or the
-        /// normalizing helpers.
+        /// Reads every <c>new Transaction { ... }</c> in Core and the Amount and Fee it is hashed with: its initializer's,
+        /// or the last assignment to that variable's field before the transaction is built (Build or BuildPrivate). Each
+        /// is canonical by construction: a decimal literal written canonically, a Globals constant whose value is
+        /// canonical, the fee calculator, or the normalizing helpers.
         /// </summary>
         [Fact]
         public void Every_transaction_core_builds_writes_amount_and_fee_canonically()
@@ -129,41 +129,70 @@ namespace VerifiedXCore.Tests
             foreach (var file in Directory.GetFiles(root, "*.cs", SearchOption.AllDirectories)
                 .Where(f => !f.Contains(sep + "bin" + sep) && !f.Contains(sep + "obj" + sep)))
             {
-                var text = File.ReadAllText(file);
-                var name = Path.GetFileName(file);
-                foreach (Match m in Construction.Matches(text))
-                {
-                    var bodyStart = m.Index + m.Length;
-                    var bodyEnd = ClosingBrace(text, bodyStart);
-                    if (bodyEnd < 0) continue;
-                    var members = TopLevelMembers(text[bodyStart..bodyEnd]);
-                    var fields = new Dictionary<string, string>(StringComparer.Ordinal);
-                    foreach (var member in members)
-                    {
-                        var eq = Regex.Match(member, @"^\s*(Amount|Fee)\s*=\s*(.+?)\s*$", RegexOptions.Singleline);
-                        if (eq.Success) fields[eq.Groups[1].Value] = Collapse(eq.Groups[2].Value);
-                    }
-                    if (fields.Count == 0) continue; // a Transaction used only as a key holder (a hash and a time)
-                    builders++;
-
-                    // A later "x.Fee = ..." in the same builder replaces the initializer's value.
-                    var variable = m.Groups["var"].Success ? m.Groups["var"].Value : null;
-                    if (variable != null)
-                    {
-                        var after = text.Substring(bodyEnd, Math.Min(4_000, text.Length - bodyEnd));
-                        foreach (Match later in Regex.Matches(after, $@"\b{Regex.Escape(variable)}\.(Amount|Fee)\s*=\s*([^;]+);"))
-                            fields[later.Groups[1].Value] = Collapse(later.Groups[2].Value);
-                    }
-
-                    var line = text[..m.Index].Count(c => c == '\n') + 1;
-                    foreach (var (field, expr) in fields)
-                        if (!Canonical(expr) && !Copies.Contains($"{name}: {expr}"))
-                            offenders.Add($"{name}:{line} {field} = {expr}");
-                }
+                offenders.AddRange(Offenders(Path.GetFileName(file), File.ReadAllText(file), out var found));
+                builders += found;
             }
 
             Assert.True(builders > 50, $"the scan found only {builders} transaction builders");
             Assert.True(offenders.Count == 0, "Transactions built with an Amount or Fee that may not be canonical: " + string.Join("; ", offenders));
+        }
+
+        [Fact]
+        public void The_scan_judges_the_spelling_a_transaction_is_hashed_with()
+        {
+            // Normalized only after it is built (and signed): hashed with the amount as given.
+            const string normalizedAfterBuild = @"
+                var nTx = new Transaction { Amount = Amount, Fee = 0 };
+                nTx.Fee = FeeCalcService.CalculateTXFee(nTx);
+                nTx.Build();
+                nTx.Amount = nTx.Amount.ToNormalizeDecimal();";
+            // Written canonically before it is built.
+            const string canonicalBeforeBuild = @"
+                var nTx = new Transaction { Amount = LedgerIntegrityRules.CanonicalDecimal(Amount), Fee = 0 };
+                nTx.Fee = FeeCalcService.CalculateTXFee(nTx);
+                nTx.Build();
+                nTx.Amount = nTx.Amount.ToNormalizeDecimal();";
+
+            Assert.Equal(new[] { "Example.cs:2 Amount = Amount" }, Offenders("Example.cs", normalizedAfterBuild, out _));
+            Assert.Empty(Offenders("Example.cs", canonicalBeforeBuild, out _));
+        }
+
+        private static List<string> Offenders(string name, string text, out int builders)
+        {
+            var offenders = new List<string>();
+            builders = 0;
+            foreach (Match m in Construction.Matches(text))
+            {
+                var bodyStart = m.Index + m.Length;
+                var bodyEnd = ClosingBrace(text, bodyStart);
+                if (bodyEnd < 0) continue;
+                var fields = new Dictionary<string, string>(StringComparer.Ordinal);
+                foreach (var member in TopLevelMembers(text[bodyStart..bodyEnd]))
+                {
+                    var eq = Regex.Match(member, @"^\s*(Amount|Fee)\s*=\s*(.+?)\s*$", RegexOptions.Singleline);
+                    if (eq.Success) fields[eq.Groups[1].Value] = Collapse(eq.Groups[2].Value);
+                }
+                if (fields.Count == 0) continue; // a Transaction used only as a key holder (a hash and a time)
+                builders++;
+
+                // A later "x.Fee = ..." before the transaction is built replaces the initializer's value; one after it
+                // does not change what was hashed.
+                var variable = m.Groups["var"].Success ? m.Groups["var"].Value : null;
+                if (variable != null)
+                {
+                    var after = text.Substring(bodyEnd, Math.Min(4_000, text.Length - bodyEnd));
+                    var built = Regex.Match(after, $@"\b{Regex.Escape(variable)}\.Build(Private)?\(");
+                    if (built.Success) after = after[..built.Index];
+                    foreach (Match later in Regex.Matches(after, $@"\b{Regex.Escape(variable)}\.(Amount|Fee)\s*=\s*([^;]+);"))
+                        fields[later.Groups[1].Value] = Collapse(later.Groups[2].Value);
+                }
+
+                var line = text[..m.Index].Count(c => c == '\n') + 1;
+                foreach (var (field, expr) in fields)
+                    if (!Canonical(expr) && !Copies.Contains($"{name}: {expr}"))
+                        offenders.Add($"{name}:{line} {field} = {expr}");
+            }
+            return offenders;
         }
 
         private static bool Canonical(string expr)
