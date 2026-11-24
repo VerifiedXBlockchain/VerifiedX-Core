@@ -111,24 +111,57 @@ namespace VerifiedXCore.Tests
         [Fact]
         public void Recovery_answers_in_progress_are_bounded_for_each_network_and_in_all()
         {
-            var rows = Enumerable.Range(0, 400).Select(i => new FrostPeerKeyBackup
-            {
-                SmartContractUID = "sc-" + i, EncryptedBlob = new string('e', FrostPeerKeyBackup.MaxBlobChars), PlaintextHash = Hash,
-            }).ToList();
-            var bytes = FrostPeerKeyBackup.AnswerBytes(rows); // about 26 MB held to serve 400 full rows
-            Assert.InRange(bytes, 20L * 1024 * 1024, 32L * 1024 * 1024);
-
             var answers = FrostPeerKeyBackup.AnswersInProgress;
             var before = answers.Held;
-            using var first = answers.Hold("203.0.113", bytes, null);
-            Assert.True(first.Granted);
-            using var second = answers.Hold("203.0.113", bytes, null);
-            Assert.False(second.Granted); // the same network, its share used
-            using var other = answers.Hold("198.51.100", bytes, null);
-            Assert.True(other.Granted); // another network is not held up by it
-            first.Dispose();
-            other.Dispose();
+            var places = new List<IDisposable>();
+            try
+            {
+                // One network: as many answers as its share holds a batch each, and then no more.
+                var fits = 0;
+                while (true)
+                {
+                    var place = answers.Hold("203.0.113", FrostPeerKeyBackup.AnswerBatchBytes, null);
+                    if (!place.Granted) break;
+                    places.Add(place);
+                    fits++;
+                }
+                Assert.InRange(fits, 4, 16);
+                var other = answers.Hold("198.51.100", FrostPeerKeyBackup.AnswerBatchBytes, null);
+                places.Add(other);
+                Assert.True(other.Granted); // another network is not held up by it
+            }
+            finally { foreach (var p in places) p.Dispose(); }
             Assert.Equal(before, answers.Held);
+        }
+
+        [Fact]
+        public async Task An_owner_with_more_backups_than_one_answer_holds_at_once_gets_them_all_in_batches()
+        {
+            var rows = 3 * FrostPeerKeyBackup.AnswerBatchRows + 5;
+            for (var i = 0; i < rows; i++)
+                Assert.True(FrostPeerKeyBackup.SaveBackup(new FrostPeerKeyBackup
+                {
+                    OwnerAddress = "xManyVaults", SmartContractUID = "sc-" + i, EncryptedBlob = new string('e', FrostPeerKeyBackup.MaxBlobChars), PlaintextHash = Hash, GroupPublicKey = GroupKey,
+                }));
+            // One stored before the limits: deleted, not sent.
+            Assert.True(FrostPeerKeyBackup.SaveBackup(new FrostPeerKeyBackup
+            {
+                OwnerAddress = "xManyVaults", SmartContractUID = "sc-old", EncryptedBlob = "blob", PlaintextHash = new string('a', 200_000), GroupPublicKey = GroupKey,
+            }));
+
+            using var body = new MemoryStream();
+            var sent = await FrostPeerKeyBackup.WriteRecoveryAnswerAsync(body, "xManyVaults");
+
+            Assert.Equal(rows, sent);
+            var answer = Newtonsoft.Json.Linq.JObject.Parse(Encoding.UTF8.GetString(body.ToArray()));
+            Assert.True((bool)answer["Success"]!);
+            var backups = (Newtonsoft.Json.Linq.JArray)answer["Backups"]!;
+            Assert.Equal(rows, backups.Count);
+            Assert.Equal(new[] { "SmartContractUID", "EncryptedBlob", "PlaintextHash", "Version" }, ((Newtonsoft.Json.Linq.JObject)backups[0]).Properties().Select(p => p.Name));
+            Assert.DoesNotContain(backups, b => (string?)b["SmartContractUID"] == "sc-old");
+            Assert.Equal(rows, FrostPeerKeyBackup.GetBackupsForOwner("xManyVaults").Count);
+            // The most a request holds is one batch, whatever the owner has.
+            Assert.True(FrostPeerKeyBackup.AnswerBatchBytes < 8L * 1024 * 1024);
         }
     }
 }

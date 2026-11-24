@@ -3791,10 +3791,10 @@ namespace VerifiedXCore.Bitcoin.FROST
                             }
 
                             // Retrieve all stored backups for this owner
-                            var backups = FrostPeerKeyBackup.GetBackupsForOwnerWithinLimits(requesterAddress);
-                            // The answer is held while it is sent: answers in progress are bounded for each network and in all.
+                            // Room for the answer is taken before anything is read for it. The answer is read and written a
+                            // batch at a time, so it holds one batch however many backups the owner has.
                             using var answerPlace = FrostPeerKeyBackup.AnswersInProgress.Hold(
-                                VerifiedXCore.Utilities.RemoteIp.Group(context.Connection.RemoteIpAddress) ?? "", FrostPeerKeyBackup.AnswerBytes(backups), null);
+                                VerifiedXCore.Utilities.RemoteIp.Group(context.Connection.RemoteIpAddress) ?? "", FrostPeerKeyBackup.AnswerBatchBytes, null);
                             if (!answerPlace.Granted)
                             {
                                 context.Response.StatusCode = StatusCodes.Status503ServiceUnavailable;
@@ -3802,23 +3802,18 @@ namespace VerifiedXCore.Bitcoin.FROST
                                 return;
                             }
 
-                            var backupItems = backups.Select(b => new
-                            {
-                                b.SmartContractUID,
-                                b.EncryptedBlob,
-                                b.PlaintextHash,
-                                b.Version
-                            }).ToList();
-
-                            LogUtility.Log($"[FROST Backup] Recovery: returning {backupItems.Count} backup(s) to {requesterAddress}",
-                                "FrostStartup.BackupRecover");
-
                             context.Response.StatusCode = StatusCodes.Status200OK;
-                            await context.Response.WriteAsync(JsonConvert.SerializeObject(new
+                            context.Response.ContentType = "application/json";
+                            int sent;
+                            try { sent = await FrostPeerKeyBackup.WriteRecoveryAnswerAsync(context.Response.Body, requesterAddress); }
+                            catch (Exception ex) when (context.Response.HasStarted)
                             {
-                                Success = true,
-                                Backups = backupItems
-                            }));
+                                // Part of the answer is sent: it cannot be turned into an error, so the connection is closed.
+                                ErrorLogUtility.LogError($"Backup recover answer to {requesterAddress} ended early: {ex.Message}", "FrostStartup.BackupRecover");
+                                context.Abort();
+                                return;
+                            }
+                            LogUtility.Log($"[FROST Backup] Recovery: returned {sent} backup(s) to {requesterAddress}", "FrostStartup.BackupRecover");
                         }
                     }
                     catch (Exception ex)
