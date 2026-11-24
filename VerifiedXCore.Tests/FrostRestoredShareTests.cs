@@ -49,11 +49,15 @@ namespace VerifiedXCore.Tests
             try { Directory.Delete(_tempRoot, recursive: true); } catch { }
         }
 
-        private void Share(long restoredAt) => Assert.True(FrostValidatorKeyStore.SaveKeyPackage(new FrostValidatorKeyStore
+        private FrostValidatorKeyStore Share(long restoredAt, string filedUnder = Vault)
         {
-            SmartContractUID = Vault, ValidatorAddress = _address, KeyPackage = "k", PubkeyPackage = "p", GroupPublicKey = "02" + new string('a', 64),
-            ParticipantOrderJson = "[]", CreatedTimestamp = 1, RestoredFromPeersAt = restoredAt,
-        }));
+            Assert.True(FrostValidatorKeyStore.SaveKeyPackage(new FrostValidatorKeyStore
+            {
+                SmartContractUID = filedUnder, ValidatorAddress = _address, KeyPackage = "k", PubkeyPackage = "p", GroupPublicKey = "02" + new string('a', 64),
+                ParticipantOrderJson = "[]", CreatedTimestamp = 1, RestoredFromPeersAt = restoredAt,
+            }));
+            return FrostValidatorKeyStore.GetKeyPackage(filedUnder, _address)!;
+        }
 
         private static void RequestAt(long height, long blockTimestamp)
         {
@@ -67,42 +71,53 @@ namespace VerifiedXCore.Tests
         public void A_share_restored_after_a_payment_opened_gives_no_share_for_it()
         {
             RequestAt(100, blockTimestamp: 1_000);
-            Share(restoredAt: 2_000);
-            Assert.Contains("restored from peers", FrostStartup.RestoredShareRefusal(Vault, Request));
+            var share = Share(restoredAt: 2_000);
+            Assert.Contains("restored from peers", FrostStartup.RestoredShareRefusal(share, Vault, Request));
         }
 
         [Fact]
         public void A_share_restored_before_a_payment_opened_signs_it()
         {
             RequestAt(100, blockTimestamp: 3_000);
-            Share(restoredAt: 2_000);
-            Assert.Null(FrostStartup.RestoredShareRefusal(Vault, Request));
+            var share = Share(restoredAt: 2_000);
+            Assert.Null(FrostStartup.RestoredShareRefusal(share, Vault, Request));
         }
 
         [Fact]
         public void A_restored_share_gives_no_share_for_a_payment_whose_opening_is_not_known()
         {
-            Share(restoredAt: 2_000);
-            Assert.NotNull(FrostStartup.RestoredShareRefusal(Vault, "unknown-payment"));
+            var share = Share(restoredAt: 2_000);
+            Assert.NotNull(FrostStartup.RestoredShareRefusal(share, Vault, "unknown-payment"));
         }
 
         [Fact]
         public void A_share_this_node_kept_is_not_affected()
         {
             RequestAt(100, blockTimestamp: 1_000);
-            Share(restoredAt: 0);
-            Assert.Null(FrostStartup.RestoredShareRefusal(Vault, Request));
+            var share = Share(restoredAt: 0);
+            Assert.Null(FrostStartup.RestoredShareRefusal(share, Vault, Request));
         }
 
         [Fact]
-        public async Task The_signing_start_check_refuses_a_restored_share_for_an_earlier_payment()
+        public void A_restored_share_filed_under_its_ceremony_id_is_judged_as_the_share_the_signing_uses()
         {
             RequestAt(100, blockTimestamp: 1_000);
-            Share(restoredAt: 2_000);
-            var (ok, reason) = await FrostStartup.CheckPriorSignedTransactionAsync(Vault, Request, requestedTxId: new string('b', 64));
-            Assert.False(ok);
-            Assert.Contains("restored from peers", reason);
+            var share = Share(restoredAt: 2_000, filedUnder: "ceremony-session-id"); // found later by its group key or ceremony id
+            Assert.Contains("restored from peers", FrostStartup.RestoredShareRefusal(share, Vault, Request));
         }
+
+        [Fact]
+        public void The_signing_start_judges_the_share_it_chose_before_making_a_nonce()
+        {
+            var source = File.ReadAllText(Path.Combine(RepoRoot(), "VerifiedXCore", "Bitcoin", "FROST", "FrostStartup.cs"));
+            var check = source.IndexOf("RestoredShareRefusal(keyStore, request.SmartContractUID, request.WithdrawalRequestHash)", StringComparison.Ordinal);
+            var gate = source.IndexOf("Final gate: whichever path produced the key", StringComparison.Ordinal);
+            var nonce = source.IndexOf("FrostNative.SignRound1Nonces(keyStore.KeyPackage)", StringComparison.Ordinal);
+            Assert.True(gate > 0 && check > gate && nonce > check);
+        }
+
+        private static string RepoRoot([System.Runtime.CompilerServices.CallerFilePath] string thisFile = "") =>
+            Path.GetDirectoryName(Path.GetDirectoryName(thisFile))!;
 
         [Fact]
         public async Task Recovery_marks_a_share_this_node_did_not_hold_and_keeps_the_mark_of_one_it_did()
