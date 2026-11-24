@@ -25,9 +25,9 @@ namespace VerifiedXCore.Services
                 //fees are now capped at 8 decimal places and rounded up at the 8th decimal place
                 txFee = decimal.Round(txFee, 8, MidpointRounding.ToPositiveInfinity);
             }
-            // Written the one way Amount and Fee are accepted from Globals.CanonicalInputHeight (0.00000600 as 0.000006):
-            // rounding keeps eight places, trailing zeros included. The same value, and accepted at every height.
-            return LedgerIntegrityRules.CanonicalDecimal(txFee);
+            // From Globals.CanonicalInputHeight written the one way Amount and Fee are accepted (0.00000600 as 0.000006):
+            // rounding keeps eight places, trailing zeros included. The same value; below the height as before.
+            return LedgerIntegrityRules.SpellForNextBlock(txFee, legacy: txFee);
         }
 
         public static decimal GetFeeMinimum()

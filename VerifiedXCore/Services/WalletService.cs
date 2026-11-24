@@ -209,8 +209,8 @@ namespace VerifiedXCore.Services
                 Timestamp = TimeUtil.GetTime(),
                 FromAddress = FromAddress,
                 ToAddress = ToAddress,
-                Amount = LedgerIntegrityRules.CanonicalDecimal(Amount),
-                Fee = LedgerIntegrityRules.CanonicalDecimal(NewFee),
+                Amount = LedgerIntegrityRules.SpellForNextBlock(Amount, legacy: Amount),
+                Fee = LedgerIntegrityRules.SpellForNextBlock(NewFee, legacy: NewFee),
                 Nonce = originalTx.Nonce, // Use same nonce as original TX
                 TransactionType = TransactionType.TX,
                 Data = $"[RBF:{ReplacingTxHash}]" // RBF marker with original hash
@@ -298,8 +298,8 @@ namespace VerifiedXCore.Services
                 Timestamp = TimeUtil.GetTime(),
                 FromAddress = FromAddress,
                 ToAddress = ToAddress,
-                Amount = LedgerIntegrityRules.CanonicalDecimal(Amount), // "1" and "1.50" as 1.0 and 1.5: one accepted spelling
-                Fee = 0,
+                Amount = LedgerIntegrityRules.SpellForNextBlock(Amount, legacy: Amount + 0.0M),
+                Fee = 0, 
                 Nonce = AccountStateTrei.GetNextNonce(FromAddress), 
                 TransactionType = tranType,
             };

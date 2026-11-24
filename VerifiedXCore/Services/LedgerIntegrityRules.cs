@@ -1330,6 +1330,21 @@ namespace VerifiedXCore.Services
             return !(digits % 10).IsZero;
         }
 
+        /// <summary>The height a transaction this node builds now is judged for: the next block.</summary>
+        public static long NextBlockHeight => (Globals.LastBlock?.Height ?? 0) + 1;
+
+        /// <summary>
+        /// The Amount or Fee this node writes into a transaction it builds for <paramref name="height"/>: from
+        /// Globals.CanonicalInputHeight the canonical spelling of <paramref name="value"/>; below it
+        /// <paramref name="legacy"/>, the value exactly as Core has always written it, decimal places included. Below the
+        /// height nothing Core builds changes.
+        /// </summary>
+        public static decimal SpellForHeight(decimal value, decimal legacy, long height) =>
+            height >= Globals.CanonicalInputHeight ? CanonicalDecimal(value) : legacy;
+
+        /// <summary>As <see cref="SpellForHeight"/>, for a transaction built now (judged for the next block).</summary>
+        public static decimal SpellForNextBlock(decimal value, decimal legacy) => SpellForHeight(value, legacy, NextBlockHeight);
+
         /// <summary>
         /// The one accepted spelling of a decimal (see <see cref="IsCanonicalDecimal"/>): its trailing zeros removed, and a
         /// whole number given one place. The value does not change. For transactions this node builds.

@@ -18,10 +18,18 @@ namespace VerifiedXCore.Tests
     /// <summary>
     /// Every transaction this node builds writes its Amount and Fee in the one spelling accepted from
     /// Globals.CanonicalInputHeight, so the node's own transactions keep passing on a network where the height is active.
-    /// The spelling is accepted at every height, so the builders write it whatever the height.
+    /// Below the height every transaction Core builds is unchanged, decimal places included; coinbases keep 0.00M at every
+    /// height.
     /// </summary>
-    public class CanonicalAmountFeeBuildersTests
+    public class CanonicalAmountFeeBuildersTests : IDisposable
     {
+        private readonly long _priorRule = Globals.CanonicalInputHeight;
+
+        public void Dispose() => Globals.CanonicalInputHeight = _priorRule;
+
+        private static void RuleActive() => Globals.CanonicalInputHeight = LedgerIntegrityRules.NextBlockHeight;
+        private static void RuleNotYetActive() => Globals.CanonicalInputHeight = LedgerIntegrityRules.NextBlockHeight + 1;
+
         private static decimal Dec(string text) => decimal.Parse(text, NumberStyles.Float, CultureInfo.InvariantCulture);
 
         [Theory]
@@ -31,12 +39,45 @@ namespace VerifiedXCore.Tests
         [InlineData("0", "0.0")]
         [InlineData("0.00000600", "0.000006")]
         [InlineData("2.5", "2.5")]
-        public void The_normalizing_helper_the_builders_use_writes_the_canonical_spelling(string text, string expected)
+        public void From_the_height_the_normalizing_helper_the_builders_use_writes_the_canonical_spelling(string text, string expected)
         {
+            RuleActive();
             var normalized = Dec(text).ToNormalizeDecimal();
 
             Assert.Equal(expected, normalized.ToString(CultureInfo.InvariantCulture));
             Assert.True(LedgerIntegrityRules.IsCanonicalDecimal(normalized));
+        }
+
+        [Theory]
+        [InlineData("1", "1.0")]
+        [InlineData("1.00", "1.0")] // a whole number always had one place
+        [InlineData("1.50", "1.50")]
+        [InlineData("0", "0.0")]
+        [InlineData("0.00", "0.0")]
+        [InlineData("0.00000600", "0.00000600")]
+        [InlineData("2.5", "2.5")]
+        public void Below_the_height_the_normalizing_helper_is_unchanged_decimal_places_included(string text, string expected)
+        {
+            RuleNotYetActive();
+
+            var normalized = Dec(text).ToNormalizeDecimal();
+
+            Assert.Equal(decimal.GetBits(Dec(expected)), decimal.GetBits(normalized));
+            Assert.Equal(decimal.GetBits(GenericExtensions.LegacyNormalizeDecimal(Dec(text))), decimal.GetBits(normalized));
+        }
+
+        [Theory]
+        [InlineData("0", "0.00", "0.0")]
+        [InlineData("1.50", "1.50", "1.5")]
+        [InlineData("5", "5.0", "5.0")]
+        [InlineData("0.00000600", "0.00000600", "0.000006")]
+        public void A_builder_writes_its_old_spelling_below_the_height_and_the_canonical_one_from_it(string value, string legacy, string canonical)
+        {
+            const long height = 1_000;
+            Globals.CanonicalInputHeight = height;
+
+            Assert.Equal(decimal.GetBits(Dec(legacy)), decimal.GetBits(LedgerIntegrityRules.SpellForHeight(Dec(value), Dec(legacy), height - 1)));
+            Assert.Equal(decimal.GetBits(Dec(canonical)), decimal.GetBits(LedgerIntegrityRules.SpellForHeight(Dec(value), Dec(legacy), height)));
         }
 
         /// <summary>
@@ -116,8 +157,8 @@ namespace VerifiedXCore.Tests
         /// <summary>
         /// Reads every <c>new Transaction { ... }</c> in Core and the Amount and Fee it is hashed with: its initializer's,
         /// or the last assignment to that variable's field before the transaction is built (Build or BuildPrivate). Each
-        /// is canonical by construction: a decimal literal written canonically, a Globals constant whose value is
-        /// canonical, the fee calculator, or the normalizing helpers.
+        /// is canonical from the height by construction: a decimal literal written canonically, a Globals constant whose
+        /// value is canonical, the fee calculator, or the height-aware helpers (SpellForNextBlock, ToNormalizeDecimal).
         /// </summary>
         [Fact]
         public void Every_transaction_core_builds_writes_amount_and_fee_canonically()
@@ -155,6 +196,52 @@ namespace VerifiedXCore.Tests
 
             Assert.Equal(new[] { "Example.cs:2 Amount = Amount" }, Offenders("Example.cs", normalizedAfterBuild, out _));
             Assert.Empty(Offenders("Example.cs", canonicalBeforeBuild, out _));
+        }
+
+        /// <summary>
+        /// Every builder that writes the canonical spelling from the height, with what it writes below it: exactly the
+        /// expression it had before the height existed. A new call, or a changed legacy, fails here.
+        /// </summary>
+        private static readonly string[] LegacySpellings =
+        {
+            "BridgePoolUnlockService.cs: 0M, legacy: 0.00M",
+            "BridgePoolUnlockService.cs: 0M, legacy: 0.00M",
+            "BridgePoolUnlockService.cs: 0M, legacy: 0.00M",
+            "FeeCalcService.cs: txFee, legacy: txFee",
+            "GenericExtensions.cs: value, legacy: LegacyNormalizeDecimal(value)",
+            "ReserveAccount.cs: sendTxData.Amount, legacy: sendTxData.Amount * 1.0M",
+            "SmartContractService.cs: amountSoldFor, legacy: amountSoldFor",
+            "SmartContractService.cs: amountSoldFor, legacy: amountSoldFor",
+            "SmartContractService.cs: amountSoldFor, legacy: amountSoldFor",
+            "SmartContractService.cs: amountSoldFor, legacy: amountSoldFor",
+            "SmartContractService.cs: royaltyRBX, legacy: royaltyRBX",
+            "SmartContractService.cs: royaltyRBX, legacy: royaltyRBX",
+            "SmartContractService.cs: saleRBXLessRoyalty, legacy: saleRBXLessRoyalty",
+            "SmartContractService.cs: saleRBXLessRoyalty, legacy: saleRBXLessRoyalty",
+            "TXV1Controller.cs: tx.Amount, legacy: tx.Amount + 0.0M",
+            "VBTCService.cs: 0M, legacy: 0.00M",
+            "VBTCService.cs: 0M, legacy: 0.00M",
+            "VBTCService.cs: 0M, legacy: 0.00M",
+            "VBTCService.cs: 0M, legacy: 0.00M",
+            "WalletService.cs: Amount, legacy: Amount",
+            "WalletService.cs: Amount, legacy: Amount + 0.0M",
+            "WalletService.cs: NewFee, legacy: NewFee",
+        };
+
+        [Fact]
+        public void Below_the_height_every_builder_writes_what_it_wrote_before()
+        {
+            var root = Path.Combine(Path.GetDirectoryName(Path.GetDirectoryName(ThisFile()))!, "VerifiedXCore");
+            var sep = Path.DirectorySeparatorChar;
+            var calls = Directory.GetFiles(root, "*.cs", SearchOption.AllDirectories)
+                .Where(f => !f.Contains(sep + "bin" + sep) && !f.Contains(sep + "obj" + sep))
+                .SelectMany(f => Regex.Matches(File.ReadAllText(f), @"SpellForNextBlock\(((?:[^()]|\([^()]*\))+)\)")
+                    .Select(m => $"{Path.GetFileName(f)}: {Collapse(m.Groups[1].Value)}"))
+                .Where(c => !c.StartsWith("LedgerIntegrityRules.cs:", StringComparison.Ordinal)) // the helper's own definition
+                .OrderBy(c => c, StringComparer.Ordinal)
+                .ToArray();
+
+            Assert.Equal(LegacySpellings.OrderBy(c => c, StringComparer.Ordinal).ToArray(), calls);
         }
 
         private static bool IsCoinbase(string file, string initializer) =>
@@ -237,7 +324,7 @@ namespace VerifiedXCore.Tests
         {
             if (Regex.IsMatch(expr, @"^-?\d+\.\d+[Mm]$"))
                 return LedgerIntegrityRules.IsCanonicalDecimal(Dec(expr[..^1]));
-            if (expr.Contains("CanonicalDecimal(") || expr.EndsWith(".ToNormalizeDecimal()", StringComparison.Ordinal) || expr.Contains("FeeCalcService.CalculateTXFee("))
+            if (expr.Contains("CanonicalDecimal(") || expr.Contains("SpellForNextBlock(") || expr.Contains("SpellForHeight(") || expr.EndsWith(".ToNormalizeDecimal()", StringComparison.Ordinal) || expr.Contains("FeeCalcService.CalculateTXFee("))
                 return true;
             var global = Regex.Match(expr, @"^Globals\.(\w+)$");
             if (global.Success)

@@ -148,8 +148,9 @@ namespace VerifiedXCore.Tests
         }
 
         [Fact]
-        public void The_fee_calculator_writes_the_canonical_spelling()
+        public void From_the_height_the_fee_calculator_writes_the_canonical_spelling()
         {
+            Globals.CanonicalInputHeight = Rule;
             // Data lengths that give fees rounding to a trailing zero at the eighth place, and the minimum fee.
             for (var length = 0; length < 2_000; length += 7)
             {
@@ -157,6 +158,26 @@ namespace VerifiedXCore.Tests
                 var fee = FeeCalcService.CalculateTXFee(tx);
                 Assert.True(LedgerIntegrityRules.IsCanonicalDecimal(fee), $"fee {fee.ToString(CultureInfo.InvariantCulture)} for Data of {length}");
             }
+        }
+
+        [Fact]
+        public void Below_the_height_the_fee_calculator_writes_its_fee_as_before_decimal_places_included()
+        {
+            Globals.CanonicalInputHeight = Rule + 1;
+            var trailingZeros = 0;
+            for (var length = 0; length < 2_000; length += 7)
+            {
+                var tx = new Transaction { Timestamp = 1_790_000_000, FromAddress = _sender.Address, ToAddress = _receiver.Address, Amount = 1.0M, Nonce = 0, TransactionType = TransactionType.TX, Data = new string('a', length) };
+                // The calculator as it has always been: eight places, rounded up, trailing zeros kept.
+                var asBefore = JsonConvert.SerializeObject(tx).Length / 1024.0M * 0.00002M;
+                asBefore = asBefore < 0.000003M ? 0.000003M : decimal.Round(asBefore, 8, MidpointRounding.ToPositiveInfinity);
+
+                var fee = FeeCalcService.CalculateTXFee(tx);
+
+                Assert.Equal(decimal.GetBits(asBefore), decimal.GetBits(fee));
+                if (!LedgerIntegrityRules.IsCanonicalDecimal(fee)) trailingZeros++;
+            }
+            Assert.True(trailingZeros > 0, "no fee in the sample had trailing zeros"); // the sample covers the case that changes
         }
 
         // ── Admission ────────────────────────────────────────────────────────────────────────────────────────────

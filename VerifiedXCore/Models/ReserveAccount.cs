@@ -936,7 +936,7 @@ namespace VerifiedXCore.Models
                 Timestamp = TimeUtil.GetTime(),
                 FromAddress = account.Address,
                 ToAddress = toAddress,
-                Amount = LedgerIntegrityRules.CanonicalDecimal(sendTxData.Amount),
+                Amount = LedgerIntegrityRules.SpellForNextBlock(sendTxData.Amount, legacy: sendTxData.Amount * 1.0M),
                 Fee = 0,
                 Nonce = AccountStateTrei.GetNextNonce(account.Address),
                 TransactionType = TransactionType.TX,
