@@ -4,6 +4,7 @@ using VerifiedXCore.Bitcoin.Models;
 using VerifiedXCore.Data;
 using VerifiedXCore.Models;
 using VerifiedXCore.Privacy;
+using VerifiedXCore.Utilities;
 
 namespace VerifiedXCore.Services
 {
@@ -102,7 +103,7 @@ namespace VerifiedXCore.Services
                     case TransactionType.VBTC_V2_TRANSFER:
                         // Reserve (xRBX) sends debit at unlock, but their balance check already nets pending sends,
                         // so they are counted here too (the single-flight rule refuses a second one anyway).
-                        foreach (var (uid, amt) in Bitcoin.Services.VBTCService.GetVbtcV2TransferOutflows(tx))
+                        foreach (var (uid, amt) in Bitcoin.Services.VBTCService.GetVbtcV2TransferOutflows(tx, judged))
                             debits.Add((new DebitKey(LedgerKind.VbtcV2, uid, tx.FromAddress), amt));
                         return debits;
 
@@ -141,7 +142,18 @@ namespace VerifiedXCore.Services
                 // Same Function resolution as StateData: first element of a JArray, else a JObject.
                 string? function = null;
                 JToken? arrayElement = null;
-                try
+                JObject? obj = null;
+                var strict = ConsensusData.IsStrict(judged);
+                if (strict)
+                {
+                    // From StrictDataReaderHeight read once by the strict reader, as the validator and the apply read it.
+                    if (!ConsensusData.TryRead(tx.Data, out var root, out _))
+                        return debits;
+                    arrayElement = root is JArray { Count: > 0 } calls ? calls[0] : null;
+                    obj = root as JObject;
+                    function = LedgerIntegrityRules.CallOf(root).Function;
+                }
+                else try
                 {
                     var arr = JsonConvert.DeserializeObject<JArray>(tx.Data);
                     arrayElement = arr?[0];
@@ -149,8 +161,7 @@ namespace VerifiedXCore.Services
                 }
                 catch { arrayElement = null; }
 
-                JObject? obj = null;
-                if (arrayElement == null)
+                if (!strict && arrayElement == null)
                 {
                     try { obj = JObject.Parse(tx.Data); function = obj["Function"]?.ToObject<string?>(); }
                     catch { return debits; }
@@ -161,7 +172,7 @@ namespace VerifiedXCore.Services
                     case "TransferVBTCV2()":
                     {
                         // Apply parses a JObject only and debits tx.FromAddress.
-                        var o = obj ?? JObject.Parse(tx.Data);
+                        var o = obj ?? ConsensusData.ParseObject(tx.Data, judged);
                         var uid = o["ContractUID"]?.ToObject<string?>();
                         var amt = o["Amount"]?.ToObject<decimal?>();
                         if (!string.IsNullOrEmpty(uid) && amt is > 0)
@@ -181,7 +192,7 @@ namespace VerifiedXCore.Services
                     case "TransferCoinMulti()":
                     {
                         // Apply parses a JObject only and debits each input's holder.
-                        var o = obj ?? JObject.Parse(tx.Data);
+                        var o = obj ?? ConsensusData.ParseObject(tx.Data, judged);
                         var inputs = o["Inputs"]?.ToObject<List<VBTCTransferInput>?>();
                         if (inputs != null)
                             foreach (var input in inputs)
@@ -193,7 +204,7 @@ namespace VerifiedXCore.Services
                     case "TokenBurn()":
                     {
                         // Apply parses a JObject only and debits the data's FromAddress (bound to the signer, NEW-04).
-                        var o = obj ?? JObject.Parse(tx.Data);
+                        var o = obj ?? ConsensusData.ParseObject(tx.Data, judged);
                         var uid = o["ContractUID"]?.ToObject<string?>();
                         var from = o["FromAddress"]?.ToObject<string?>();
                         var amt = o["Amount"]?.ToObject<decimal?>();

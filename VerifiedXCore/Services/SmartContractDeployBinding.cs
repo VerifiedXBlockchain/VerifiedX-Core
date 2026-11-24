@@ -60,6 +60,36 @@ namespace VerifiedXCore.Services
             return (null, null, null, null);
         }
 
+        /// <summary>
+        /// The payload of a transaction at <paramref name="height"/>. Below Globals.StrictDataReaderHeight exactly
+        /// <see cref="ReadPayload(string?)"/>; from it the same steps over Data read once by
+        /// <see cref="VerifiedXCore.Utilities.ConsensusData"/>: Data the strict reader refuses gives no payload.
+        /// Never throws.
+        /// </summary>
+        public static (string? Function, string? ContractUID, string? Data, string? MD5List) ReadPayload(string? txData, long height)
+        {
+            if (!VerifiedXCore.Utilities.ConsensusData.IsStrict(height))
+                return ReadPayload(txData);
+            if (string.IsNullOrWhiteSpace(txData) || !VerifiedXCore.Utilities.ConsensusData.TryRead(txData, out var root, out _))
+                return (null, null, null, null);
+            try
+            {
+                if (root is JArray arr)
+                {
+                    var first = arr.Count > 0 ? arr[0] : null;
+                    if (first != null)
+                        return ((string?)first["Function"], (string?)first["ContractUID"], (string?)first["Data"], (string?)first["MD5List"]);
+                }
+                else if (root is JObject obj)
+                {
+                    return (obj["Function"]?.ToObject<string?>(), obj["ContractUID"]?.ToObject<string?>(),
+                            obj["Data"]?.ToObject<string?>(), obj["MD5List"]?.ToObject<string?>());
+                }
+            }
+            catch { }
+            return (null, null, null, null);
+        }
+
         // A line's leading whitespace stops at a line break ([^\S\n], not \s): with \s every line start of a body of blank
         // lines scanned the rest of the body, the square of its length. Each declaration is found at its own line start
         // either way, so what the search finds is unchanged.
