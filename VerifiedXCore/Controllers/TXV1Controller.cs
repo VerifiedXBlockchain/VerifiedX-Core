@@ -32,12 +32,19 @@ namespace VerifiedXCore.Controllers
         internal const string DataNotReadableAsSentError =
             "Data could not be read as it was sent. Send the transaction as one JSON object whose Data property is the JSON object or array itself, or a string of valid text.";
 
+        /// <summary>Why a raw transaction's Data is refused from Globals.RawDataVerbatimHeight: a string Data that starts or
+        /// ends with whitespace. The node's store trims a string's ends when it saves it, so the transaction it read back
+        /// would no longer match its hash.</summary>
+        internal const string DataEdgeWhitespaceError =
+            "Data sent as a string may not start or end with whitespace: the node stores text without it, so the stored transaction would not match its hash.";
+
         /// <summary>Raw-transaction Data as the node hashes and stores it: any JSON value as its JSON text, and a JSON
         /// null as no data, the same as a missing Data (it hashes as empty, not as the text "null"). From
         /// Globals.RawDataVerbatimHeight Data is read from <paramref name="body"/> (the request body as bound: a
         /// System.Text.Json element, or its text): a JSON object or array is the exact text of that value, with no
         /// re-serialization, and a JSON string is its decoded value, with no quotes added and no date or number
-        /// conversion. Below the height, and for any other JSON value, it is the parsed token written back. Returns why the
+        /// conversion; a string that starts or ends with whitespace is refused, since the store would trim it. Below the
+        /// height, and for any other JSON value, it is the parsed token written back. Returns why the
         /// Data is refused, or null: a string holding a JSON object or array is written a second time as a JSON string,
         /// which no rule that reads the call can parse, so it is refused with that reason (a plain TX, whose Data is not
         /// read as a call, keeps it as before).</summary>
@@ -51,6 +58,8 @@ namespace VerifiedXCore.Controllers
                 var asSent = DataTextAsSent(body);
                 if (asSent == null)
                     return DataNotReadableAsSentError;
+                if (asSent.Length != asSent.Trim().Length)
+                    return DataEdgeWhitespaceError; // only a string can: an object's or array's text starts and ends with its brackets
                 txJToken["Data"] = asSent;
                 return null;
             }

@@ -232,7 +232,7 @@ namespace VerifiedXCore.Tests
             new object[] { "\"2026-11-24T10:00:00.1234567+01:00\"", "2026-11-24T10:00:00.1234567+01:00" }, // date with an offset
             new object[] { "\"2026-11-24T10:00:00-05:00\"", "2026-11-24T10:00:00-05:00" },                 // date with a negative offset
             new object[] { "\"2026-11-24T10:00:00Z\"", "2026-11-24T10:00:00Z" },                           // date in UTC
-            new object[] { "\"\\u0041\\u00e9\\/ \\\"q\\\" \\n\"", "A\u00e9/ \"q\" \n" },               // escapes
+            new object[] { "\"\\u0041\\u00e9\\/ \\\"q\\\" \\n x\"", "A\u00e9/ \"q\" \n x" },           // escapes
             new object[] { "\"1.50\"", "1.50" },                                                           // a number in a string
             new object[] { "\"{\\\"memo\\\":\\\"hello\\\"}\"", "{\"memo\":\"hello\"}" },                // JSON in a string, on a plain TX
         };
@@ -302,6 +302,46 @@ namespace VerifiedXCore.Tests
             var missing = JObject.Parse(JsonConvert.SerializeObject(withoutData));
             missing.Remove("Data");
             Assert.Equal(withoutData.Hash, (string?)JObject.Parse(await api.GetTxHash(Bound(missing.ToString(Formatting.None))))["Hash"]);
+        }
+
+        [Theory]
+        [InlineData("  memo  ")]
+        [InlineData(" memo")]
+        [InlineData("memo\n")]
+        [InlineData("\t")]
+        [InlineData("   ")]
+        public async Task FromTheHeight_AStringWithWhitespaceAtAnEnd_IsRefused(string value)
+        {
+            // The store trims a string's ends on save (LiteDB's mapper), so it would read back under a hash it does not match.
+            var tx = Transfer(value);
+            var bodyText = BodyText(tx, JsonConvert.SerializeObject(value));
+            var api = new TXV1Controller();
+
+            foreach (var answer in new[] { await api.GetTxHash(Bound(bodyText)), await api.SendRawTransaction(Bound(bodyText)) }.Select(JObject.Parse))
+            {
+                Assert.Equal("Fail", (string?)answer["Result"]);
+                Assert.Equal(TXV1Controller.DataEdgeWhitespaceError, (string?)answer["Message"]);
+            }
+            Assert.Empty(TransactionData.GetPool().FindAll());
+        }
+
+        [Fact]
+        public async Task FromTheHeight_WhatIsSent_ReadsBackFromTheStoreUnderItsHash()
+        {
+            // Inner whitespace, newlines and an object's own spacing survive the store; the read-back copy matches its hash.
+            var api = new TXV1Controller();
+            var cases = new[] { ("\"a  b\\n c\"", "a  b\n c"), ("{ \"Memo\" : \" x \" }", "{ \"Memo\" : \" x \" }"), ("[ 1 ,\n 2 ]", "[ 1 ,\n 2 ]") };
+            for (var i = 0; i < cases.Length; i++)
+            {
+                var (dataJson, value) = cases[i];
+                var tx = Transfer(value, nonce: i);
+                var sent = JObject.Parse(await api.SendRawTransaction(Bound(BodyText(tx, dataJson))));
+                Assert.True("Success" == (string?)sent["Result"], sent.ToString());
+
+                var stored = TransactionData.GetPool().FindOne(x => x.Hash == tx.Hash);
+                Assert.Equal(value, stored.Data);
+                Assert.Equal(tx.Hash, stored.GetHash());
+            }
         }
 
         [Fact]
