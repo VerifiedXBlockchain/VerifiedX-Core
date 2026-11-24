@@ -105,6 +105,15 @@ namespace VerifiedXCore
         public const long CustomTestNetRulesHeight = BitcoinAttestationTestnetHeight;
 
         /// <summary>
+        /// Rules added after Marigold was already running take effect from this later block, not from
+        /// <see cref="CustomTestNetRulesHeight"/>: a rule dated before the chain's tip would judge blocks that were
+        /// produced under the old rules, so a node syncing Marigold from block 0 would refuse its own history. 8,500 was
+        /// about 1,950 blocks past the tip (6,549) when the input-format rules reached devnet on 2026-11-24, room to
+        /// upgrade every Marigold node first.
+        /// </summary>
+        public const long CustomTestNetInputRulesHeight = 8500;
+
+        /// <summary>
         /// The custom testnet's heights, over the testnet ones. Config.ProcessConfig selects a custom testnet after
         /// Program.cs and the Warden first apply the heights, so it applies them again once it has.
         /// </summary>
@@ -152,10 +161,10 @@ namespace VerifiedXCore
             Globals.BridgeVoteOncePerCasterHeight = h;
             Globals.BridgeExitCarriesTotalsHeight = h;
             Globals.PlonkCurrentRulesHeight = h;
-            // Not yet on the live testnet
-            Globals.CanonicalInputHeight = h;
-            Globals.RawDataVerbatimHeight = h;
-            Globals.StrictDataReaderHeight = h;
+            // Not yet on the live testnet. Added while Marigold was running, so from a later block (see above).
+            Globals.CanonicalInputHeight = CustomTestNetInputRulesHeight;
+            Globals.RawDataVerbatimHeight = CustomTestNetInputRulesHeight;
+            Globals.StrictDataReaderHeight = CustomTestNetInputRulesHeight;
         }
     }
 }

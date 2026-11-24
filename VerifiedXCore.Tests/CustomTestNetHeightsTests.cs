@@ -72,13 +72,17 @@ namespace VerifiedXCore.Tests
                 .Where(f => !NotRuleHeights.Contains(f.Name));
 
         [Fact]
-        public void Marigold_EveryRuleIsActiveBy401()
+        public void Marigold_EveryRuleIsActiveBy401_ExceptRulesAddedWhileItRuns()
         {
             StartTestnetNode(new Config.Config { TestNet = true, TestNetName = "marigold" });
 
             Assert.True(Globals.IsCustomTestNet);
             Assert.Equal(401, Globals.CustomTestNetRulesHeight);
+            // Rules added after Marigold was already running start at CustomTestNetInputRulesHeight instead (a past
+            // height would judge blocks produced under the old rules); every other rule is active by 401.
+            var addedWhileRunning = new[] { nameof(Globals.CanonicalInputHeight), nameof(Globals.RawDataVerbatimHeight), nameof(Globals.StrictDataReaderHeight) };
             var late = RuleHeights()
+                .Where(f => !addedWhileRunning.Contains(f.Name))
                 .Select(f => (f.Name, Value: (long)f.GetValue(null)!))
                 .Where(x => x.Value > Globals.CustomTestNetRulesHeight)
                 .Select(x => $"{x.Name}={x.Value}")
@@ -91,14 +95,16 @@ namespace VerifiedXCore.Tests
             Assert.Equal(401, Globals.ContractBodyLimitsHeight);
             Assert.Equal(401, Globals.PlonkCurrentRulesHeight);
             Assert.Equal(401, Globals.TXHeightRule3);
-            Assert.Equal(401, Globals.CanonicalInputHeight); // not yet set on the live testnet
+            Assert.Equal(Globals.CustomTestNetInputRulesHeight, Globals.CanonicalInputHeight); // not yet set on the live testnet; later than 401, Marigold was already running
             // ... and the genesis-staged ones keep their order (bonds before the fund-loss rules, observation first).
             Assert.Equal(Globals.BitcoinAttestationObserveTestnetHeight, Globals.ValidatorBondGrandfatherHeight);
             Assert.Equal(Globals.FundLossAuditTestnetHeight - 1, Globals.ValidatorBondHeight);
             Assert.Equal(Globals.FundLossAuditTestnetHeight, Globals.PrivateTxProofRulesHeight);
             Assert.Equal(Globals.BitcoinAttestationTestnetHeight, Globals.BitcoinAttestationHeight);
             // Not yet on the live testnet or mainnet, active here.
-            Assert.Equal(401, Globals.RawDataVerbatimHeight);
+            Assert.Equal(Globals.CustomTestNetInputRulesHeight, Globals.RawDataVerbatimHeight);
+            Assert.Equal(Globals.CustomTestNetInputRulesHeight, Globals.StrictDataReaderHeight);
+            Assert.True(Globals.CustomTestNetInputRulesHeight > Globals.CustomTestNetRulesHeight, "rules added while Marigold runs start after its tip, not at 401");
         }
 
         [Fact]
