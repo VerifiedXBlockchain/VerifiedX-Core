@@ -451,6 +451,17 @@ namespace VerifiedXCore
         public const long VaultMinimumPositionTestnetHeight = 205_615L;
 
         /// <summary>
+        /// From this height (the next block's, as the API sees the tip) the raw-transaction routes keep a Data sent as a
+        /// JSON object or array exactly as it appears in the request body: the same text is hashed and stored, with no
+        /// re-serialization. Below it the node writes such a Data back in its own form (numbers through double, whitespace
+        /// removed, escapes decoded, date-like strings in the node's time zone), which clients that check the node's hash
+        /// mirror today. Not a block rule: the stored Data is what was hashed either way. Unset (long.MaxValue) on both
+        /// networks until the release that activates it. Testnet value in GlobalsNetworkHeights.
+        /// </summary>
+        public static long RawDataVerbatimHeight = long.MaxValue;
+        public const long RawDataVerbatimTestnetHeight = long.MaxValue;
+
+        /// <summary>
         /// From this height a reserve's Recover() reads each pending NFT_TX row's call as the dispatchers read it. Below it
         /// a row whose Data was not an array of objects made the recovery throw part-way, so every later row, the balance
         /// sweep, the contract re-own and the vBTC sweep never ran, and the reserve stayed under its vault key. Active from LedgerRulesBatchHeight.
