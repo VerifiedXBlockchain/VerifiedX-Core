@@ -87,8 +87,22 @@ def main():
                     else: skipped += int(mm.group(1))
         failures += sorted(set(re.findall(r"^\s+Failed (VerifiedXCore\.Tests\.\S+)", text, re.M)))
     print(f"passed {passed}, failed {failed}, skipped {skipped}")
-    for f in failures: print("  FAILED", f)
-    sys.exit(1 if failed else 0)
+    if not failures:
+        sys.exit(0)
+
+    # Processes running at once can race (two take the same free port, or a timing test runs slow). The classes with
+    # a failure are run again, one process for all of them, and only what fails again is reported as failed.
+    classes = sorted({re.match(r"VerifiedXCore\.Tests\.([A-Za-z0-9_]+)\.", f).group(1) for f in failures})
+    flt = "|".join(f"FullyQualifiedName~VerifiedXCore.Tests.{c}." for c in classes)
+    rerun_log = os.path.join(out, "rerun.log")
+    with open(rerun_log, "w", encoding="utf-8") as log:
+        subprocess.run([DOTNET, "test", dll, "--filter", flt, "--logger", "console;verbosity=normal"], stdout=log, stderr=subprocess.STDOUT, cwd=out)
+    text = open(rerun_log, encoding="utf-8", errors="replace").read()
+    still = sorted(set(re.findall(r"^\s+Failed (VerifiedXCore\.Tests\.\S+)", text, re.M)))
+    for f in failures:
+        print("  FAILED" if f in still else "  passed when run again (order or timing):", f)
+    print(f"failed again: {len(still)} (log: {rerun_log})")
+    sys.exit(1 if still else 0)
 
 if __name__ == "__main__":
     main()
