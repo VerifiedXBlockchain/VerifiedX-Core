@@ -44,10 +44,10 @@ namespace VerifiedXCore.Utilities
                 if (firstEntry == true)
                 {
                     if(AuctionLoggerEnabled)
-                        await File.AppendAllTextAsync(path + "auctionlog.txt", Environment.NewLine + " ");
+                        await LogFile.AppendAsync(path + "auctionlog.txt", Environment.NewLine + " ");
                 }
                 if (AuctionLoggerEnabled)
-                    await File.AppendAllTextAsync(path + "auctionlog.txt", Environment.NewLine + text);
+                    await LogFile.AppendAsync(path + "auctionlog.txt", Environment.NewLine + text);
             }
             catch { }
         }

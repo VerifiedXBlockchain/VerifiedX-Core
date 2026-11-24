@@ -91,7 +91,7 @@ namespace VerifiedXCore.Utilities
                         try
                         {
                             var text = "[" + content.Time + "]" + " : " + "[" + content.Location + "]" + " : " + content.Message;
-                            await File.AppendAllTextAsync(path + content.FileName, Environment.NewLine + text);
+                            await LogFile.AppendAsync(path + content.FileName, Environment.NewLine + text);
                         }
                         catch (Exception ex)
                         {
@@ -142,11 +142,11 @@ namespace VerifiedXCore.Utilities
                 }
                 if (firstEntry == true)
                 {
-                    await File.AppendAllTextAsync(path + "rbxlog.txt", Environment.NewLine + " ");
+                    await LogFile.AppendAsync(path + "rbxlog.txt", Environment.NewLine + " ");
                 }
 
                 await LogEnqueue(message, location, "rbxlog.txt", true);
-                //await File.AppendAllTextAsync(path + "rbxlog.txt", Environment.NewLine + text);
+                //await LogFile.AppendAsync(path + "rbxlog.txt", Environment.NewLine + text);
                 VFXLogging.LogInfo(message, location);
             }
             catch (Exception ex)

@@ -52,7 +52,7 @@ namespace VerifiedXCore.Utilities
                         lines.Add(line);
 
                     if (lines.Count > 0)
-                        File.AppendAllLines(path, lines);
+                        LogFile.AppendLines(path, lines);
                 }
                 catch { /* best-effort */ }
             }
