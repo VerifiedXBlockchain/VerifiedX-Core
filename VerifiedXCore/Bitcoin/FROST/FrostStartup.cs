@@ -1133,12 +1133,13 @@ namespace VerifiedXCore.Bitcoin.FROST
                             }
 
                             // A commitment kept is counted with every other ceremony's state here.
-                            if (FrostSessionStorage.MakeRoomForDkgState(session, 2L * (commitment.CommitmentData?.Length ?? 0), TimeUtil.GetTime()) is { } round1Room)
+                            if (FrostSessionStorage.MakeRoomForDkgState(session, 2L * (commitment.CommitmentData?.Length ?? 0), TimeUtil.GetTime(), out var round1Taken) is { } round1Room)
                             {
                                 context.Response.StatusCode = StatusCodes.Status503ServiceUnavailable;
                                 await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = round1Room }));
                                 return;
                             }
+                            using var round1Reserved = round1Taken; // held until the commitment is kept
 
                             // FIND-016 Fix: Prevent overwrite - each participant can only submit once per round
                             if (!session.Round1Commitments.TryAdd(commitment.ValidatorAddress, commitment.CommitmentData))
@@ -1356,12 +1357,13 @@ namespace VerifiedXCore.Bitcoin.FROST
                             var round2Bytes = 2L * (addressCommitments ?? new Dictionary<string, string>())
                                 .Where(kvp => session.ParticipantAddresses.Contains(kvp.Key)).Sum(kvp => (long)(kvp.Value?.Length ?? 0))
                                 + 2048L * session.ParticipantAddresses.Count;
-                            if (FrostSessionStorage.MakeRoomForDkgState(session, round2Bytes, TimeUtil.GetTime()) is { } roomRefusal)
+                            if (FrostSessionStorage.MakeRoomForDkgState(session, round2Bytes, TimeUtil.GetTime(), out var round2Taken) is { } roomRefusal)
                             {
                                 context.Response.StatusCode = StatusCodes.Status503ServiceUnavailable;
                                 await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = roomRefusal }));
                                 return;
                             }
+                            using var round2Reserved = round2Taken; // held until this Round 2's state is kept
                             var myAddress = Globals.ValidatorAddress;
 
                             // DEBUG: Log actual commitment data format to understand FROST serialization

@@ -176,6 +176,24 @@ namespace VerifiedXCore.Tests
         }
 
         [Fact]
+        public void Room_given_to_one_request_is_not_given_to_another_until_it_is_released()
+        {
+            var now = TimeUtil.GetTime();
+            var share = FrostSessionStorage.MAX_DKG_HELD_BYTES_PER_SOURCE;
+            var first = Receiving();
+            var second = Receiving();
+
+            Assert.Null(FrostSessionStorage.MakeRoomForDkgState(first, share * 3 / 4, now, out var firstRoom));
+            // The first has stored nothing yet, but its room is taken: the second cannot have it too.
+            Assert.Contains("Busy", FrostSessionStorage.MakeRoomForDkgState(second, share * 3 / 4, now, out var none));
+            Assert.Null(none);
+
+            firstRoom!.Dispose();
+            Assert.Null(FrostSessionStorage.MakeRoomForDkgState(second, share * 3 / 4, now, out var secondRoom));
+            secondRoom!.Dispose();
+        }
+
+        [Fact]
         public void What_a_ceremony_holds_counts_its_commitments_shares_and_secrets()
         {
             var s = new DKGSession { Round1SecretPackage = new string('s', 100), Round2Secret = new string('r', 50), GeneratedSharesJson = new string('g', 200) };

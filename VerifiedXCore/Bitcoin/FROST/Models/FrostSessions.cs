@@ -451,6 +451,28 @@ namespace VerifiedXCore.Bitcoin.FROST.Models
             catch { return 0; }
         }
         private static readonly object DkgMemoryGate = new();
+        /// <summary>Room taken for state a session is about to keep, until it keeps it (<see cref="MakeRoomForDkgState"/>).</summary>
+        private static readonly Dictionary<DKGSession, long> DkgReserved = new(ReferenceEqualityComparer.Instance);
+
+        /// <summary>Room taken by <see cref="MakeRoomForDkgState"/>, given back when the work it was taken for ends.</summary>
+        public sealed class DkgRoom : IDisposable
+        {
+            private readonly DKGSession _session;
+            private long _bytes;
+            internal DkgRoom(DKGSession session, long bytes) { _session = session; _bytes = bytes; }
+
+            public void Dispose()
+            {
+                lock (DkgMemoryGate)
+                {
+                    var bytes = _bytes;
+                    _bytes = 0;
+                    if (bytes == 0 || !DkgReserved.TryGetValue(_session, out var held)) return;
+                    if (held > bytes) DkgReserved[_session] = held - bytes;
+                    else DkgReserved.Remove(_session);
+                }
+            }
+        }
 
         /// <summary>About what a session holds in memory, as text.</summary>
         public static long DkgHeldBytes(DKGSession s) => 2L * (
@@ -471,21 +493,25 @@ namespace VerifiedXCore.Bitcoin.FROST.Models
         /// <see cref="MAX_DKG_HELD_BYTES_PER_SOURCE"/> for its network and <see cref="MAX_DKG_HELD_BYTES"/> in all. Where
         /// there is none, sessions that may be dropped (<see cref="DkgMayBeDropped"/>) are, oldest first: first its own
         /// network's, then any. Null when there is room; otherwise why not, and the caller refuses what it was given.
+        /// The room is taken here, under the same lock that judged it, and held by <paramref name="room"/> until the
+        /// caller has kept what it was taken for: two requests at once cannot both be given the same room.
         /// </summary>
-        public static string? MakeRoomForDkgState(DKGSession session, long incomingBytes, long nowSeconds)
+        public static string? MakeRoomForDkgState(DKGSession session, long incomingBytes, long nowSeconds, out DkgRoom? room)
         {
+            room = null;
             lock (DkgMemoryGate)
             {
                 bool SameSource(DKGSession s) => string.Equals(s.SourceIp, session.SourceIp, StringComparison.Ordinal);
+                long Reserved(DKGSession s) => DkgReserved.TryGetValue(s, out var r) ? r : 0;
                 var others = DKGSessions.Values.Where(s => !ReferenceEquals(s, session)).ToList();
-                var held = others.ToDictionary(s => s, DkgHeldBytes);
-                var mine = DkgHeldBytes(session);
+                var held = others.ToDictionary(s => s, s => DkgHeldBytes(s) + Reserved(s));
+                var mine = DkgHeldBytes(session) + Reserved(session);
                 long OfSource() => mine + held.Where(h => SameSource(h.Key)).Sum(h => h.Value);
                 long OfAll() => mine + held.Values.Sum();
 
                 bool DropOldest(Func<DKGSession, bool> among, Func<long> holding, long limit)
                 {
-                    foreach (var s in others.Where(s => among(s) && held.ContainsKey(s) && DkgMayBeDropped(s, nowSeconds)).OrderBy(s => s.StartTimestamp).ToList())
+                    foreach (var s in others.Where(s => among(s) && held.ContainsKey(s) && Reserved(s) == 0 && DkgMayBeDropped(s, nowSeconds)).OrderBy(s => s.StartTimestamp).ToList())
                     {
                         if (holding() + incomingBytes <= limit) break;
                         AbortDkg(s);
@@ -499,6 +525,8 @@ namespace VerifiedXCore.Bitcoin.FROST.Models
                     return "Busy: the key ceremonies started from this network hold all the memory they may. Ask again later.";
                 if (!DropOldest(_ => true, OfAll, MAX_DKG_HELD_BYTES))
                     return "Busy: key ceremonies hold all the memory this validator gives them. Ask again later.";
+                DkgReserved[session] = Reserved(session) + incomingBytes;
+                room = new DkgRoom(session, incomingBytes);
                 return null;
             }
         }
