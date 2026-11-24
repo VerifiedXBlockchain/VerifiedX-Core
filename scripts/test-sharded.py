@@ -35,6 +35,8 @@ def main():
 
     r = subprocess.run([DOTNET, "test", dll, "--list-tests"], capture_output=True, text=True)
     names = [l.strip() for l in r.stdout.splitlines() if l.startswith("    VerifiedXCore.Tests.")]
+    if r.returncode != 0 or not names:
+        print(r.stdout[-4000:], r.stderr[-2000:]); sys.exit("test discovery failed")
     by_class = collections.Counter()
     for n in names:
         cls = re.match(r"VerifiedXCore\.Tests\.([A-Za-z0-9_]+)\.", n)
@@ -67,42 +69,69 @@ def main():
         log = open(os.path.join(out, f"shard-{i}.log"), "w", encoding="utf-8")
         procs.append((subprocess.Popen([DOTNET, "test", dll, "--filter", flt, "--logger", "console;verbosity=normal"],
                                        stdout=log, stderr=subprocess.STDOUT, cwd=out), log))
+    codes = []
     for p, log in procs:
-        p.wait(); log.close()
+        codes.append(p.wait()); log.close()
     print(f"tests {time.time() - t1:.0f} s, total {time.time() - t0:.0f} s")
 
     passed = failed = skipped = 0
-    failures = []
-    for i in range(shards):
-        text = open(os.path.join(out, f"shard-{i}.log"), encoding="utf-8", errors="replace").read()
-        m = re.search(r"Failed:\s+(\d+), Passed:\s+(\d+), Skipped:\s+(\d+)", text)
-        if m:
-            failed += int(m.group(1)); passed += int(m.group(2)); skipped += int(m.group(3))
-        else:
-            for k, pat in (("passed", r"\n\s+Passed:\s+(\d+)"), ("failed", r"\n\s+Failed:\s+(\d+)"), ("skipped", r"\n\s+Skipped:\s+(\d+)")):
-                mm = re.search(pat, text)
-                if mm:
-                    if k == "passed": passed += int(mm.group(1))
-                    elif k == "failed": failed += int(mm.group(1))
-                    else: skipped += int(mm.group(1))
-        failures += sorted(set(re.findall(r"^\s+Failed (VerifiedXCore\.Tests\.\S+)", text, re.M)))
+    failures, unfinished = [], []
+    for i, g in enumerate(groups):
+        result = read_log(os.path.join(out, f"shard-{i}.log"))
+        listed = sum(by_class[c] for c in g)
+        passed += result["passed"]; failed += result["failed"]; skipped += result["skipped"]
+        failures += result["failures"]
+        # A shard counts as finished only when it reported its totals for at least the tests it was given, and its
+        # exit code agrees with them: a crashed test host or a run cut short is never taken for a pass.
+        if not result["totals"] or result["total"] < listed or (codes[i] != 0 and not result["failures"]):
+            unfinished.append(i)
+            print(f"  shard {i} did not finish: exit {codes[i]}, {result['total']} of {listed} tests reported")
     print(f"passed {passed}, failed {failed}, skipped {skipped}")
-    if not failures:
+    if not failures and not unfinished:
         sys.exit(0)
 
     # Processes running at once can race (two take the same free port, or a timing test runs slow). The classes with
-    # a failure are run again, one process for all of them, and only what fails again is reported as failed.
-    classes = sorted({re.match(r"VerifiedXCore\.Tests\.([A-Za-z0-9_]+)\.", f).group(1) for f in failures})
+    # a failure, and every class of a shard that did not finish, are run again in one process; only what fails again
+    # is reported as failed. If that run does not finish either, nothing it covered is taken as passed.
+    classes = sorted({re.match(r"VerifiedXCore\.Tests\.([A-Za-z0-9_]+)\.", f).group(1) for f in failures}
+                     | {c for i in unfinished for c in groups[i]})
     flt = "|".join(f"FullyQualifiedName~VerifiedXCore.Tests.{c}." for c in classes)
     rerun_log = os.path.join(out, "rerun.log")
     with open(rerun_log, "w", encoding="utf-8") as log:
-        subprocess.run([DOTNET, "test", dll, "--filter", flt, "--logger", "console;verbosity=normal"], stdout=log, stderr=subprocess.STDOUT, cwd=out)
-    text = open(rerun_log, encoding="utf-8", errors="replace").read()
-    still = sorted(set(re.findall(r"^\s+Failed (VerifiedXCore\.Tests\.\S+)", text, re.M)))
+        code = subprocess.run([DOTNET, "test", dll, "--filter", flt, "--logger", "console;verbosity=normal"],
+                              stdout=log, stderr=subprocess.STDOUT, cwd=out).returncode
+    again = read_log(rerun_log)
+    listed = sum(by_class[c] for c in classes)
+    if not again["totals"] or again["total"] < listed or (code != 0 and not again["failures"]):
+        print(f"the run again did not finish: exit {code}, {again['total']} of {listed} tests reported (log: {rerun_log})")
+        for f in failures: print("  FAILED", f)
+        for i in unfinished: print(f"  UNFINISHED shard {i}")
+        sys.exit(1)
+    still = again["failures"]
     for f in failures:
         print("  FAILED" if f in still else "  passed when run again (order or timing):", f)
+    for f in still:
+        if f not in failures: print("  FAILED", f)
     print(f"failed again: {len(still)} (log: {rerun_log})")
     sys.exit(1 if still else 0)
+
+
+def read_log(path):
+    """Totals and failed tests from a `dotnet test` log at normal verbosity."""
+    text = open(path, encoding="utf-8", errors="replace").read() if os.path.exists(path) else ""
+    result = {"passed": 0, "failed": 0, "skipped": 0, "total": 0, "totals": False,
+              "failures": sorted(set(re.findall(r"^\s+Failed (VerifiedXCore\.Tests\.\S+)", text, re.M)))}
+    m = re.search(r"Failed:\s+(\d+), Passed:\s+(\d+), Skipped:\s+(\d+), Total:\s+(\d+)", text)
+    if m:
+        result.update(failed=int(m.group(1)), passed=int(m.group(2)), skipped=int(m.group(3)), total=int(m.group(4)), totals=True)
+        return result
+    t = re.search(r"\n\s*Total tests:\s+(\d+)", text)
+    if t:
+        result.update(total=int(t.group(1)), totals=True)
+        for k in ("Passed", "Failed", "Skipped"):
+            mm = re.search(rf"\n\s+{k}:\s+(\d+)", text)
+            if mm: result[k.lower()] = int(mm.group(1))
+    return result
 
 if __name__ == "__main__":
     main()
