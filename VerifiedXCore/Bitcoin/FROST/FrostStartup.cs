@@ -862,7 +862,7 @@ namespace VerifiedXCore.Bitcoin.FROST
 
                             // The leader is known now: a start it already used, its own places, and its network's. A re-key's
                             // leader is an active vBTC validator (re-keys have places of their own, which nobody else may take).
-                            var dkgLeaderRefusal = (string.IsNullOrEmpty(request.RekeyOf) ? null : FrostSessionStorage.RekeyLeaderRefusal(request.LeaderAddress))
+                            var dkgLeaderRefusal = (string.IsNullOrEmpty(request.RekeyOf) ? FrostSessionStorage.LeaderBalanceRefusal(request.LeaderAddress) : FrostSessionStorage.RekeyLeaderRefusal(request.LeaderAddress))
                                 ?? FrostSessionStorage.DkgStartRefusal(FrostSessionStorage.DKGSessions.Values, dkgNow, request.SessionId, request.Timestamp, request.LeaderAddress, dkgSource, request.RekeyOf);
                             if (dkgLeaderRefusal != null)
                             {
@@ -1132,6 +1132,14 @@ namespace VerifiedXCore.Bitcoin.FROST
                                 return;
                             }
 
+                            // A commitment kept is counted with every other ceremony's state here.
+                            if (FrostSessionStorage.MakeRoomForDkgState(session, 2L * (commitment.CommitmentData?.Length ?? 0), TimeUtil.GetTime()) is { } round1Room)
+                            {
+                                context.Response.StatusCode = StatusCodes.Status503ServiceUnavailable;
+                                await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = round1Room }));
+                                return;
+                            }
+
                             // FIND-016 Fix: Prevent overwrite - each participant can only submit once per round
                             if (!session.Round1Commitments.TryAdd(commitment.ValidatorAddress, commitment.CommitmentData))
                             {
@@ -1341,6 +1349,17 @@ namespace VerifiedXCore.Bitcoin.FROST
                             {
                                 context.Response.StatusCode = StatusCodes.Status400BadRequest;
                                 await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = setRefusal }));
+                                return;
+                            }
+                            // Room for what this Round 2 keeps (the participants' commitments, and the shares made from
+                            // them) before any of the work: every ceremony here together holds a bounded amount.
+                            var round2Bytes = 2L * (addressCommitments ?? new Dictionary<string, string>())
+                                .Where(kvp => session.ParticipantAddresses.Contains(kvp.Key)).Sum(kvp => (long)(kvp.Value?.Length ?? 0))
+                                + 2048L * session.ParticipantAddresses.Count;
+                            if (FrostSessionStorage.MakeRoomForDkgState(session, round2Bytes, TimeUtil.GetTime()) is { } roomRefusal)
+                            {
+                                context.Response.StatusCode = StatusCodes.Status503ServiceUnavailable;
+                                await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = roomRefusal }));
                                 return;
                             }
                             var myAddress = Globals.ValidatorAddress;

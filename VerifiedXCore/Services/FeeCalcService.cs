@@ -5,6 +5,13 @@ namespace VerifiedXCore.Services
 {
     public class FeeCalcService
     {
+        /// <summary>The fee <see cref="CalculateTXFee"/> gives a transaction of <paramref name="bytes"/>.</summary>
+        public static decimal CalculateFeeForBytes(long bytes)
+        {
+            var fee = (bytes / 1024.0M) * 0.00002M;
+            return fee < 0.000003M ? 0.000003M : decimal.Round(fee, 8, MidpointRounding.ToPositiveInfinity);
+        }
+
         public static decimal CalculateTXFee(Transaction tx)
         {
             var txFee = new decimal();
