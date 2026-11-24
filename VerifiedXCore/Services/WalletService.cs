@@ -298,8 +298,8 @@ namespace VerifiedXCore.Services
                 Timestamp = TimeUtil.GetTime(),
                 FromAddress = FromAddress,
                 ToAddress = ToAddress,
-                Amount = Amount + 0.0M,
-                Fee = 0, 
+                Amount = LedgerIntegrityRules.CanonicalDecimal(Amount), // "1" and "1.50" as 1.0 and 1.5: one accepted spelling
+                Fee = 0,
                 Nonce = AccountStateTrei.GetNextNonce(FromAddress), 
                 TransactionType = tranType,
             };

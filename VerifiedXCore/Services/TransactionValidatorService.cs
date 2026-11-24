@@ -307,6 +307,12 @@ namespace VerifiedXCore.Services
             if (preimageError != null)
                 return (false, preimageError);
 
+            // One spelling of Amount and Fee from Globals.CanonicalInputHeight, judged as the transaction arrived: before
+            // admission re-spells it below, which would hide a whole Amount sent without a decimal point.
+            var spellingError = LedgerIntegrityRules.CanonicalAmountAndFee(txRequest, blockHeight ?? ((Globals.LastBlock?.Height ?? 0) + 1));
+            if (spellingError != null)
+                return (false, spellingError);
+
             // At admission a transaction is judged, and kept, with its Amount and Fee spelled as a block carries them
             // (the hash covers the spelling). Block validation reads a block's transactions as they are.
             if (blockHeight == null && !blockVerify && !blockDownloads)
@@ -4797,12 +4803,11 @@ namespace VerifiedXCore.Services
         }
 
         /// <summary>
-        /// Whether a standard (non-private) transaction's carried Hash is the hash of its content. Accepts the legacy
-        /// spellings VerifyTX always has: a whole-number Amount hashed as "N.0", and a zero Amount hashed as "0".
+        /// Whether a standard (non-private) transaction's carried Hash is the hash of its content, judged for
+        /// <paramref name="height"/>. Below Globals.CanonicalInputHeight it accepts the legacy spellings VerifyTX always
+        /// has: a whole-number Amount hashed as "N.0", and a zero Amount hashed as "0". From that height Amount and Fee
+        /// have one spelling (LedgerIntegrityRules.CanonicalAmountAndFee), and the hash is that of the values carried.
         /// </summary>
-        internal static bool StandardHashMatches(Transaction txRequest) => StandardHashMatches(txRequest, long.MaxValue);
-
-        /// <summary>As <see cref="StandardHashMatches(Transaction)"/>, judged for <paramref name="height"/>.</summary>
         internal static bool StandardHashMatches(Transaction txRequest, long height)
         {
             var newTxn = new Transaction()
@@ -4822,6 +4827,11 @@ namespace VerifiedXCore.Services
 
             if (newTxn.Hash.Equals(txRequest.Hash))
                 return true;
+
+            // From the canonical-input height no other spelling is tried: a transaction signed over "0" or "1" is not one
+            // carrying 0.0 or 1.0.
+            if (height >= Globals.CanonicalInputHeight)
+                return false;
 
             var amountCheck = txRequest.Amount % 1 == 0;
             // A non-whole amount has no other spelling. Re-hashed below as 0, it matched a signature over "0", so a relay

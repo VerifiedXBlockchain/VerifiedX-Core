@@ -91,6 +91,7 @@ namespace VerifiedXCore.Tests
             Assert.Equal(401, Globals.ContractBodyLimitsHeight);
             Assert.Equal(401, Globals.PlonkCurrentRulesHeight);
             Assert.Equal(401, Globals.TXHeightRule3);
+            Assert.Equal(401, Globals.CanonicalInputHeight); // not yet set on the live testnet
             // ... and the genesis-staged ones keep their order (bonds before the fund-loss rules, observation first).
             Assert.Equal(Globals.BitcoinAttestationObserveTestnetHeight, Globals.ValidatorBondGrandfatherHeight);
             Assert.Equal(Globals.FundLossAuditTestnetHeight - 1, Globals.ValidatorBondHeight);
@@ -110,6 +111,18 @@ namespace VerifiedXCore.Tests
             Assert.Equal(Globals.ContractBodyLimitsTestnetHeight, Globals.ContractBodyLimitsHeight);
             Assert.Equal(Globals.PlonkCurrentRulesTestnetHeight, Globals.PlonkCurrentRulesHeight);
             Assert.Equal(rule3, Globals.TXHeightRule3);
+            Assert.Equal(long.MaxValue, Globals.CanonicalInputHeight);
+        }
+
+        [Fact]
+        public void Mainnet_LeavesTheCanonicalInputRuleUnset()
+        {
+            Globals.IsTestNet = false;
+            Globals.IsCustomTestNet = false;
+            Globals.CanonicalInputHeight = long.MaxValue;
+            Globals.ApplyNetworkHeights();
+
+            Assert.Equal(long.MaxValue, Globals.CanonicalInputHeight);
         }
     }
 }
