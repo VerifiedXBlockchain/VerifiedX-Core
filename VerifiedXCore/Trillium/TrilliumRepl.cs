@@ -167,7 +167,9 @@ namespace VerifiedXCore.Trillium
 			if (_showProgram)
 				compilation.EmitTree(Console.Out);
 
-			var result = compilation.Evaluate(_variables);
+			// Every run within the contract limits (steps, string length, text worked through): a body that builds a huge
+			// string without a loop or a call stops here, on every node at the same point.
+			var result = compilation.Evaluate(_variables, ContractRunLimits.For(VerifiedXCore.Services.ContractClock.BlockHeight));
 
 			if (!result.Diagnostics.Any())
 			{

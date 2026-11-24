@@ -32,7 +32,7 @@ namespace VerifiedXCore.Trillium
             }
 
             var compilation = Compilation.Create(syntaxTrees.ToArray());
-            var result = compilation.Evaluate(new Dictionary<VariableSymbol, object>());
+            var result = compilation.Evaluate(new Dictionary<VariableSymbol, object>(), ContractRunLimits.Contract);
 
             if (!result.Diagnostics.Any())
             {

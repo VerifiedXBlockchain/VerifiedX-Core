@@ -47,6 +47,7 @@ namespace VerifiedXCore
             Globals.VaultMinimumPositionHeight = Globals.IsTestNet ? Globals.VaultMinimumPositionTestnetHeight : Globals.VaultMinimumPositionHeight;
             Globals.RawDataVerbatimHeight = Globals.IsTestNet ? Globals.RawDataVerbatimTestnetHeight : Globals.RawDataVerbatimHeight;
             Globals.ContractBodyKeySpellingHeight = Globals.IsTestNet ? Globals.ContractBodyKeySpellingTestnetHeight : Globals.ContractBodyKeySpellingHeight;
+            Globals.ContractRunLimitsHeight = Globals.IsTestNet ? Globals.ContractRunLimitsTestnetHeight : Globals.ContractRunLimitsHeight;
             Globals.ReserveRecoverReadsEveryRowHeight = Globals.IsTestNet ? Globals.LedgerRulesBatchTestnetHeight : Globals.ReserveRecoverReadsEveryRowHeight;
             Globals.VbtcEnvelopeRulesHeight = Globals.IsTestNet ? Globals.LedgerRulesBatchTestnetHeight : Globals.VbtcEnvelopeRulesHeight;
             Globals.ReserveNonTransferAmountHeight = Globals.IsTestNet ? Globals.LedgerRulesBatchTestnetHeight : Globals.ReserveNonTransferAmountHeight;
@@ -167,6 +168,7 @@ namespace VerifiedXCore
             Globals.RawDataVerbatimHeight = CustomTestNetInputRulesHeight;
             Globals.StrictDataReaderHeight = CustomTestNetInputRulesHeight;
             Globals.ContractBodyKeySpellingHeight = CustomTestNetInputRulesHeight;
+            Globals.ContractRunLimitsHeight = CustomTestNetInputRulesHeight;
         }
     }
 }

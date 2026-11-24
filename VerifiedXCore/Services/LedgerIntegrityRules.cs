@@ -1152,6 +1152,12 @@ namespace VerifiedXCore.Services
                         foreach (var child in node.GetChildren())
                             pending.Push(child);
                     }
+                    // A run as the node reads the body, within the contract run limits: what no rule above measures (a
+                    // string doubled line after line, long text compared over and over) stops the run, and the body is
+                    // refused, so no reader that falls back on a body it cannot run ever meets one a limit stopped.
+                    // Always at admission, in a block from ContractRunLimitsHeight.
+                    if ((!inBlock || height >= Globals.ContractRunLimitsHeight) && VerifiedXCore.Trillium.ContractRunLimits.StoppedBy(body) is { } stopped)
+                        return $"Contract code costs more to run than a contract may: {stopped}";
                 }
                 catch (Exception ex)
                 {
