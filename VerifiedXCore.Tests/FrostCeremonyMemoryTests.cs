@@ -119,7 +119,7 @@ namespace VerifiedXCore.Tests
         [Fact]
         public async Task Ceremonies_that_hold_no_place_are_dropped_oldest_first_to_make_room()
         {
-            const int half = (int)(FrostSessionStorage.MAX_DKG_HELD_BYTES_PER_SOURCE / 4); // chars: each holds half the network's share
+            var half = (int)(FrostSessionStorage.MAX_DKG_HELD_BYTES_PER_SOURCE / 4); // chars: each holds half the network's share
             var oldest = Held(ageSeconds: 900, commitmentChars: half);
             var older = Held(ageSeconds: 600, commitmentChars: half);
             var session = Receiving();
@@ -135,7 +135,7 @@ namespace VerifiedXCore.Tests
         [Fact]
         public async Task When_only_ceremonies_under_way_hold_the_memory_a_commitment_set_is_answered_busy()
         {
-            const int half = (int)(FrostSessionStorage.MAX_DKG_HELD_BYTES_PER_SOURCE / 4);
+            var half = (int)(FrostSessionStorage.MAX_DKG_HELD_BYTES_PER_SOURCE / 4);
             var a = Held(ageSeconds: 10, commitmentChars: half);
             var b = Held(ageSeconds: 10, commitmentChars: half);
             var session = Receiving();
@@ -161,6 +161,18 @@ namespace VerifiedXCore.Tests
             Assert.True(FrostSessionStorage.DkgMayBeDropped(longFinished, now));
             Assert.True(FrostSessionStorage.DkgMayBeDropped(idle, now));
             Assert.False(FrostSessionStorage.DkgMayBeDropped(working, now));
+        }
+
+        [Fact]
+        public void The_budgets_hold_a_networks_eight_honest_ceremonies_up_to_350_validators()
+        {
+            Assert.InRange(FrostSessionStorage.HonestCeremonyBytes(162), 1L * 1024 * 1024, 4L * 1024 * 1024);  // mainnet today
+            Assert.InRange(FrostSessionStorage.HonestCeremonyBytes(350), 10L * 1024 * 1024, 14L * 1024 * 1024);
+            Assert.Equal(FrostSessionStorage.HonestCeremonyBytes(350), FrostSessionStorage.HonestCeremonyBytes(500)); // sized no further
+            // With no validators known (a test, or a node starting) the floors hold.
+            Assert.True(FrostSessionStorage.MAX_DKG_HELD_BYTES_PER_SOURCE >= 32L * 1024 * 1024);
+            Assert.True(FrostSessionStorage.MAX_DKG_HELD_BYTES >= Math.Max(256L * 1024 * 1024, 3 * FrostSessionStorage.MAX_DKG_HELD_BYTES_PER_SOURCE));
+            Assert.True(FrostSessionStorage.MAX_DKG_SESSIONS_PER_SOURCE * FrostSessionStorage.HonestCeremonyBytes(350) <= 100L * 1024 * 1024);
         }
 
         [Fact]

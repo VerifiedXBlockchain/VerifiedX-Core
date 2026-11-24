@@ -419,11 +419,37 @@ namespace VerifiedXCore.Bitcoin.FROST.Models
         /// A session is kept for an hour (<see cref="CleanupOldSessions"/>) and gives up its place after
         /// <see cref="DKG_UNPROGRESSED_SECONDS"/> without progress, so places alone did not bound it: a sender that kept
         /// opening ceremonies with funded keys kept every commitment set it sent for the hour. A mainnet ceremony holds
-        /// about 1 to 3 MB here.
+        /// about 1 to 3 MB here. The bound follows the validator set (<see cref="HonestCeremonyBytes"/>) up to
+        /// <see cref="PlannedMaxValidators"/>: three networks' worth of ceremonies, and never less than 256 MB.
         /// </summary>
-        public const long MAX_DKG_HELD_BYTES = 256L * 1024 * 1024;
-        /// <summary>What the ceremonies started from one network (a /24 or /64) may hold.</summary>
-        public const long MAX_DKG_HELD_BYTES_PER_SOURCE = 32L * 1024 * 1024;
+        public static long MAX_DKG_HELD_BYTES => Math.Max(256L * 1024 * 1024, 3 * MAX_DKG_HELD_BYTES_PER_SOURCE);
+        /// <summary>
+        /// What the ceremonies started from one network (a /24 or /64) may hold: its <see cref="MAX_DKG_SESSIONS_PER_SOURCE"/>
+        /// places, each with an honest ceremony of today's validator set, and never less than 32 MB.
+        /// </summary>
+        public static long MAX_DKG_HELD_BYTES_PER_SOURCE =>
+            Math.Max(32L * 1024 * 1024, MAX_DKG_SESSIONS_PER_SOURCE * HonestCeremonyBytes(ActiveValidatorCount()));
+
+        /// <summary>The most validators the ceremony budgets are sized for. Past it, they stay at this size.</summary>
+        public const int PlannedMaxValidators = 350;
+
+        /// <summary>
+        /// About what one honest ceremony of <paramref name="validators"/> participants holds here, as text: each
+        /// participant's commitment (a 33-byte coefficient in hex for each signer the key needs, at a two-thirds
+        /// threshold), and the shares made from them. 350 validators: about 12 MB.
+        /// </summary>
+        public static long HonestCeremonyBytes(int validators)
+        {
+            var v = Math.Clamp(validators, 1, PlannedMaxValidators);
+            var coefficients = (long)Math.Ceiling(v * 0.67);
+            return 2L * v * (coefficients * 66 + 512) + 2048L * v;
+        }
+
+        private static int ActiveValidatorCount()
+        {
+            try { return VerifiedXCore.Bitcoin.Services.VBTCValidatorRegistry.GetActiveValidatorCount(); }
+            catch { return 0; }
+        }
         private static readonly object DkgMemoryGate = new();
 
         /// <summary>About what a session holds in memory, as text.</summary>
