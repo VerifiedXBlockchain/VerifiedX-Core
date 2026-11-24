@@ -28,6 +28,8 @@ namespace VerifiedXCore.Models
         public long Nonce { get; set; }
         public decimal Fee { get; set; }
         public long Timestamp { get; set; }
+        /// <summary>Carried in blocks up to the largest transaction size; a request body may hold it at that length.</summary>
+        [VerifiedXCore.Utilities.JsonBound(Bytes = 1024 * 1024)]
         public string? Data { get; set; } = null;
         public long? UnlockTime { get; set; } = null;
         

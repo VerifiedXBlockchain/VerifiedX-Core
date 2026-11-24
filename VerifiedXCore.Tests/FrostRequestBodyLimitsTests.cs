@@ -430,11 +430,14 @@ namespace VerifiedXCore.Tests
 
         private const string LastPiece = "0\r\n\r\n";
 
-        /// <summary>A JSON object of exactly <paramref name="bytes"/>.</summary>
+        /// <summary>
+        /// A JSON object of exactly <paramref name="bytes"/>, of a shape routes take: the length is white space, which the
+        /// shape check reads past, not one long text value, which it refuses.
+        /// </summary>
         private static string Json(int bytes)
         {
-            const string open = "{\"Padding\":\"", close = "\"}";
-            return open + new string('a', bytes - open.Length - close.Length) + close;
+            const string open = "{\"Padding\":\"a\"", close = "}";
+            return open + new string(' ', bytes - open.Length - close.Length) + close;
         }
 
         /// <summary>A new connection on which <paramref name="sent"/> has been written.</summary>

@@ -43,6 +43,7 @@ namespace VerifiedXCore.Arbiter
 
         public void Configure(IApplicationBuilder app)
         {
+            app.Use(VerifiedXCore.Utilities.BoundedJsonBodies.ForPaths(_ => VerifiedXCore.Utilities.BoundedJson.Arbiter, VerifiedXCore.Utilities.BoundedJson.ArbiterBodies));
             app.UseRouting();
             app.UseEndpoints(endpoints =>
             {

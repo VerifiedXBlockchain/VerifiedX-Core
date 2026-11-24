@@ -130,7 +130,7 @@ namespace VerifiedXCore.Tests
             {
                 Assert.StartsWith("HTTP/1.1 413", await Post(port, 5 * 1024 * 1024 + 1, "", stopSending: false));
 
-                var large = "{\"Pad\":\"" + new string('a', 2 * 1024 * 1024) + "\"}";
+                var large = "{\"Pad\":\"a\"" + new string(' ', 2 * 1024 * 1024) + "}"; // large, of a shape the route takes
                 var reply = await Post(port, large.Length, large, stopSending: false);
                 Assert.StartsWith("HTTP/1.1 400", reply);
                 Assert.Contains("Invalid alert", reply); // the route read it and answered

@@ -48,6 +48,9 @@ namespace VerifiedXCore
 
             app.UseRouting();
 
+            // A body is held to its action's model before the model binder builds anything from it.
+            app.Use(Utilities.BoundedJsonBodies.ForActions(Utilities.BoundedJson.ValidatorApi, Utilities.BoundedJson.ValidatorApiBodies));
+
             app.UseAuthorization();
 
             app.UseEndpoints(endpoints =>

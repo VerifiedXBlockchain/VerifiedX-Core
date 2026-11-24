@@ -9,26 +9,7 @@ namespace VerifiedXCore.Tests
         /// <summary>"host METHOD route flag", as the test prints them.</summary>
         public static readonly HashSet<string> KnownFailures = new(StringComparer.Ordinal)
         {
-            // These build their whole body into objects before they look at who sent it.
-            "valapi POST /valapi/Validator/ProbeTip allocation",
-            "valapi POST /valapi/Validator/AnnounceCasterResumed allocation",
-            "valapi POST /valapi/Validator/AnnounceCasterResumed slow",
-            "valapi POST /valapi/Validator/CasterInvitation allocation",
-            "valapi POST /valapi/Validator/ExchangeValidatorList allocation",
-            "valapi POST /valapi/Validator/PromoteToCaster allocation",
-            // A body that is not the shape the route expects ends in an unhandled error.
-            "valapi POST /valapi/Validator/CasterInvitation unhandled-error",
-            "valapi POST /valapi/Validator/ReceiveCatchUpBlock unhandled-error",
-            "frost POST /frost/backup/check unhandled-error",
-            "frost POST /frost/backup/recover unhandled-error",
-            "frost POST /frost/backup/store unhandled-error",
-            "frost POST /frost/dkg/abort unhandled-error",
-            "frost POST /frost/dkg/start unhandled-error",
-            "frost POST /frost/sign/abort unhandled-error",
-            "frost POST /frost/sign/start unhandled-error",
             "arbiter GET /depositaddress/x/x unhandled-error",
-            // The Arbiter sets no body limit and reads the whole body before it checks the signature.
-            "arbiter POST /getsignedmultisig allocation",
         };
 
         /// <summary>"HubType.Method" for every SignalR hub method. The test does not probe these yet.</summary>

@@ -55,6 +55,52 @@ namespace VerifiedXCore.Bitcoin.FROST
         private readonly Dictionary<string, long> _bySource = new(StringComparer.Ordinal);
         private readonly Dictionary<object, long> _byKind = new();
 
+        /// <summary>
+        /// What a body may hold, as well as how long it may be (<see cref="ShapeFor"/>). Most routes take a request with
+        /// a list of at most one entry per participant.
+        /// </summary>
+        public static readonly VerifiedXCore.Utilities.JsonShape SmallShape = new(MaxDepth: 16,
+            MaxItems: Models.FrostSessionStorage.MAX_PARTICIPANTS + 16, MaxContainers: 1024, MaxStringBytes: SmallBodyBytes, ObjectRoot: true);
+        /// <summary>A signing start and nonce set: an entry per input of the largest transaction Bitcoin relays.</summary>
+        public static readonly VerifiedXCore.Utilities.JsonShape SigningShape = new(MaxDepth: 16,
+            MaxItems: 16_384, MaxContainers: 16_448, MaxStringBytes: SigningBodyBytes, ObjectRoot: true);
+        /// <summary>
+        /// A key ceremony's commitment set and share batch: one text entry per participant, each a package that is
+        /// itself held to <see cref="PackageShape"/> before it is read.
+        /// </summary>
+        public static readonly VerifiedXCore.Utilities.JsonShape CeremonyShape = new(MaxDepth: 8,
+            MaxItems: Models.FrostSessionStorage.MAX_PARTICIPANTS + 16, MaxContainers: 64, MaxStringBytes: FrostDkgBlame.MaxDealerEntryLength, ObjectRoot: true);
+        /// <summary>One FROST package from another participant: a header, a commitment with one entry per coefficient, a proof or a share.</summary>
+        public static readonly VerifiedXCore.Utilities.JsonShape PackageShape = new(MaxDepth: 8,
+            MaxItems: Models.FrostSessionStorage.MAX_PARTICIPANTS + 16, MaxContainers: 16, MaxStringBytes: Models.FrostSessionStorage.MAX_COMMITMENT_DATA_LENGTH);
+        /// <summary>A dealer's shares: one package for each participant.</summary>
+        public static readonly VerifiedXCore.Utilities.JsonShape PackageMapShape = new(MaxDepth: 8,
+            MaxItems: Models.FrostSessionStorage.MAX_PARTICIPANTS + 16, MaxContainers: 3 * (Models.FrostSessionStorage.MAX_PARTICIPANTS + 16) + 8,
+            MaxStringBytes: Models.FrostSessionStorage.MAX_COMMITMENT_DATA_LENGTH);
+
+        /// <summary>What the body of the route at <paramref name="path"/> may hold.</summary>
+        public static VerifiedXCore.Utilities.JsonShape ShapeFor(PathString path)
+        {
+            if (path.StartsWithSegments("/frost/dkg/round2") || path.StartsWithSegments("/frost/dkg/shares"))
+                return CeremonyShape;
+            if (path.StartsWithSegments("/frost/sign/start") || path.StartsWithSegments("/frost/sign/round2"))
+                return SigningShape;
+            return SmallShape;
+        }
+
+        /// <summary>
+        /// Why a posted commitment set may not be read, or null: every entry is a package of <see cref="PackageShape"/>.
+        /// A wide entry parses into a large object graph, so the whole set is judged before any entry is parsed.
+        /// </summary>
+        public static string? CommitmentSetRefusal(IReadOnlyDictionary<string, string>? set)
+        {
+            if (set == null) return null;
+            foreach (var entry in set)
+                if (VerifiedXCore.Utilities.BoundedJson.Refusal(entry.Value, PackageShape) is { } refusal)
+                    return $"The commitment for {(entry.Key.Length > 64 ? entry.Key.Substring(0, 64) : entry.Key)} is refused: {refusal}.";
+            return null;
+        }
+
         /// <summary>The longest body the route at <paramref name="path"/> takes.</summary>
         public static int MaxBytesFor(PathString path)
         {

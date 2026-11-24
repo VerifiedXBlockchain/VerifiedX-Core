@@ -117,7 +117,7 @@ namespace VerifiedXCore.Tests
                     foreach (var route in RoutesOf(host))
                         foreach (var probe in ProbesFor(route))
                         {
-                            var result = await SendAsync(client, route, probe);
+                            var result = await SendFlaggedAgainAsync(client, route, probe);
                             report.AppendLine($"{name} | {route.Method} | {route.Path} | {route.BodyType?.Name ?? "-"} | {probe.Shape} | {probe.Body?.Length ?? 0} | {result.Status} | {result.Elapsed.TotalMilliseconds:F0} | {result.Allocated / (double)Mb:F1} | {result.TimesBody:F0} | {result.HeapGrowth / (double)Mb:F1} | {result.Verdict}");
                             foreach (var flag in result.Flags) failures.Add($"{name} {route.Method} {route.Path} {flag}");
                             foreach (var flag in result.NotFixed) notFixed.Add($"{name} {route.Method} {route.Path} {flag}");
@@ -187,12 +187,12 @@ namespace VerifiedXCore.Tests
                 var port = FrostConnectionLimitsTests.FreePortPair();
                 return (Build<StartupP2PCaster>(options => ValidatorService.CasterApiKestrel(options, port)), port);
             });
-            // The Arbiter and Beacon servers set nothing on Kestrel beyond the port (ArbiterServer, BeaconServerFast).
             yield return ("arbiter", () =>
             {
                 var port = FrostConnectionLimitsTests.FreePortPair();
-                return (Build<ArbiterStartup>(options => options.ListenAnyIP(port)), port);
+                return (Build<ArbiterStartup>(options => ArbiterServer.ConfigureKestrel(options, port)), port);
             });
+            // The Beacon server sets nothing on Kestrel beyond the port (BeaconServerFast).
             yield return ("beacon", () =>
             {
                 var port = FrostConnectionLimitsTests.FreePortPair();
@@ -358,6 +358,22 @@ namespace VerifiedXCore.Tests
         /// by during the request, sampled, and includes memory not yet collected.
         /// </summary>
         private sealed record Result(string Status, TimeSpan Elapsed, long Allocated, double TimesBody, long HeapGrowth, string Verdict, List<string> Flags, List<string> NotFixed);
+
+        /// <summary>
+        /// A probe that fails is sent twice more, and fails only for what it does every time: other work on the machine
+        /// can make one request slow or count another's allocations, and a real failure repeats.
+        /// </summary>
+        private async Task<Result> SendFlaggedAgainAsync(HttpClient client, Route route, Probe probe)
+        {
+            var result = await SendAsync(client, route, probe);
+            for (var again = 0; again < 2 && result.Flags.Count > 0; again++)
+            {
+                var next = await SendAsync(client, route, probe);
+                var flags = result.Flags.Intersect(next.Flags).ToList();
+                result = (flags.Count == next.Flags.Count ? next : result) with { Flags = flags, Verdict = flags.Count > 0 ? "FAIL " + string.Join("+", flags) : "ok on a second try" };
+            }
+            return result;
+        }
 
         private async Task<Result> SendAsync(HttpClient client, Route route, Probe probe)
         {

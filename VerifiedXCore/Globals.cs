@@ -929,6 +929,12 @@ namespace VerifiedXCore
         public static int ChainCheckPointRetain = 0;
         public static int PasswordClearTime = 10;
         public static int NFTTimeout = 0;
+        /// <summary>
+        /// Whether request bodies on the FROST, validator API and Arbiter servers are judged by their shape before any
+        /// route reads them (<see cref="VerifiedXCore.Utilities.BoundedJsonBodies"/>). On unless config.txt says
+        /// <c>BoundRequestBodies=false</c>, which is there to turn the check off without a new build.
+        /// </summary>
+        public static bool BoundRequestBodies = true;
         public static int Port = 3338;
         public static int BeaconPort = 23338;
         public static int BeaconWebPort = 23339;

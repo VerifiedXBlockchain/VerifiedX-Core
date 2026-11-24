@@ -30,7 +30,7 @@ namespace VerifiedXCore.Bitcoin.Services
             public string Action { get; set; } = "";
             public string? Implementation { get; set; }
             public long? DelaySeconds { get; set; }
-            public string[]? Validators { get; set; }
+            [VerifiedXCore.Utilities.JsonBound(VerifiedXCore.Utilities.ListSize.Validators)] public string[]? Validators { get; set; }
             public string[]? Casters { get; set; }
             public long? VfxBlockHeight { get; set; }
         }

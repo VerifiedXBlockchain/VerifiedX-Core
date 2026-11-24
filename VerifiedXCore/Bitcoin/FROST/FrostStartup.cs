@@ -41,6 +41,8 @@ namespace VerifiedXCore.Bitcoin.FROST
         {
             app.Use(FrostConnectionLimits.TrackRequest);
             app.Use(FrostRequestBodyLimits.Bound);
+            // What a body holds is judged before any route parses it (each route reads it itself).
+            app.Use(VerifiedXCore.Utilities.BoundedJsonBodies.ForPaths(FrostRequestBodyLimits.ShapeFor));
             app.UseRouting();
             app.UseEndpoints(endpoints =>
             {
@@ -1335,6 +1337,12 @@ namespace VerifiedXCore.Bitcoin.FROST
                             // Each commitment is a serialized round1::Package containing its own FROST Identifier.
                             // We parse each as a JSON object, extract the identifier, and use it as the map key.
                             var addressCommitments = JsonConvert.DeserializeObject<Dictionary<string, string>>(body);
+                            if (FrostRequestBodyLimits.CommitmentSetRefusal(addressCommitments) is { } setRefusal)
+                            {
+                                context.Response.StatusCode = StatusCodes.Status400BadRequest;
+                                await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = setRefusal }));
+                                return;
+                            }
                             var myAddress = Globals.ValidatorAddress;
 
                             // DEBUG: Log actual commitment data format to understand FROST serialization
@@ -1823,7 +1831,8 @@ namespace VerifiedXCore.Bitcoin.FROST
                                 {
                                     // The generated shares JSON from FROST native is a BTreeMap<Identifier, round2::Package>
                                     // Keys are FROST Identifier hex strings, not simple participant IDs
-                                    var senderShares = Newtonsoft.Json.Linq.JObject.Parse(senderSharesStr);
+                                    var senderShares = VerifiedXCore.Utilities.BoundedJson.Parse(senderSharesStr, FrostRequestBodyLimits.PackageMapShape) as Newtonsoft.Json.Linq.JObject
+                                        ?? throw new Newtonsoft.Json.JsonReaderException("A dealer's shares are not an object.");
                                     
                                     // Look up using our FROST Identifier
                                     // NEW-19: the package must be sealed to this validator; plaintext packages are refused.
@@ -4212,7 +4221,7 @@ namespace VerifiedXCore.Bitcoin.FROST
                     if (kvp.Key == myAddr2) continue; // Exclude self
                     try
                     {
-                        var pkg = Newtonsoft.Json.Linq.JToken.Parse(kvp.Value);
+                        var pkg = VerifiedXCore.Utilities.BoundedJson.Parse(kvp.Value, FrostRequestBodyLimits.PackageShape);
                         if (addrToIdMap.TryGetValue(kvp.Key, out var frostId))
                             round1BTreeMap[frostId] = pkg;
                     }
@@ -4227,7 +4236,7 @@ namespace VerifiedXCore.Bitcoin.FROST
                 {
                     try
                     {
-                        var pkg = Newtonsoft.Json.Linq.JToken.Parse(kvp.Value);
+                        var pkg = VerifiedXCore.Utilities.BoundedJson.Parse(kvp.Value, FrostRequestBodyLimits.PackageShape);
                         if (addrToIdMap.TryGetValue(kvp.Key, out var frostId))
                             sharesBTreeMap[frostId] = pkg;
                     }
