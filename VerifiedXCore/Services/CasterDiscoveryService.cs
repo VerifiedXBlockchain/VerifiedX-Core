@@ -1828,7 +1828,7 @@ namespace VerifiedXCore.Services
                     response.Reason = "Candidate IP is not an IP address";
                     return response;
                 }
-                if (!PortUtility.IsPortOpen(cleanIp, Globals.ValAPIPort))
+                if (!await PortUtility.IsPortOpenAsync(cleanIp, Globals.ValAPIPort))
                 {
                     response.Reason = $"Port closed {cleanIp}:{Globals.ValAPIPort}";
                     return response;
@@ -2011,7 +2011,7 @@ namespace VerifiedXCore.Services
                 }
 
                 // (5) gate: port + version (don't trust promoter blindly)
-                if (!PortUtility.IsPortOpen(promotedIp, Globals.ValAPIPort))
+                if (!await PortUtility.IsPortOpenAsync(promotedIp, Globals.ValAPIPort))
                 {
                     CasterLogUtility.Log(
                         $"[CONSENSUS-V2] HandlePromoteAnnounce REJECT — port closed {promotedIp}:{Globals.ValAPIPort} for {announce.PromotedAddress}",

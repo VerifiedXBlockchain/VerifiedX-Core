@@ -40,6 +40,8 @@ namespace VerifiedXCore.Tests
             new("body-read", new[] { "Request.Body" }, "BoundedJsonBodies.ReadBody", "Utilities/BoundedJson.cs"),
             new("log-write", new[] { "File.AppendAllText", "File.AppendAllTextAsync" }, "LogFile.Append", "Utilities/LogFile.cs"),
             new("async-void", new[] { "async void" }, "async Task (an exception in async void ends the process)"),
+            new("port-probe", new[] { "PortUtility.IsPortOpen" },
+                "await PortUtility.IsPortOpenAsync (the blocking probe holds a thread for up to a second per call)", "Utilities/PortUtility.cs"),
         };
 
         private static string Root([System.Runtime.CompilerServices.CallerFilePath] string thisFile = "") =>

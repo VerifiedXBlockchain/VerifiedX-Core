@@ -41,13 +41,13 @@ namespace VerifiedXCore.P2P
 
             Globals.P2PPeerDict[peerIP] = Context;
 
-            var portOpen = PortUtility.IsPortOpen(peerIP, Globals.Port);
-
             //Save Peer here
             var peers = Peers.GetAll();
             var peerExist = peers.Find(x => x.PeerIP == peerIP).FirstOrDefault();
             if (peerExist == null)
             {
+                // Whether we can dial it back; only a new peer's record uses the answer.
+                var portOpen = await PortUtility.IsPortOpenAsync(peerIP, Globals.Port);
                 Peers nPeer = new Peers
                 {
                     FailCount = 0,

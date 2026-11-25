@@ -55,6 +55,25 @@ namespace VerifiedXCore.Utilities
             }
         }
 
+        /// <summary>
+        /// Whether <paramref name="host"/> accepts a TCP connection on <paramref name="port"/> within the timeout. It waits
+        /// without holding a thread, so a path that a remote caller starts (a hub connection, a route) can use it; the
+        /// blocking <see cref="IsPortOpen"/> holds a thread for up to a second per call.
+        /// </summary>
+        public static async Task<bool> IsPortOpenAsync(string host, int port, int timeoutMs = 1000)
+        {
+            using var tcpClient = new TcpClient();
+            using var timeout = new CancellationTokenSource(timeoutMs);
+            try
+            {
+                await tcpClient.ConnectAsync(host, port, timeout.Token);
+                return tcpClient.Connected;
+            }
+            catch (OperationCanceledException) { return false; }
+            catch (SocketException) { return false; }
+            catch (ArgumentException) { return false; }
+        }
+
         public static int FindOpenUDPPort(int port)
         {
             var portFound = false;
