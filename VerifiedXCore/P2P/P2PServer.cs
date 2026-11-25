@@ -30,6 +30,8 @@ namespace VerifiedXCore.P2P
     public class P2PServer : Hub
     {
         #region Broadcast methods
+        private static readonly object NewPeerLock = new();
+
         public override async Task OnConnectedAsync()
         {            
             var peerIP = GetIP(Context);
@@ -48,15 +50,22 @@ namespace VerifiedXCore.P2P
             {
                 // Whether we can dial it back; only a new peer's record uses the answer.
                 var portOpen = await PortUtility.IsPortOpenAsync(peerIP, Globals.Port);
-                Peers nPeer = new Peers
+                // Two first connections from one address both wait above; only one saves it.
+                lock (NewPeerLock)
                 {
-                    FailCount = 0,
-                    IsIncoming = true,
-                    IsOutgoing = portOpen,
-                    PeerIP = peerIP
-                };
+                    if (peers.FindOne(x => x.PeerIP == peerIP) == null)
+                    {
+                        Peers nPeer = new Peers
+                        {
+                            FailCount = 0,
+                            IsIncoming = true,
+                            IsOutgoing = portOpen,
+                            PeerIP = peerIP
+                        };
 
-                peers.InsertSafe(nPeer);
+                        peers.InsertSafe(nPeer);
+                    }
+                }
             }
 
             if (Globals.P2PPeerDict.TryGetValue(peerIP, out var context) && context.ConnectionId != Context.ConnectionId)

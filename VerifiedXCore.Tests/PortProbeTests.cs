@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Net;
 using System.Net.Sockets;
+using System.Threading;
 using System.Threading.Tasks;
 using VerifiedXCore.Utilities;
 using Xunit;
@@ -39,12 +40,18 @@ namespace VerifiedXCore.Tests
         }
 
         [Fact]
-        public async Task A_host_that_never_answers_is_closed_at_the_timeout()
+        public async Task A_connect_that_never_finishes_is_cancelled_and_closed_at_the_timeout()
         {
+            var cancelled = false;
+            async ValueTask NeverAnswers(CancellationToken ct)
+            {
+                try { await Task.Delay(Timeout.Infinite, ct); }
+                catch (OperationCanceledException) { cancelled = true; throw; }
+            }
             var watch = Stopwatch.StartNew();
-            var probe = PortUtility.IsPortOpenAsync("192.0.2.1", 3338, 300); // TEST-NET-1: never answers, or is unreachable
-            Assert.False(await probe);
-            Assert.True(watch.ElapsedMilliseconds < 2300, $"took {watch.ElapsedMilliseconds} ms");
+            Assert.False(await PortUtility.ConnectsWithin(NeverAnswers, 300));
+            Assert.True(cancelled);
+            Assert.InRange(watch.ElapsedMilliseconds, 250, 2300);
         }
 
         [Fact]

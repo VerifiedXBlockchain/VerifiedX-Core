@@ -63,11 +63,17 @@ namespace VerifiedXCore.Utilities
         public static async Task<bool> IsPortOpenAsync(string host, int port, int timeoutMs = 1000)
         {
             using var tcpClient = new TcpClient();
+            return await ConnectsWithin(ct => tcpClient.ConnectAsync(host, port, ct), timeoutMs) && tcpClient.Connected;
+        }
+
+        /// <summary>Whether <paramref name="connect"/> succeeds before <paramref name="timeoutMs"/>; it is cancelled then.</summary>
+        internal static async Task<bool> ConnectsWithin(Func<CancellationToken, ValueTask> connect, int timeoutMs)
+        {
             using var timeout = new CancellationTokenSource(timeoutMs);
             try
             {
-                await tcpClient.ConnectAsync(host, port, timeout.Token);
-                return tcpClient.Connected;
+                await connect(timeout.Token);
+                return true;
             }
             catch (OperationCanceledException) { return false; }
             catch (SocketException) { return false; }
