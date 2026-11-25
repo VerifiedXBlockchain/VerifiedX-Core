@@ -326,7 +326,9 @@ namespace VerifiedXCore.Data
             return false;
         }
 
-        public static async Task AddToPool(Transaction transaction)
+        /// <summary>Puts this node's own transaction in the mempool. False when it was not put there: it conflicts with a
+        /// pooled one, it would take its sender past a per-sender limit, or the insert failed.</summary>
+        public static async Task<bool> AddToPool(Transaction transaction)
         {
             var TransactionPool = GetPool();
 
@@ -341,7 +343,7 @@ namespace VerifiedXCore.Data
             }
 
             if (IsPoolConflict(transaction))
-                return;
+                return false;
 
             // Under the admission lock, as TryAdmitAndInsert: this node's own submissions arriving together cannot all pass
             // a per-sender limit before any of them is in the pool.
@@ -350,9 +352,9 @@ namespace VerifiedXCore.Data
                 if (MempoolEvictionUtility.SenderLimitRefusal(transaction) is { } overLimit)
                 {
                     LogUtility.Log($"[Mempool] Not adding {transaction.Hash}: {overLimit}", "TransactionData.AddToPool()");
-                    return;
+                    return false;
                 }
-                TransactionPool.InsertSafe(transaction);
+                return TransactionPool.InsertSafe(transaction) != null;
             }
         }
 

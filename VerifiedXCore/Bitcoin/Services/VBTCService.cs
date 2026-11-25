@@ -3331,9 +3331,15 @@ namespace VerifiedXCore.Bitcoin.Services
                 var result = await TransactionValidatorService.VerifyTX(lockTx);
                 if (result.Item1)
                 {
+                    // Into the mempool first: a lock it does not take (its sender has the most locks waiting it allows) is
+                    // not recorded in the wallet, charged or sent, and the caller is told.
+                    if (!await TransactionData.AddToPool(lockTx))
+                    {
+                        SCLogUtility.Log($"vBTC V2 Bridge Lock TX not admitted to the mempool: {scUID}", "VBTCService.CreateBridgeLockTx()");
+                        return (false, MempoolEvictionUtility.SenderLimitRefusal(lockTx) ?? "The mempool did not take the bridge lock.", string.Empty);
+                    }
                     await TransactionData.AddTxToWallet(lockTx, true);
                     await AccountData.UpdateLocalBalance(ownerAddress, lockTx.Fee + lockTx.Amount);
-                    await TransactionData.AddToPool(lockTx);
                     await P2PClient.SendTXMempool(lockTx);
                     SCLogUtility.Log($"vBTC V2 Bridge Lock TX Success. SCUID: {scUID}, TxHash: {lockTx.Hash}, LockId: {lockId}", "VBTCService.CreateBridgeLockTx()");
                     return (true, lockTx.Hash, lockId);

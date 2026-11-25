@@ -144,6 +144,28 @@ namespace VerifiedXCore.Tests
         }
 
         [Fact]
+        public async Task A_local_lock_the_mempool_does_not_take_is_reported_as_failed_and_kept_out_of_the_wallet()
+        {
+            var cap = TransactionValidatorService.MaxPendingBridgeLocksPerSender;
+            var holder = NewHolder();
+            AccountData.GetAccounts().InsertSafe(new Account { Address = holder.Address, PublicKey = holder.Pub, PrivateKey = "0" + holder.Key.secret.ToString("x") });
+            for (var i = 0; i < cap - 1; i++)
+                Assert.True(MempoolEvictionUtility.TryAdmitAndInsert(Lock(holder, i), TransactionData.GetPool(), out var reason), reason);
+
+            // One place left; several of this node's own lock requests at once.
+            var results = await Task.WhenAll(Enumerable.Range(0, 4).Select(_ => Task.Run(() =>
+                VBTCService.CreateBridgeLockTx(Contract, holder.Address, VBTCService.MinBridgeLockSats / 100_000_000M, "0x" + new string('3', 40)))));
+
+            var succeeded = results.Where(r => r.Success).Select(r => r.TxHashOrError).ToList();
+            Assert.Equal(cap, Pooled(holder));
+            var pooled = TransactionData.GetPool().Find(x => x.FromAddress == holder.Address).Select(x => x.Hash).ToHashSet();
+            var inWallet = TransactionData.GetAll().Find(x => x.FromAddress == holder.Address).Select(x => x.Hash).ToHashSet();
+            Assert.All(succeeded, hash => { Assert.Contains(hash, pooled); Assert.Contains(hash, inWallet); });
+            Assert.Equal(succeeded.Count, inWallet.Count);
+            Assert.All(results.Where(r => !r.Success), r => Assert.Contains("bridge locks waiting", r.TxHashOrError));
+        }
+
+        [Fact]
         public async Task The_producer_keeps_a_senders_earliest_locks_and_drops_a_backlog_past_the_cap()
         {
             var cap = TransactionValidatorService.MaxPendingBridgeLocksPerSender;
