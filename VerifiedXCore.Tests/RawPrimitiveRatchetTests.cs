@@ -53,6 +53,28 @@ namespace VerifiedXCore.Tests
             _ => "",
         };
 
+        private static readonly HashSet<string> VoidCallbackCalls = new(StringComparer.Ordinal) { "ForEach", "For", "Invoke" };
+        private static readonly HashSet<string> VoidCallbackTypes = new(StringComparer.Ordinal) { "Timer", "Thread", "TimerCallback", "ThreadStart", "Action" };
+
+        /// <summary>Whether a lambda stands where the code takes only a delegate returning void.</summary>
+        private static bool TakesOnlyVoid(AnonymousFunctionExpressionSyntax lambda)
+        {
+            if (lambda.Parent is AssignmentExpressionSyntax assign && assign.IsKind(SyntaxKind.AddAssignmentExpression) && assign.Right == lambda)
+                return true; // an event handler
+            if (lambda.Parent is ArgumentSyntax { Parent: ArgumentListSyntax { Parent: var owner } })
+            {
+                if (owner is InvocationExpressionSyntax call)
+                {
+                    var name = call.Expression is MemberAccessExpressionSyntax m ? m.Name.Identifier.Text : call.Expression is SimpleNameSyntax n ? n.Identifier.Text : "";
+                    var receiver = call.Expression is MemberAccessExpressionSyntax mm ? LastName(mm.Expression) : "";
+                    return name == "ForEach" || (receiver == "Parallel" && VoidCallbackCalls.Contains(name));
+                }
+                if (owner is ObjectCreationExpressionSyntax created)
+                    return VoidCallbackTypes.Contains(created.Type is QualifiedNameSyntax q ? q.Right.Identifier.Text : created.Type.ToString());
+            }
+            return false;
+        }
+
         /// <summary>What a node is, as the primitives name it: "Receiver.Method" or "*.Method" for a call, "Request.Body", "async void".</summary>
         private static IEnumerable<string> Names(SyntaxNode node)
         {
@@ -74,6 +96,11 @@ namespace VerifiedXCore.Tests
                     yield return "async void";
                     break;
                 case LocalFunctionStatementSyntax local when local.Modifiers.Any(SyntaxKind.AsyncKeyword) && local.ReturnType is PredefinedTypeSyntax { Keyword.Text: "void" }:
+                    yield return "async void";
+                    break;
+                // An async lambda or anonymous method where only a void delegate is taken is async void by another name:
+                // a List.ForEach or Parallel callback, a Timer or Thread callback, an event handler.
+                case AnonymousFunctionExpressionSyntax lambda when lambda.AsyncKeyword.IsKind(SyntaxKind.AsyncKeyword) && TakesOnlyVoid(lambda):
                     yield return "async void";
                     break;
             }
@@ -163,6 +190,14 @@ namespace VerifiedXCore.Tests
             Assert.Contains("async void", names);
             Assert.DoesNotContain("JObject.Parse", names);
             Assert.DoesNotContain("JToken.Parse", names);
+        }
+
+        [Fact]
+        public void An_async_callback_where_only_void_is_taken_counts_as_async_void()
+        {
+            var code = "class C { void A() { list.ForEach(async x => await W()); Parallel.ForEach(list, async x => await W()); var t = new System.Threading.Timer(async _ => await W()); e.Elapsed += async (s, a) => await W(); Task.Run(async () => await W()); list.ForEach(x => SafeTask.Forget(new Func<string, Task>(async y => await W())(x), \"w\")); } }";
+            var names = CSharpSyntaxTree.ParseText(code).GetRoot().DescendantNodes().SelectMany(Names).ToList();
+            Assert.Equal(4, names.Count(n => n == "async void")); // ForEach, Parallel.ForEach, Timer, event; Task.Run and the Func<Task> are not
         }
 
         [Fact]

@@ -104,7 +104,9 @@ namespace VerifiedXCore.Utilities
                 await Task.Delay(20);
             }
         }
-        public static async void Log(string message, string location, bool firstEntry = false)
+        public static void Log(string message, string location, bool firstEntry = false) => VerifiedXCore.Utilities.SafeTask.Forget(LogAsync(message, location, firstEntry), "LogUtility.Log");
+
+        private static async Task LogAsync(string message, string location, bool firstEntry = false)
         {
             try
             {

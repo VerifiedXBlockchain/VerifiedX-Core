@@ -7,7 +7,9 @@ namespace VerifiedXCore.Services
 {
     public class APICallURLService
     {
-        public static async void CallURL(Transaction transaction)
+        public static void CallURL(Transaction transaction) => VerifiedXCore.Utilities.SafeTask.Forget(CallURLAsync(transaction), "APICallURLService.CallURL");
+
+        private static async Task CallURLAsync(Transaction transaction)
         {
             try
             {

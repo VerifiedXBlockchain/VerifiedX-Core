@@ -6,7 +6,9 @@ namespace VerifiedXCore.Utilities
 {
     public class AdjLogUtility
     {
-        public static async void Log(string message, string location, bool firstEntry = false)
+        public static void Log(string message, string location, bool firstEntry = false) => VerifiedXCore.Utilities.SafeTask.Forget(LogAsync(message, location, firstEntry), "AdjLogUtility.Log");
+
+        private static async Task LogAsync(string message, string location, bool firstEntry = false)
         {
             try
             {

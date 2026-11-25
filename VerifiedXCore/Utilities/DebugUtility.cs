@@ -5,7 +5,9 @@ namespace VerifiedXCore.Utilities
 {
     public class DebugUtility
     {
-        public static async void WriteToDebugFile(string filename, string text)
+        public static void WriteToDebugFile(string filename, string text) => VerifiedXCore.Utilities.SafeTask.Forget(WriteToDebugFileAsync(filename, text), "DebugUtility.WriteToDebugFile");
+
+        private static async Task WriteToDebugFileAsync(string filename, string text)
         {
             try
             {

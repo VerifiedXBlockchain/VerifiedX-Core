@@ -71,7 +71,9 @@ namespace VerifiedXCore.Utilities
             }
             return JsonConvert.SerializeObject(new { Success = success, Message = message });
         }
-        public static async void Log(string message, string location, bool firstEntry = false)
+        public static void Log(string message, string location, bool firstEntry = false) => VerifiedXCore.Utilities.SafeTask.Forget(LogAsync(message, location, firstEntry), "SCLogUtility.Log");
+
+        private static async Task LogAsync(string message, string location, bool firstEntry = false)
         {
             try
             {

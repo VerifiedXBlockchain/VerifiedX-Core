@@ -287,7 +287,9 @@ namespace VerifiedXCore.Bitcoin.Models
             }
         }
 
-        public static async void SaveSCLocaly(SmartContractMain scMain, string scText)
+        public static void SaveSCLocaly(SmartContractMain scMain, string scText) => VerifiedXCore.Utilities.SafeTask.Forget(SaveSCLocalyAsync(scMain, scText), "TokenizedBitcoin.SaveSCLocaly");
+
+        private static async Task SaveSCLocalyAsync(SmartContractMain scMain, string scText)
         {
             try
             {

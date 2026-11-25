@@ -2322,7 +2322,9 @@ namespace VerifiedXCore.Services
             return result;//block accepted
         }
 
-        private static async void RemoveTxFromMempool(Transaction tx)
+        private static void RemoveTxFromMempool(Transaction tx) => VerifiedXCore.Utilities.SafeTask.Forget(RemoveTxFromMempoolAsync(tx), "BlockValidatorService.RemoveTxFromMempool");
+
+        private static async Task RemoveTxFromMempoolAsync(Transaction tx)
         {
             var mempool = TransactionData.GetPool();
             if(mempool != null)
