@@ -343,7 +343,17 @@ namespace VerifiedXCore.Data
             if (IsPoolConflict(transaction))
                 return;
 
-            await TransactionPool.InsertSafeAsync(transaction);
+            // Under the admission lock, as TryAdmitAndInsert: this node's own submissions arriving together cannot all pass
+            // a per-sender limit before any of them is in the pool.
+            lock (MempoolEvictionUtility.AdmitLock)
+            {
+                if (MempoolEvictionUtility.SenderLimitRefusal(transaction) is { } overLimit)
+                {
+                    LogUtility.Log($"[Mempool] Not adding {transaction.Hash}: {overLimit}", "TransactionData.AddToPool()");
+                    return;
+                }
+                TransactionPool.InsertSafe(transaction);
+            }
         }
 
         /// <summary>

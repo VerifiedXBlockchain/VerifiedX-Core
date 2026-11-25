@@ -151,7 +151,17 @@ namespace VerifiedXCore.Utilities
         }
 
         /// <summary>Serialises admissions, so a capacity decision and the insert it allows cannot interleave with another.</summary>
-        private static readonly object AdmitLock = new();
+        internal static readonly object AdmitLock = new();
+
+        /// <summary>
+        /// Why <paramref name="tx"/> would take its sender past a per-sender limit on waiting transactions, or null. Asked
+        /// under <see cref="AdmitLock"/> right before the insert, so submissions arriving together cannot all pass it.
+        /// </summary>
+        internal static string? SenderLimitRefusal(Transaction tx) =>
+            tx.TransactionType == TransactionType.VBTC_V2_BRIDGE_LOCK
+            && TransactionData.BridgeLocksAhead(tx) >= VerifiedXCore.Services.TransactionValidatorService.MaxPendingBridgeLocksPerSender
+                ? $"This address already has {VerifiedXCore.Services.TransactionValidatorService.MaxPendingBridgeLocksPerSender} bridge locks waiting to be mined. Send more once they are in a block."
+                : null;
 
         /// <summary>
         /// Applies the admission bounds and, if they admit, inserts <paramref name="tx"/> into <paramref name="mempool"/> in
@@ -176,6 +186,12 @@ namespace VerifiedXCore.Utilities
                         && string.Equals(pooled.Signature, tx.Signature, StringComparison.Ordinal);
                     reason = same ? "" : "A different transaction with this hash is in the mempool.";
                     return same;
+                }
+
+                if (SenderLimitRefusal(tx) is { } overLimit)
+                {
+                    reason = overLimit;
+                    return false;
                 }
 
                 var plan = PlanAdmission(tx);

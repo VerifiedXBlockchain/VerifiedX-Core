@@ -129,6 +129,21 @@ namespace VerifiedXCore.Tests
         }
 
         [Fact]
+        public async Task Locks_arriving_together_cannot_take_a_sender_past_the_cap_on_either_insert_path()
+        {
+            var cap = TransactionValidatorService.MaxPendingBridgeLocksPerSender;
+
+            var received = NewHolder(); // peers and the raw route
+            await Task.WhenAll(Enumerable.Range(0, cap + 12).Select(i => Task.Run(() =>
+                MempoolEvictionUtility.TryAdmitAndInsert(Lock(received, i), TransactionData.GetPool(), out _))));
+            Assert.Equal(cap, Pooled(received));
+
+            var local = NewHolder(); // this node's own routes
+            await Task.WhenAll(Enumerable.Range(0, cap + 12).Select(i => Task.Run(() => TransactionData.AddToPool(Lock(local, i)))));
+            Assert.Equal(cap, Pooled(local));
+        }
+
+        [Fact]
         public async Task The_producer_keeps_a_senders_earliest_locks_and_drops_a_backlog_past_the_cap()
         {
             var cap = TransactionValidatorService.MaxPendingBridgeLocksPerSender;
