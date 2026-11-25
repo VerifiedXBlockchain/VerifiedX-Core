@@ -50,6 +50,13 @@ namespace VerifiedXCore.Bitcoin.Services
         public const long TaprootDustSats = 330;
 
         /// <summary>
+        /// The smallest bridge lock, in sats: the smallest withdrawal from a vault the chain watches (the smallest withdrawal
+        /// transaction's fee at 1 sat/vB, and a payout of at least <see cref="Attestation.BtcCanonicalWithdrawal.DustSats"/>).
+        /// Each lock costs every node a mint attestation and a record of its own, whatever its amount.
+        /// </summary>
+        public const long MinBridgeLockSats = MinWithdrawalTxVBytes + Attestation.BtcCanonicalWithdrawal.DustSats;
+
+        /// <summary>
         /// Consensus rule (VbtcWithdrawalConcurrencyHeight), shared with the wallet paths so both give the same message:
         /// a withdrawal pays its Bitcoin fee out of the amount, so the amount must cover the fee of the smallest withdrawal
         /// transaction at the request's own fee rate and still leave a relayable payout. Uses only the request's fields, so
@@ -3134,14 +3141,18 @@ namespace VerifiedXCore.Bitcoin.Services
         /// S3C §6.3: resolve a contract's IsS3C flag — local record first, else state-trei
         /// decompile (works on any node; used by the consensus bridge-lock rejection too).
         /// </summary>
-        public static bool ResolveContractIsS3C(string scUID)
+        public static bool ResolveContractIsS3C(string scUID) =>
+            ResolveContractIsS3C(scUID, SmartContractStateTrei.GetSmartContractState(scUID));
+
+        /// <summary>As <see cref="ResolveContractIsS3C(string)"/>, from the contract's state already read by the caller
+        /// (null: not on chain).</summary>
+        public static bool ResolveContractIsS3C(string scUID, SmartContractStateTrei? scState)
         {
             // Chain state first: block validation asks this (the bridge-lock refusal), and a record in this node's
             // own wallet tables (which anyone could have a public node write, before the contract existed) must not
             // decide what a block is. The local record answers only for a contract that is not on chain yet.
             try
             {
-                var scState = SmartContractStateTrei.GetSmartContractState(scUID);
                 if (scState != null && !string.IsNullOrEmpty(scState.ContractData))
                 {
                     var scMain = SmartContractMain.GenerateSmartContractInMemory(scState.ContractData);
@@ -3156,7 +3167,7 @@ namespace VerifiedXCore.Bitcoin.Services
             catch
             {
                 // A contract that is on chain and cannot be read is not answered for from this node's own records.
-                if (SmartContractStateTrei.GetSmartContractState(scUID) != null) return false;
+                if (scState != null) return false;
             }
             var local = VBTCContractV2.GetContract(scUID);
             return local != null && local.IsS3C;
@@ -3324,9 +3335,15 @@ namespace VerifiedXCore.Bitcoin.Services
                 var result = await TransactionValidatorService.VerifyTX(lockTx);
                 if (result.Item1)
                 {
+                    // Into the mempool first: a lock it does not take (its sender has the most locks waiting it allows) is
+                    // not recorded in the wallet, charged or sent, and the caller is told.
+                    if (!await TransactionData.AddToPool(lockTx))
+                    {
+                        SCLogUtility.Log($"vBTC V2 Bridge Lock TX not admitted to the mempool: {scUID}", "VBTCService.CreateBridgeLockTx()");
+                        return (false, MempoolEvictionUtility.SenderLimitRefusal(lockTx) ?? "The mempool did not take the bridge lock.", string.Empty);
+                    }
                     await TransactionData.AddTxToWallet(lockTx, true);
                     await AccountData.UpdateLocalBalance(ownerAddress, lockTx.Fee + lockTx.Amount);
-                    await TransactionData.AddToPool(lockTx);
                     await P2PClient.SendTXMempool(lockTx);
                     SCLogUtility.Log($"vBTC V2 Bridge Lock TX Success. SCUID: {scUID}, TxHash: {lockTx.Hash}, LockId: {lockId}", "VBTCService.CreateBridgeLockTx()");
                     return (true, lockTx.Hash, lockId);

@@ -326,7 +326,9 @@ namespace VerifiedXCore.Data
             return false;
         }
 
-        public static async Task AddToPool(Transaction transaction)
+        /// <summary>Puts this node's own transaction in the mempool. False when it was not put there: it conflicts with a
+        /// pooled one, it would take its sender past a per-sender limit, or the insert failed.</summary>
+        public static async Task<bool> AddToPool(Transaction transaction)
         {
             var TransactionPool = GetPool();
 
@@ -341,9 +343,38 @@ namespace VerifiedXCore.Data
             }
 
             if (IsPoolConflict(transaction))
-                return;
+                return false;
 
-            await TransactionPool.InsertSafeAsync(transaction);
+            // Under the admission lock, as TryAdmitAndInsert: this node's own submissions arriving together cannot all pass
+            // a per-sender limit before any of them is in the pool.
+            lock (MempoolEvictionUtility.AdmitLock)
+            {
+                if (MempoolEvictionUtility.SenderLimitRefusal(transaction) is { } overLimit)
+                {
+                    LogUtility.Log($"[Mempool] Not adding {transaction.Hash}: {overLimit}", "TransactionData.AddToPool()");
+                    return false;
+                }
+                return TransactionPool.InsertSafe(transaction) != null;
+            }
+        }
+
+        /// <summary>
+        /// Bridge locks from <paramref name="tx"/>'s sender waiting in the mempool ahead of it: every other one for a
+        /// transaction not in the pool, and for one that is, those that arrived before it (by row id, which this node
+        /// assigns on insert; an id the transaction carries in is not used).
+        /// </summary>
+        internal static int BridgeLocksAhead(Transaction tx)
+        {
+            if (string.IsNullOrEmpty(tx.FromAddress)) return 0;
+            var pool = GetPool();
+            if (pool == null) return 0;
+            var locks = pool.Find(x => x.FromAddress == tx.FromAddress)
+                .Where(x => x.TransactionType == TransactionType.VBTC_V2_BRIDGE_LOCK && x.FromAddress == tx.FromAddress)
+                .ToList();
+            var own = locks.FirstOrDefault(x => x.Hash == tx.Hash && x.Signature == tx.Signature);
+            return own == null
+                ? locks.Count(x => x.Hash != tx.Hash)
+                : locks.Count(x => x.Hash != tx.Hash && x.Id.CompareTo(own.Id) < 0);
         }
 
         /// <summary>

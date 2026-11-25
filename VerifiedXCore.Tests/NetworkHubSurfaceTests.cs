@@ -116,6 +116,33 @@ namespace VerifiedXCore.Tests
             Assert.True(gone.Count == 0, "These no longer fail. Remove them from NetworkSurfaceBaseline.KnownHubFailures so they cannot come back:\n  " + string.Join("\n  ", gone));
         }
 
+        [Fact]
+        public async Task First_connections_from_one_address_at_once_save_it_once()
+        {
+            var (host, port) = await StartAsync(Hosts().First().Build);
+            using var _ = host;
+            try
+            {
+                var path = HubsOf(host).First(h => h.Hub == typeof(VerifiedXCore.P2P.P2PServer)).Path;
+                const string ip = "198.19.254.250"; // never answers the connect-back check at once, so every connection waits on it
+                var connections = Enumerable.Range(0, 4).Select(_ => new HubConnectionBuilder()
+                    .WithUrl($"http://127.0.0.1:{port}{path}", o =>
+                    {
+                        o.Transports = HttpTransportType.WebSockets;
+                        o.SkipNegotiation = true;
+                        o.Headers[Header] = ip;
+                    })
+                    .Build()).ToList();
+                await Task.WhenAll(connections.Select(async c => { try { await c.StartAsync(); } catch { } }));
+                int Saved() => VerifiedXCore.Models.Peers.GetAll().Find(x => x.PeerIP == ip).Count();
+                for (var i = 0; i < 100 && Saved() == 0; i++) await Task.Delay(50);
+                await Task.Delay(TimeSpan.FromSeconds(2)); // past every connection's check
+                Assert.Equal(1, Saved());
+                foreach (var c in connections) { try { await c.DisposeAsync(); } catch { } }
+            }
+            finally { await host.StopAsync(); }
+        }
+
         // ── Hosts, as production builds them, without their background work ───────────────────────────────────
 
         private static IEnumerable<(string Name, Func<int, IHost> Build)> Hosts()

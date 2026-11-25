@@ -241,7 +241,7 @@ namespace VerifiedXCore.Controllers
                     return Unauthorized();
                 }
 
-                var portCheck = PortUtility.IsPortOpen(peerIP.Replace("::ffff:", ""), Globals.ValAPIPort);
+                var portCheck = await PortUtility.IsPortOpenAsync(peerIP.Replace("::ffff:", ""), Globals.ValAPIPort);
                 if (!portCheck)
                 {
                     return Unauthorized();
