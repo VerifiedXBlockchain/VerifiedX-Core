@@ -277,7 +277,7 @@ namespace VerifiedXCore.Services
             if (committee == null)
                 return null;
             var anchor = VrfSeed.AnchorHeight(stallHeight);
-            return BuildEpoch(EmergencyElectionChangeType, stallHash, VrfSeed.BlockHashAt(anchor), anchor, stallHeight, committee);
+            return BuildEpoch(EmergencyElectionChangeType, stallHash, VrfSeed.SeedMaterialAt(anchor), anchor, stallHeight, committee);
         }
 
         /// <summary>E': the rotation ending the term <paramref name="term"/> started, replacing the committee of <paramref name="current"/>.</summary>
@@ -293,7 +293,7 @@ namespace VerifiedXCore.Services
                 return null;
             var seedHeight = Math.Max(0, VrfSeed.AnchorHeight(stall) - Globals.VrfEpochBlocks);
             var interimSet = current.Casters.Select(c => c.Address).ToHashSet(StringComparer.Ordinal);
-            return BuildEpoch(ScheduledRotationChangeType, lapseHash!, VrfSeed.BlockHashAt(seedHeight), VrfSeed.AnchorHeight(term.LapseHeight), term.LapseHeight, interimSet);
+            return BuildEpoch(ScheduledRotationChangeType, lapseHash!, VrfSeed.SeedMaterialAt(seedHeight), VrfSeed.AnchorHeight(term.LapseHeight), term.LapseHeight, interimSet);
         }
 
         /// <summary>
@@ -317,7 +317,7 @@ namespace VerifiedXCore.Services
             if (!VrfSeed.Active(tipHeight))
                 return null;
             var anchor = VrfSeed.AnchorHeight(tipHeight);
-            return BuildEpoch("Reach", "", VrfSeed.BlockHashAt(anchor), anchor, tipHeight - tipHeight % 100, committee);
+            return BuildEpoch("Reach", "", VrfSeed.SeedMaterialAt(anchor), anchor, tipHeight - tipHeight % 100, committee);
         }
 
         // ── What is open at this node's tip ─────────────────────────────────────────────────────

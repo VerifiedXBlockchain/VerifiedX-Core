@@ -58,6 +58,7 @@ namespace VerifiedXCore.Services
         {
             if (Globals.IsTestNet)
             {
+                //Marigold
                 if (Globals.IsCustomTestNet)
                 {
                     return new List<Peers>()
@@ -66,31 +67,31 @@ namespace VerifiedXCore.Services
                         {
                             IsIncoming = false,
                             IsOutgoing = true,
-                            PeerIP = "207.244.229.243",
+                            PeerIP = "13.185.40.66",
                             FailCount = 0,
                             IsValidator = true,
-                            ValidatorAddress = "xBRzJUZiXjE3hkrpzGYMSpYCHU1yPpu8cj",
-                            ValidatorPublicKey = "0498ea84777552a3609143275b0e083086071a6b1453bd46b87a05461d24e0ee99e7de2870a018240026ad6ba892a087df39447f91c5a8f8e50a53b6643c9e713c"
+                            ValidatorAddress = "xBUKu45vK84qGGQymgpoeZ1n9dm461GDut",
+                            ValidatorPublicKey = "04678521e2043425ab7e49c2e5ae0db52e3a132eecec1c0246708056f0a073c39dd0a32b1fa9d85a4f0f74501158e6914e0c0c805a3d82f572156bab5223664db7"
                         },
                         new Peers
                         {
                             IsIncoming = false,
                             IsOutgoing = true,
-                            PeerIP = "207.244.232.182",
+                            PeerIP = "3.142.215.167",
                             FailCount = 0,
                             IsValidator = true,
-                            ValidatorAddress = "xMpa8DxDLdC9SQPcAFBc2vqwyPsoFtrWyC",
-                            ValidatorPublicKey = "04eec44726e6442cc2ec0241f7c8c2a983d9cfbf9f68a2bc3e2040fd1053636f3779ffaeabcda9065627dee6d3ff5f080833e8ff8a3e93b8f17a600d0f7d090687"
+                            ValidatorAddress = "xMpWeinpFRVLm6ChNEzYBReEcK1fHoonhc",
+                            ValidatorPublicKey = "0413a15dc4caf2e7744865380ab1baf3157d53f4cd2746a97c0c47ec72439e3375a97e69379a72eab0bf18b03b79f6c5fe89d1006ef43d44ffd3fb401a6744abe8"
                         },
                         new Peers
                         {
                             IsIncoming = false,
                             IsOutgoing = true,
-                            PeerIP = "209.145.62.196",
+                            PeerIP = "3.136.200.172",
                             FailCount = 0,
                             IsValidator = true,
-                            ValidatorAddress = "xCkUC4rrh2AnfNf78D5Ps83pMywk5vrwpi",
-                            ValidatorPublicKey = "0474f0a933dc0241d5fc6059eeb3a14350c4ba890e8e504ae144f33a41c0f5eb9aed9b98e33265507c55e2af1b0c61c5c2a87fa55d86acad0592c0f4774c97e62b"
+                            ValidatorAddress = "xTKHwN9T5fj8iKiVkuqTxhTiNZPYNBuJzV",
+                            ValidatorPublicKey = "0467f799aaae437e2152c13793df866635e206c41184803eaaab1c41691795c82660f46e23681a564222928a3a2daed9932f39553011b33ad48c0c32dbe7bddb40"
                         }
                     };
                 }

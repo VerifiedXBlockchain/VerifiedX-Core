@@ -408,6 +408,12 @@ namespace VerifiedXCore.Data
                         TotalValidators = totalVals,
                         ValidatorAnswer = valAnswer
                     };
+                    // From the VRF height: the producer's proof over its height's seed and the chain's mix, both hashed.
+                    if (!BlockVrf.Attach(block, Globals.LastBlock, AccountData.GetSingleAccount(Globals.ValidatorAddress)?.GetKey ?? ""))
+                    {
+                        ErrorLogUtility.LogError("No VRF proof could be made for this block: its seed or the previous block's mix is not known.", "BlockchainData.CraftBlock_V5()");
+                        return null;
+                    }
                     block.Build();
 
                     if (block.PrevHash == "0")
@@ -522,6 +528,12 @@ namespace VerifiedXCore.Data
                         TotalValidators = totalVals,
                         ValidatorAnswer = valAnswer
                     };
+                    // From the VRF height: the producer's proof over its height's seed and the chain's mix, both hashed.
+                    if (!BlockVrf.Attach(block, Globals.LastBlock, AccountData.GetSingleAccount(Globals.ValidatorAddress)?.GetKey ?? ""))
+                    {
+                        ErrorLogUtility.LogError("No VRF proof could be made for this block: its seed or the previous block's mix is not known.", "BlockchainData.CraftBlock_V5()");
+                        return null;
+                    }
                     block.Build();
 
                     if (block.PrevHash == "0")

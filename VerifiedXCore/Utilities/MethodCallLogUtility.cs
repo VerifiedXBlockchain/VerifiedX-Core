@@ -5,7 +5,9 @@ namespace VerifiedXCore.Utilities
 {
     public class MethodCallLogUtility
     {
-        public static async void WriteToMemLog(string filename, string text)
+        public static void WriteToMemLog(string filename, string text) => VerifiedXCore.Utilities.SafeTask.Forget(WriteToMemLogAsync(filename, text), "MethodCallLogUtility.WriteToMemLog");
+
+        private static async Task WriteToMemLogAsync(string filename, string text)
         {
             try
             {

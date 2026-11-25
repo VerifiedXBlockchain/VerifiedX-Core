@@ -302,10 +302,24 @@ namespace VerifiedXCore.Services
             if ((blockHeight == null || blockHeight >= Globals.JsonCommentDataRuleHeight) && LedgerIntegrityRules.DataHasJsonComment(txRequest.Data))
                 return (false, "A transaction's Data may not carry a JSON comment.");
 
+            // From StrictDataReaderHeight Data that is a JSON object or array is read by one strict reader in validation
+            // and in state application; Data that reader refuses is refused here, before any rule reads it, on admission
+            // and in a block.
+            var dataReaderHeight = blockHeight ?? ((Globals.LastBlock?.Height ?? 0) + 1);
+            var strictDataError = ConsensusData.Refusal(txRequest, dataReaderHeight);
+            if (strictDataError != null)
+                return (false, strictDataError);
+
             // NEW-18: one reading of the hash preimage (Data and UnlockTime are joined without a separator).
             var preimageError = LedgerIntegrityRules.CanonicalPreimage(txRequest);
             if (preimageError != null)
                 return (false, preimageError);
+
+            // One spelling of Amount and Fee from Globals.CanonicalInputHeight, judged as the transaction arrived: before
+            // admission re-spells it below, which would hide a whole Amount sent without a decimal point.
+            var spellingError = LedgerIntegrityRules.CanonicalAmountAndFee(txRequest, blockHeight ?? ((Globals.LastBlock?.Height ?? 0) + 1));
+            if (spellingError != null)
+                return (false, spellingError);
 
             // At admission a transaction is judged, and kept, with its Amount and Fee spelled as a block carries them
             // (the hash covers the spelling). Block validation reads a block's transactions as they are.
@@ -707,14 +721,25 @@ namespace VerifiedXCore.Services
                             string function = "";
                             bool skip = false;
                             JToken? scData = null;
+                            if (ConsensusData.IsStrict(dataReaderHeight))
+                            {
+                                // Read once by the strict reader, as state application reads it (LedgerIntegrityRules.DispatchedCall).
+                                var root = ConsensusData.TryRead(txData, out var read, out _) ? read : null;
+                                scData = root is JArray { Count: > 0 } calls ? calls[0] : null;
+                                (function, scUID) = LedgerIntegrityRules.CallOf(root);
+                                skip = true;
+                            }
                             try
                             {
-                                var scDataArray = JsonConvert.DeserializeObject<JArray>(txRequest.Data);
-                                scData = scDataArray[0];
+                                if (!skip)
+                                {
+                                    var scDataArray = JsonConvert.DeserializeObject<JArray>(txRequest.Data);
+                                    scData = scDataArray[0];
 
-                                function = (string?)scData["Function"];
-                                scUID = (string?)scData["ContractUID"];
-                                skip = true;
+                                    function = (string?)scData["Function"];
+                                    scUID = (string?)scData["ContractUID"];
+                                    skip = true;
+                                }
                             }
                             catch{ }
 
@@ -745,7 +770,7 @@ namespace VerifiedXCore.Services
 
                                             // VX-02: the body's embedded UID and MinterAddress must be the
                                             // transaction's; downstream readers of ContractData trust them.
-                                            var mintBody = SmartContractDeployBinding.ReadPayload(txData).Data;
+                                            var mintBody = SmartContractDeployBinding.ReadPayload(txData, dataReaderHeight).Data;
                                             var mintBindingError = SmartContractDeployBinding.Validate(mintBody, scUID, txRequest.FromAddress, isTokenDeploy: false, out _);
                                             if (mintBindingError != null)
                                                 return (txResult, mintBindingError);
@@ -766,7 +791,7 @@ namespace VerifiedXCore.Services
                                             // UID and MinterAddress must be the transaction's (a mismatched body
                                             // credited an attacker-chosen supply of an EXISTING token), and the
                                             // supply / decimals must be within documented bounds.
-                                            var deployBody = SmartContractDeployBinding.ReadPayload(txData).Data;
+                                            var deployBody = SmartContractDeployBinding.ReadPayload(txData, dataReaderHeight).Data;
                                             var deployBindingError = SmartContractDeployBinding.Validate(deployBody, scUID, txRequest.FromAddress, isTokenDeploy: true, out var deployed);
                                             if (deployBindingError != null)
                                                 return (txResult, deployBindingError);
@@ -790,7 +815,7 @@ namespace VerifiedXCore.Services
 
                                     case "TokenMint()":
                                         {
-                                            var jobj = JObject.Parse(txData);
+                                            var jobj = ConsensusData.ParseObject(txData, dataReaderHeight);
                                             var fromAddress = jobj["FromAddress"]?.ToObject<string?>();
                                             var amount = jobj["Amount"]?.ToObject<decimal?>();
                                             var scStateTreiRec = SmartContractStateTrei.GetSmartContractState(scUID);
@@ -831,7 +856,7 @@ namespace VerifiedXCore.Services
 
                                     case "TokenPause()":
                                         {
-                                            var jobj = JObject.Parse(txData);
+                                            var jobj = ConsensusData.ParseObject(txData, dataReaderHeight);
                                             var fromAddress = jobj["FromAddress"]?.ToObject<string?>();
                                             var pause = jobj["Pause"]?.ToObject<bool?>();
 
@@ -857,7 +882,7 @@ namespace VerifiedXCore.Services
 
                                     case "TokenContractOwnerChange()":
                                         {
-                                            var jobj = JObject.Parse(txData);
+                                            var jobj = ConsensusData.ParseObject(txData, dataReaderHeight);
                                             var fromAddress = jobj["FromAddress"]?.ToObject<string?>();
                                             var toAddress = jobj["ToAddress"]?.ToObject<string?>();
 
@@ -892,7 +917,7 @@ namespace VerifiedXCore.Services
 
                                     case "TokenBanAddress()" :
                                         {
-                                            var jobj = JObject.Parse(txData);
+                                            var jobj = ConsensusData.ParseObject(txData, dataReaderHeight);
                                             var fromAddress = jobj["FromAddress"]?.ToObject<string?>();
                                             var banAddress = jobj["BanAddress"]?.ToObject<string?>();
 
@@ -921,7 +946,7 @@ namespace VerifiedXCore.Services
 
                                     case "TokenTransfer()" :
                                         {
-                                            var jobj = JObject.Parse(txData);
+                                            var jobj = ConsensusData.ParseObject(txData, dataReaderHeight);
 
                                             var fromAddress = jobj["FromAddress"]?.ToObject<string?>();
                                             var toAddress = jobj["ToAddress"]?.ToObject<string?>();
@@ -987,7 +1012,7 @@ namespace VerifiedXCore.Services
 
                                     case "TokenBurn()":
                                         {
-                                            var jobj = JObject.Parse(txData);
+                                            var jobj = ConsensusData.ParseObject(txData, dataReaderHeight);
 
                                             var fromAddress = jobj["FromAddress"]?.ToObject<string?>();
                                             var amount = jobj["Amount"]?.ToObject<decimal?>();
@@ -1046,7 +1071,7 @@ namespace VerifiedXCore.Services
 
                                     case "TokenVoteTopicCreate()":
                                         {
-                                            var jobj = JObject.Parse(txData);
+                                            var jobj = ConsensusData.ParseObject(txData, dataReaderHeight);
                                             var fromAddress = jobj["FromAddress"]?.ToObject<string?>();
 
                                             var scStateTreiRec = SmartContractStateTrei.GetSmartContractState(scUID);
@@ -1074,7 +1099,7 @@ namespace VerifiedXCore.Services
 
                                     case "TokenVoteTopicCast()":
                                         {
-                                            var jobj = JObject.Parse(txData);
+                                            var jobj = ConsensusData.ParseObject(txData, dataReaderHeight);
 
                                             var fromAddress = jobj["FromAddress"]?.ToObject<string?>();
                                             var topicUID = jobj["TopicUID"]?.ToObject<string?>();
@@ -1640,7 +1665,7 @@ namespace VerifiedXCore.Services
                                     case "TransferVBTCV2()":
                                         {
                                             // FIND-006 FIX: Validate vBTC V2 transfers when called through function dispatcher
-                                            var jobj = JObject.Parse(txData);
+                                            var jobj = ConsensusData.ParseObject(txData, dataReaderHeight);
                                             var fromAddress = jobj["FromAddress"]?.ToObject<string?>();
                                             var toAddress = jobj["ToAddress"]?.ToObject<string?>();
                                             var amount = jobj["Amount"]?.ToObject<decimal?>();
@@ -3078,7 +3103,14 @@ namespace VerifiedXCore.Services
                         // Parse SC data — MintSmartContractTx creates JArray with Mint() function
                         string scUID = "";
                         string function = "";
-                        try
+                        if (ConsensusData.IsStrict(dataReaderHeight))
+                        {
+                            // Read by the strict reader, as the mint dispatcher reads it in state application.
+                            var call = LedgerIntegrityRules.DispatchedCall(txData, dataReaderHeight);
+                            function = call.Function ?? "";
+                            scUID = call.ContractUID ?? "";
+                        }
+                        else try
                         {
                             var scDataArray = JsonConvert.DeserializeObject<JArray>(txData);
                             if (scDataArray != null && scDataArray.Count > 0)
@@ -3109,7 +3141,7 @@ namespace VerifiedXCore.Services
 
                         // VX-02: same body binding as the generic Mint() path — this type is applied by
                         // the same StateData mint dispatcher.
-                        var v2Body = SmartContractDeployBinding.ReadPayload(txData).Data;
+                        var v2Body = SmartContractDeployBinding.ReadPayload(txData, dataReaderHeight).Data;
                         var v2BindingError = SmartContractDeployBinding.Validate(v2Body, scUID, txRequest.FromAddress, isTokenDeploy: false, out _);
                         if (v2BindingError != null)
                             return (txResult, v2BindingError);
@@ -3136,7 +3168,7 @@ namespace VerifiedXCore.Services
                 {
                     try
                     {
-                        var jobj = JObject.Parse(txData);
+                        var jobj = ConsensusData.ParseObject(txData, dataReaderHeight);
 
                         // vBTC V2 multi-contract transfer: one TX debiting N contracts (Inputs
                         // array) to a single recipient. Height-gated on BOTH validation (here) and
@@ -3153,7 +3185,7 @@ namespace VerifiedXCore.Services
                             var fromAddressMulti = jobj["FromAddress"]?.ToObject<string>();
                             var toAddressMulti = jobj["ToAddress"]?.ToObject<string>();
                             var totalAmountMulti = jobj["TotalAmount"]?.ToObject<decimal?>();
-                            var multiInputs = jobj["Inputs"]?.ToObject<List<VBTCV2MultiTransferInput>>();
+                            var multiInputs = jobj["Inputs"] is { } inputsToken ? ConsensusData.ToObject<List<VBTCV2MultiTransferInput>>(inputsToken, dataReaderHeight) : null;
 
                             // Hybrid hygiene: post-gate a multi TX must not also carry the single
                             // shape, so it can never be interpreted two ways.
@@ -4068,6 +4100,13 @@ namespace VerifiedXCore.Services
                 if (string.IsNullOrWhiteSpace(txRequest.Data))
                     return (txResult, "Transaction data cannot be null for vBTC V2 bridge lock.");
 
+                // Mempool policy, never a block rule (every block path passes its height): a sender has at most
+                // MaxPendingBridgeLocksPerSender locks waiting. Admission refuses one more, and a producer drops a pooled
+                // one that has that many of its sender's ahead of it, so a backlog kept from before a restart goes too.
+                if (!blockVerify && !blockDownloads && blockHeight == null
+                    && TransactionData.BridgeLocksAhead(txRequest) >= MaxPendingBridgeLocksPerSender)
+                    return (txResult, $"This address already has {MaxPendingBridgeLocksPerSender} bridge locks waiting to be mined. Send more once they are in a block.");
+
                 try
                 {
                     var jobj = JObject.Parse(txRequest.Data);
@@ -4103,15 +4142,18 @@ namespace VerifiedXCore.Services
                     if (txRequest.FromAddress.StartsWith("xRBX"))
                         return (txResult, "Reserve accounts cannot bridge vBTC. Move the vBTC to a normal VFX address first.");
 
+                    // The vault's state, read once for every check below: the document holds the vault's whole ledger.
+                    var lockScState = SmartContractStateTrei.GetSmartContractState(scUID);
+
                     // S3C §6.3: consensus-enforced bridge block — reject bridge-lock for an S3C
                     // contract (IsS3C read from state trei) so a malicious owner can't bypass the
                     // client gate and recreate the third-party stuck-funds danger (§6.2).
-                    if (Bitcoin.Services.VBTCService.ResolveContractIsS3C(scUID))
+                    if (Bitcoin.Services.VBTCService.ResolveContractIsS3C(scUID, lockScState))
                         return (txResult, "vBTC.b bridge is not available for S3C contracts.");
 
                     // A watched vault whose key cannot sign any more pays nobody: its vBTC does not go into the pool
                     // that bridge exits are paid from (plan 8.8).
-                    if (Bitcoin.Attestation.BtcVaultKeys.CannotSignRefusal(SmartContractStateTrei.GetSmartContractState(scUID)?.SmartContractUID ?? scUID) is { } cannotSign)
+                    if (Bitcoin.Attestation.BtcVaultKeys.CannotSignRefusal(lockScState?.SmartContractUID ?? scUID) is { } cannotSign)
                         return (txResult, cannotSign);
 
                     if (txRequest.FromAddress != txRequest.ToAddress)
@@ -4124,7 +4166,6 @@ namespace VerifiedXCore.Services
                         return (txResult, lockAmountError);
 
                     // VX-01: the tokenization ledger may only be operated on a vBTC V2 contract.
-                    var lockScState = SmartContractStateTrei.GetSmartContractState(scUID);
                     if (lockScState == null)
                         return (txResult, $"vBTC V2 contract not found in state trei: {scUID}");
                     if (!Bitcoin.Services.VBTCService.IsVbtcV2Contract(lockScState))
@@ -4136,6 +4177,12 @@ namespace VerifiedXCore.Services
                     var expectedSats = (long)(amount.Value * 100_000_000M);
                     if (expectedSats != amountSats.Value)
                         return (txResult, "AmountSats does not match Amount for bridge lock.");
+
+                    // A lock is at least the smallest withdrawal. Refused at admission at every height; in blocks from
+                    // BridgeLockMinimumHeight.
+                    if ((blockHeight == null || blockHeight.Value >= Globals.BridgeLockMinimumHeight)
+                        && amountSats.Value < Bitcoin.Services.VBTCService.MinBridgeLockSats)
+                        return (txResult, $"A bridge lock is at least {Bitcoin.Services.VBTCService.MinBridgeLockSats} sats ({Bitcoin.Services.VBTCService.MinBridgeLockSats / 100_000_000M:0.########} vBTC), the smallest withdrawal.");
 
                     if (string.IsNullOrEmpty(evmDestination) || !evmDestination.StartsWith("0x") || evmDestination.Length != 42)
                         return (txResult, "Invalid EvmDestination for bridge lock.");
@@ -4150,7 +4197,7 @@ namespace VerifiedXCore.Services
                     if (VBTCBridgeLockState.GetByLockId(lockId) != null)
                         return (txResult, "Bridge LockId already exists on-chain.");
 
-                    var spendCheck = await ValidateVbtcTransparentSpendForBridgeLock(scUID, txRequest.FromAddress, amount.Value, blockVerify, blockDownloads, blockHeight ?? Globals.LastBlock?.Height ?? 0);
+                    var spendCheck = await ValidateVbtcTransparentSpendForBridgeLock(lockScState, txRequest.FromAddress, amount.Value, blockVerify, blockDownloads, blockHeight ?? Globals.LastBlock?.Height ?? 0);
                     if (!spendCheck.Ok)
                         return (txResult, spendCheck.Message);
                 }
@@ -4726,6 +4773,12 @@ namespace VerifiedXCore.Services
             catch { return null; }
         }
         internal const string BridgeLockDestinationIsAdminTagReason = "A bridge lock's EvmDestination cannot begin with a Base admin message tag.";
+
+        /// <summary>
+        /// Bridge locks one sender may have waiting in the mempool (policy, not a block rule). Each lock costs every node a
+        /// full check at admission and again in its block, and a backlog of them is worked through one at a time.
+        /// </summary>
+        internal const int MaxPendingBridgeLocksPerSender = 8;
         internal const string VotingEndDateNeedsOffsetReason = "A topic's voting end date must carry a UTC offset.";
 
         internal const string TopicOwnerHasActiveTopicReason = "Only one active topic per address is allowed.";
@@ -4797,12 +4850,11 @@ namespace VerifiedXCore.Services
         }
 
         /// <summary>
-        /// Whether a standard (non-private) transaction's carried Hash is the hash of its content. Accepts the legacy
-        /// spellings VerifyTX always has: a whole-number Amount hashed as "N.0", and a zero Amount hashed as "0".
+        /// Whether a standard (non-private) transaction's carried Hash is the hash of its content, judged for
+        /// <paramref name="height"/>. Below Globals.CanonicalInputHeight it accepts the legacy spellings VerifyTX always
+        /// has: a whole-number Amount hashed as "N.0", and a zero Amount hashed as "0". From that height Amount and Fee
+        /// have one spelling (LedgerIntegrityRules.CanonicalAmountAndFee), and the hash is that of the values carried.
         /// </summary>
-        internal static bool StandardHashMatches(Transaction txRequest) => StandardHashMatches(txRequest, long.MaxValue);
-
-        /// <summary>As <see cref="StandardHashMatches(Transaction)"/>, judged for <paramref name="height"/>.</summary>
         internal static bool StandardHashMatches(Transaction txRequest, long height)
         {
             var newTxn = new Transaction()
@@ -4822,6 +4874,11 @@ namespace VerifiedXCore.Services
 
             if (newTxn.Hash.Equals(txRequest.Hash))
                 return true;
+
+            // From the canonical-input height no other spelling is tried: a transaction signed over "0" or "1" is not one
+            // carrying 0.0 or 1.0.
+            if (height >= Globals.CanonicalInputHeight)
+                return false;
 
             var amountCheck = txRequest.Amount % 1 == 0;
             // A non-whole amount has no other spelling. Re-hashed below as 0, it matched a signature over "0", so a relay
@@ -5020,18 +5077,17 @@ namespace VerifiedXCore.Services
             return true;
         }
 
-        /// <summary>Same transparent balance rules as <see cref="TransactionType.VBTC_V2_TRANSFER"/> for a bridge lock debit.</summary>
+        /// <summary>Same transparent balance rules as <see cref="TransactionType.VBTC_V2_TRANSFER"/> for a bridge lock debit,
+        /// on the vault's state the caller has read.</summary>
         private static async Task<(bool Ok, string Message)> ValidateVbtcTransparentSpendForBridgeLock(
-            string scUID,
+            SmartContractStateTrei scStateTreiRec,
             string fromAddress,
             decimal amount,
             bool blockVerify,
             bool blockDownloads,
             long currentHeight)
         {
-            var scStateTreiRec = SmartContractStateTrei.GetSmartContractState(scUID);
-            if (scStateTreiRec == null)
-                return (false, $"vBTC V2 contract not found in state trei: {scUID}");
+            var scUID = scStateTreiRec.SmartContractUID;
 
             bool isOwner = fromAddress == scStateTreiRec.OwnerAddress;
 

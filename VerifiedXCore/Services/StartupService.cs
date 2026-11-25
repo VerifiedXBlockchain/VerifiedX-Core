@@ -310,7 +310,9 @@ namespace VerifiedXCore.Services
             }
         }
 
-        public static async void EncryptedPasswordEntry()
+        public static void EncryptedPasswordEntry() => VerifiedXCore.Utilities.SafeTask.Forget(EncryptedPasswordEntryAsync(), "StartupService.EncryptedPasswordEntry");
+
+        private static async Task EncryptedPasswordEntryAsync()
         {
             bool exit = false;
             while (!exit)
@@ -368,7 +370,9 @@ namespace VerifiedXCore.Services
             }
         }
 
-        public static async void EncryptedPasswordEntryAdj()
+        public static void EncryptedPasswordEntryAdj() => VerifiedXCore.Utilities.SafeTask.Forget(EncryptedPasswordEntryAdjAsync(), "StartupService.EncryptedPasswordEntryAdj");
+
+        private static async Task EncryptedPasswordEntryAdjAsync()
         {
             bool exit = false;
             while (!exit)
@@ -606,7 +610,9 @@ namespace VerifiedXCore.Services
             }
         }
 
-        internal static async void SetLastBlockchainPoint()
+        internal static void SetLastBlockchainPoint() => VerifiedXCore.Utilities.SafeTask.Forget(SetLastBlockchainPointAsync(), "StartupService.SetLastBlockchainPoint");
+
+        private static async Task SetLastBlockchainPointAsync()
         {
             if(Globals.LastBlock.Height != -1)
             {
@@ -625,7 +631,9 @@ namespace VerifiedXCore.Services
                 }
             }
         }
-        internal static async void RunStateSync()
+        internal static void RunStateSync() => VerifiedXCore.Utilities.SafeTask.Forget(RunStateSyncAsync(), "StartupService.RunStateSync");
+
+        private static async Task RunStateSyncAsync()
         {            
             if (Globals.AdjudicateAccount == null)
                 await StateTreiSyncService.SyncAccountStateTrei();
@@ -861,8 +869,8 @@ namespace VerifiedXCore.Services
                     {
                         List<Beacons> beaconList = new List<Beacons>
                         {
-                            new Beacons { IPAddress = "144.126.152.4", Name = "Lily Beacon Marigold", Port = Globals.Port + 1 + 20000, BeaconUID = "LilyBeacon", DefaultBeacon = true, AutoDeleteAfterDownload = true, FileCachePeriodDays = 2, IsPrivateBeacon = false, SelfBeacon = false, SelfBeaconActive = false, BeaconLocator = "", Region = 1 },
-                            new Beacons { IPAddress = "207.244.232.182", Name = "Lotus Beacon Marigold", Port = Globals.Port + 1 + 20000, BeaconUID = "LotusBeaconV2", DefaultBeacon = true, AutoDeleteAfterDownload = true, FileCachePeriodDays = 2, IsPrivateBeacon = false, SelfBeacon = false, SelfBeaconActive = false, BeaconLocator = "", Region = 1 },
+                            new Beacons { IPAddress = "3.136.200.172", Name = "Lily Beacon Marigold", Port = Globals.Port + 1 + 20000, BeaconUID = "LilyBeacon", DefaultBeacon = true, AutoDeleteAfterDownload = true, FileCachePeriodDays = 2, IsPrivateBeacon = false, SelfBeacon = false, SelfBeaconActive = false, BeaconLocator = "", Region = 1 },
+                            new Beacons { IPAddress = "3.142.215.167", Name = "Lotus Beacon Marigold", Port = Globals.Port + 1 + 20000, BeaconUID = "LotusBeaconV2", DefaultBeacon = true, AutoDeleteAfterDownload = true, FileCachePeriodDays = 2, IsPrivateBeacon = false, SelfBeacon = false, SelfBeaconActive = false, BeaconLocator = "", Region = 1 },
                         };
 
                         foreach (var beacon in beaconList)
@@ -972,7 +980,9 @@ namespace VerifiedXCore.Services
             }
         }
 
-        internal static async void SetConfigValidator()
+        internal static void SetConfigValidator() => VerifiedXCore.Utilities.SafeTask.Forget(SetConfigValidatorAsync(), "StartupService.SetConfigValidator");
+
+        private static async Task SetConfigValidatorAsync()
         {
             var address = Globals.ConfigValidator;
             var uname = Globals.ConfigValidatorName;

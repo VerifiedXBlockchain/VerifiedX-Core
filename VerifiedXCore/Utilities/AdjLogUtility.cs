@@ -6,7 +6,9 @@ namespace VerifiedXCore.Utilities
 {
     public class AdjLogUtility
     {
-        public static async void Log(string message, string location, bool firstEntry = false)
+        public static void Log(string message, string location, bool firstEntry = false) => VerifiedXCore.Utilities.SafeTask.Forget(LogAsync(message, location, firstEntry), "AdjLogUtility.Log");
+
+        private static async Task LogAsync(string message, string location, bool firstEntry = false)
         {
             try
             {
@@ -43,12 +45,12 @@ namespace VerifiedXCore.Utilities
                 }
                 if (firstEntry == true)
                 {
-                    await File.AppendAllTextAsync(path + "adjlog.txt", Environment.NewLine + " ");
+                    await LogFile.AppendAsync(path + "adjlog.txt", Environment.NewLine + " ");
                 }
 
                 if (File.Exists(path + "adjlog.txt"))
                 {
-                    var bytes = File.ReadAllBytes(path + "adjlog.txt").Length;
+                    var bytes = LogFile.Length(path + "adjlog.txt");
                     var totalMB = bytes / 1024 / 1024;
                     if (totalMB > 100)
                         writeLog = false;
@@ -57,7 +59,7 @@ namespace VerifiedXCore.Utilities
                 }
 
                 if(writeLog)
-                    await File.AppendAllTextAsync(path + "adjlog.txt", Environment.NewLine + text);
+                    await LogFile.AppendAsync(path + "adjlog.txt", Environment.NewLine + text);
             }
             catch { }
         }

@@ -20,6 +20,19 @@ namespace VerifiedXCore.Utilities
         /// <summary>Block hash at a height, from block storage (never Globals.BlockHashes). Test seam.</summary>
         internal static Func<long, string?> BlockHashAt = height => BlockchainData.GetBlockByHeight(height)?.Hash;
 
+        /// <summary>A block's VRF mix (BlockVrf), from block storage. Test seam.</summary>
+        internal static Func<long, string?> MixAt = height => BlockchainData.GetBlockByHeight(height)?.VrfMix;
+
+        /// <summary>
+        /// What a block at <paramref name="height"/> gives as a seed to whatever is drawn from it (the producers of an epoch,
+        /// the emergency committee, the Base signer order): its VRF mix from Globals.VrfMixHeight, which its producer could
+        /// only publish or withhold, else its hash, which its producer could choose. Null when the block is not in storage.
+        /// </summary>
+        public static string? SeedMaterialAt(long height) =>
+            BlockVrf.Active(height) ? NullIfEmpty(MixAt(height)) : NullIfEmpty(BlockHashAt(height));
+
+        private static string? NullIfEmpty(string? s) => string.IsNullOrEmpty(s) ? null : s;
+
         /// <summary>The active validator set as of a height, from committed blocks. Test seam.</summary>
         internal static Func<long, List<VBTCValidator>> ActiveAt = VBTCValidatorRegistry.GetActiveValidatorsAt;
 
@@ -42,7 +55,7 @@ namespace VerifiedXCore.Utilities
         /// <summary>The seed of <paramref name="height"/> (at or above the height), or null when the anchor block is not in storage.</summary>
         public static string? SeedFor(long height)
         {
-            var anchorHash = BlockHashAt(AnchorHeight(height));
+            var anchorHash = SeedMaterialAt(AnchorHeight(height));
             if (string.IsNullOrEmpty(anchorHash))
                 return null;
             using var sha = SHA256.Create();

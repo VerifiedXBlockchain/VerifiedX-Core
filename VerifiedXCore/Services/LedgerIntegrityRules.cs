@@ -1,3 +1,4 @@
+using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 using VerifiedXCore.Bitcoin.Models;
 using VerifiedXCore.Bitcoin.Services;
@@ -149,6 +150,47 @@ namespace VerifiedXCore.Services
         }
 
         /// <summary>
+        /// The call a transaction at <paramref name="height"/> names. Below Globals.StrictDataReaderHeight exactly
+        /// <see cref="DispatchedCall(string?)"/>; from it the same steps over Data read once by
+        /// <see cref="ConsensusData"/>, which validation and state application both dispatch on: Data the strict reader
+        /// refuses names no call.
+        /// </summary>
+        public static (string? Function, string? ContractUID) DispatchedCall(string? txData, long height)
+        {
+            if (!ConsensusData.IsStrict(height))
+                return DispatchedCall(txData);
+            if (string.IsNullOrEmpty(txData) || !ConsensusData.TryRead(txData, out var root, out _))
+                return (null, null);
+            return CallOf(root);
+        }
+
+        /// <summary>
+        /// The call in Data the strict reader read (<see cref="ConsensusData.TryRead"/>): the first element of an array, or
+        /// the object itself, read in the steps <see cref="DispatchedCall(string?)"/> takes. (null, null) for a null root.
+        /// </summary>
+        public static (string? Function, string? ContractUID) CallOf(JToken? root)
+        {
+            string? function = null, uid = null;
+            try
+            {
+                if (root is JArray array)
+                {
+                    // As the array shape is read below the height: the function is kept when the UID cannot be read.
+                    var first = array[0];
+                    function = (string?)first["Function"];
+                    uid = (string?)first["ContractUID"];
+                }
+                else if (root is JObject obj)
+                {
+                    uid = obj["ContractUID"]?.ToObject<string?>();
+                    function = obj["Function"]?.ToObject<string?>();
+                }
+            }
+            catch { }
+            return (function, uid);
+        }
+
+        /// <summary>
         /// Whether a transaction's Data, read as JSON, carries a comment. The rules here read Data with JToken.Parse,
         /// which returns a leading comment as the root, while the code that runs a call skips it: such Data reads as no
         /// call to the rules and as a call to the dispatcher. No wallet writes a comment. Data that is not JSON is left
@@ -170,11 +212,11 @@ namespace VerifiedXCore.Services
         }
 
         /// <summary>The first element of a contract call (array shape) or the call itself (object shape); null when it is neither.</summary>
-        private static JObject? CallObject(string txData)
+        private static JObject? CallObject(string txData, long height)
         {
             try
             {
-                var root = JToken.Parse(txData);
+                var root = ConsensusData.IsStrict(height) ? ConsensusData.Read(txData) : JToken.Parse(txData);
                 return root is JArray arr ? (arr.Count > 0 ? arr[0] as JObject : null) : root as JObject;
             }
             catch { return null; }
@@ -205,7 +247,7 @@ namespace VerifiedXCore.Services
             // From Globals.VbtcEnvelopeRulesHeight a vBTC transfer sent as a contract call is held to the same rule.
             if (tx.TransactionType.ToString().StartsWith("VBTC_V2_", StringComparison.Ordinal)
                     ? height < Globals.PathAuditRulesHeight
-                    : height < Globals.VbtcEnvelopeRulesHeight || DispatchedCall(tx.Data).Function is not ("TransferVBTCV2()" or "TransferVBTCMultiV2()"))
+                    : height < Globals.VbtcEnvelopeRulesHeight || DispatchedCall(tx.Data, height).Function is not ("TransferVBTCV2()" or "TransferVBTCMultiV2()"))
                 return null;
             JToken root;
             try { root = JToken.Parse(tx.Data); }
@@ -382,14 +424,14 @@ namespace VerifiedXCore.Services
         {
             if (tx?.Data == null || height < Globals.PathAuditRulesHeight) return null;
             if (!ContractCallTypes.Contains(tx.TransactionType)) return null;
-            var call = DispatchedCall(tx.Data);
+            var call = DispatchedCall(tx.Data, height);
             if (string.IsNullOrWhiteSpace(call.Function)) return null; // nothing is dispatched
-            var read = SmartContractDeployBinding.ReadPayload(tx.Data);
+            var read = SmartContractDeployBinding.ReadPayload(tx.Data, height);
             if (!string.Equals(read.Function, call.Function, StringComparison.Ordinal) || !string.Equals(read.ContractUID, call.ContractUID, StringComparison.Ordinal))
                 return "This transaction's contract call cannot be read: its Function, ContractUID, Data and MD5List must each be text.";
             // The two other fields the apply reads from the call. One that is not a plain value passed validation
             // (nothing here reads it) and made the apply throw on every node: a transaction mined and never applied.
-            var fields = CallObject(tx.Data);
+            var fields = CallObject(tx.Data, height);
             if (fields != null && ((fields["Locators"] is { } locators && locators is not JValue) || (fields["Amount"] is { } amount && amount is not JValue)))
                 return "This transaction's contract call cannot be read: its Locators and Amount must each be a plain value.";
             return null;
@@ -456,7 +498,7 @@ namespace VerifiedXCore.Services
         {
             if (tx == null || height < Globals.ReserveNonTransferAmountHeight) return null;
             if (!(tx.FromAddress ?? "").StartsWith("xRBX") || tx.TransactionType == TransactionType.TX || tx.Amount == 0M) return null;
-            if (tx.TransactionType == TransactionType.RESERVE && DispatchedCall(tx.Data).Function == "Register()") return null;
+            if (tx.TransactionType == TransactionType.RESERVE && DispatchedCall(tx.Data, height).Function == "Register()") return null;
             return "A reserve account sends VFX only in a TX: its other transactions carry no amount.";
         }
 
@@ -511,11 +553,11 @@ namespace VerifiedXCore.Services
         {
             if (tx == null || height < Globals.ContractPayloadArrayHeight) return null;
             if (!ContractCallTypes.Contains(tx.TransactionType)) return null;
-            var function = DispatchedCall(tx.Data).Function;
+            var function = DispatchedCall(tx.Data, height).Function;
             if (function == null || !ArrayFormContractFunctions.Contains(function)) return null;
             try
             {
-                if (Newtonsoft.Json.JsonConvert.DeserializeObject<JArray>(tx.Data!)![0] is JObject) return null;
+                if (ConsensusData.ParseArray(tx.Data, height)[0] is JObject) return null;
             }
             catch { }
             return $"{function} carries its call as an array whose first element is the call.";
@@ -524,7 +566,7 @@ namespace VerifiedXCore.Services
         public static string? VbtcRecipientCanHoldIt(Transaction tx, long height)
         {
             if (tx == null || height < Globals.PathAuditRulesHeight) return null;
-            var function = tx.TransactionType == TransactionType.VBTC_V2_TRANSFER ? "TransferVBTCV2()" : DispatchedCall(tx.Data).Function;
+            var function = tx.TransactionType == TransactionType.VBTC_V2_TRANSFER ? "TransferVBTCV2()" : DispatchedCall(tx.Data, height).Function;
             if (tx.TransactionType != TransactionType.VBTC_V2_TRANSFER && function != "TransferVBTCV2()" && function != "TransferVBTCMultiV2()") return null;
             var to = tx.ToAddress ?? "";
             return !to.StartsWith(VerifiedXCore.Privacy.ShieldedAddressConstants.Prefix, StringComparison.Ordinal) && AddressValidateUtility.ValidateRBXAddress(to)
@@ -576,7 +618,7 @@ namespace VerifiedXCore.Services
         public static string? VaultNotBurned(Transaction tx, long height)
         {
             if (tx?.Data == null) return null;
-            var payload = SmartContractDeployBinding.ReadPayload(tx.Data);
+            var payload = SmartContractDeployBinding.ReadPayload(tx.Data, height);
             if (payload.Function != "Burn()" || string.IsNullOrEmpty(payload.ContractUID)) return null;
             var stored = SmartContractStateTrei.GetSmartContractState(payload.ContractUID);
             if (stored == null || !VBTCService.IsVbtcV2Contract(stored)) return null;
@@ -671,7 +713,7 @@ namespace VerifiedXCore.Services
         public static string? VaultNotCreatedByRewrite(Transaction tx, long height)
         {
             if (tx?.Data == null || height < Globals.VaultRewriteRulesHeight) return null;
-            var payload = SmartContractDeployBinding.ReadPayload(tx.Data);
+            var payload = SmartContractDeployBinding.ReadPayload(tx.Data, height);
             if (payload.Function == null || !ContractRewritingFunctions.Contains(payload.Function)
                 || string.IsNullOrEmpty(payload.ContractUID) || string.IsNullOrEmpty(payload.Data))
                 return null;
@@ -714,7 +756,7 @@ namespace VerifiedXCore.Services
         public static string? RoyaltyUnchangedByRewrite(Transaction tx, long height)
         {
             if (tx?.Data == null || height < Globals.RoyaltyRewriteRulesHeight) return null;
-            var payload = SmartContractDeployBinding.ReadPayload(tx.Data);
+            var payload = SmartContractDeployBinding.ReadPayload(tx.Data, height);
             if (payload.Function == null || !ContractRewritingFunctions.Contains(payload.Function)
                 || string.IsNullOrEmpty(payload.ContractUID))
                 return null;
@@ -745,7 +787,7 @@ namespace VerifiedXCore.Services
         public static string? EvolutionNeedsAnEvolvingContract(Transaction tx, long height)
         {
             if (tx?.Data == null || height < Globals.EvolveRulesHeight || !ContractFunctionTypes.Contains(tx.TransactionType)) return null;
-            var payload = SmartContractDeployBinding.ReadPayload(tx.Data);
+            var payload = SmartContractDeployBinding.ReadPayload(tx.Data, height);
             if (payload.Function == null || !EvolutionFunctions.Contains(payload.Function) || string.IsNullOrEmpty(payload.ContractUID)) return null;
             var stored = SmartContractStateTrei.GetSmartContractState(payload.ContractUID);
             if (stored == null) return null; // the function's own rule refuses a contract that does not exist
@@ -810,7 +852,7 @@ namespace VerifiedXCore.Services
                 return DefaultMaxTxSizeBytes;
             try
             {
-                var payload = SmartContractDeployBinding.ReadPayload(tx.Data);
+                var payload = SmartContractDeployBinding.ReadPayload(tx.Data, height);
                 if (payload.Function != "Transfer()" || string.IsNullOrEmpty(payload.ContractUID) || string.IsNullOrEmpty(payload.Data))
                     return DefaultMaxTxSizeBytes;
                 var stored = SmartContractStateTrei.GetSmartContractState(payload.ContractUID);
@@ -855,7 +897,7 @@ namespace VerifiedXCore.Services
             if (height < Globals.VbtcV2DkgAttestationHeight) return null;
             var uid = CreatedContractUid(tx);
             if (uid == null) return null;
-            var payload = SmartContractDeployBinding.ReadPayload(tx.Data);
+            var payload = SmartContractDeployBinding.ReadPayload(tx.Data, height);
             // Whether this creation makes a vault is asked of the body's code. Code that is not timeless can answer no
             // today and yes to a node that validates this block later (which would then refuse a block the network
             // accepted and never sync past it), so from Globals.PathAuditRulesHeight it is not asked at all: such a
@@ -1058,7 +1100,10 @@ namespace VerifiedXCore.Services
             var alsoRefused = height >= Globals.PathAuditRulesHeight ? ProcessBoundBuiltins : Array.Empty<string>();
             // The size, nesting and call limits: always at admission, in a block from ContractBodyLimitsHeight.
             var limits = !inBlock || height >= Globals.ContractBodyLimitsHeight;
-            foreach (var body in CarriedContractBodies(tx?.Data))
+            // Every spelling of the key the code that runs the body reads: always at admission, in a block from
+            // ContractBodyKeySpellingHeight. Below it a block's bodies are found as they always were.
+            var everySpelling = !inBlock || height >= Globals.ContractBodyKeySpellingHeight;
+            foreach (var body in everySpelling ? CarriedContractBodies(tx?.Data) : CarriedContractBodiesBeforeKeySpelling(tx?.Data))
             {
                 string text;
                 byte[]? unpacked;
@@ -1107,6 +1152,12 @@ namespace VerifiedXCore.Services
                         foreach (var child in node.GetChildren())
                             pending.Push(child);
                     }
+                    // A run as the node reads the body, within the contract run limits: what no rule above measures (a
+                    // string doubled line after line, long text compared over and over) stops the run, and the body is
+                    // refused, so no reader that falls back on a body it cannot run ever meets one a limit stopped.
+                    // Always at admission, in a block from ContractRunLimitsHeight.
+                    if ((!inBlock || height >= Globals.ContractRunLimitsHeight) && VerifiedXCore.Trillium.ContractRunLimits.StoppedBy(body) is { } stopped)
+                        return $"Contract code costs more to run than a contract may: {stopped}";
                 }
                 catch (Exception ex)
                 {
@@ -1180,8 +1231,43 @@ namespace VerifiedXCore.Services
             return (n == 0 ? 0 : depth.Max(), Math.Max(globals, n == 0 ? 0 : calls.Max()));
         }
 
-        /// <summary>Every string "Data" value in the payload (array or object shape) - the contract bodies a transaction carries.</summary>
-        private static IEnumerable<string> CarriedContractBodies(string? txData)
+        /// <summary>
+        /// Every contract body a transaction carries: each string value under a key read as "Data" in any letter case, in
+        /// the payload's object or array shape. The payload is parsed as the code that runs the body parses it, so a key
+        /// written with an escape (<c>"\u0044ata"</c>), in single quotes or bare is found too. Every value under such a
+        /// key is returned, the same key written twice included (the payload is read token by token, so no copy is
+        /// replaced by a later one), so a reader that takes the first, the last or another casing never runs a body the
+        /// rules did not judge.
+        /// </summary>
+        internal static IEnumerable<string> CarriedContractBodies(string? txData)
+        {
+            var bodies = new List<string>();
+            if (string.IsNullOrEmpty(txData)) return bodies;
+            try
+            {
+                using var reader = new JsonTextReader(new StringReader(txData)) { DateParseHandling = DateParseHandling.None, MaxDepth = 64 };
+                int? keyDepth = null; // the depth of the names of the payload's objects: 1 for an object, 2 for an array of them
+                while (reader.Read())
+                {
+                    if (keyDepth == null)
+                    {
+                        if (reader.TokenType == JsonToken.Comment) continue;
+                        if (reader.TokenType != JsonToken.StartObject && reader.TokenType != JsonToken.StartArray) break;
+                        keyDepth = reader.TokenType == JsonToken.StartArray ? 2 : 1;
+                        continue;
+                    }
+                    if (reader.TokenType == JsonToken.PropertyName && reader.Depth == keyDepth
+                        && string.Equals((string?)reader.Value, "Data", StringComparison.OrdinalIgnoreCase)
+                        && reader.Read() && reader.TokenType == JsonToken.String && reader.Value is string body && body.Length > 0)
+                        bodies.Add(body);
+                }
+            }
+            catch (Exception ex) when (ex is JsonException or FormatException or OverflowException or ArgumentException) { } // what was found before is judged
+            return bodies;
+        }
+
+        /// <summary>The bodies as blocks below ContractBodyKeySpellingHeight were judged: under the exact text "Data" only.</summary>
+        private static IEnumerable<string> CarriedContractBodiesBeforeKeySpelling(string? txData)
         {
             if (string.IsNullOrEmpty(txData) || !txData.Contains("\"Data\"")) yield break;
             JToken root;
@@ -1210,7 +1296,7 @@ namespace VerifiedXCore.Services
             if (tx == null || height < Globals.VbtcV1RetirementHeight) return null;
             if (tx.TransactionType == TransactionType.TKNZ_WD_ARB || tx.TransactionType == TransactionType.TKNZ_WD_OWNER)
                 return VbtcV1RetiredMessage;
-            var payload = SmartContractDeployBinding.ReadPayload(tx.Data);
+            var payload = SmartContractDeployBinding.ReadPayload(tx.Data, height);
             if (payload.Function != null && VbtcV1OnlyFunctions.Contains(payload.Function))
                 return VbtcV1RetiredMessage;
             if (!string.IsNullOrEmpty(payload.ContractUID) && VBTCService.IsVbtcV1Contract(SmartContractStateTrei.GetSmartContractState(payload.ContractUID)))
@@ -1226,7 +1312,7 @@ namespace VerifiedXCore.Services
         public static string? VbtcV1Creation(Transaction tx, long height)
         {
             if (tx == null || height < Globals.VbtcV1RetirementHeight) return null;
-            var payload = SmartContractDeployBinding.ReadPayload(tx.Data);
+            var payload = SmartContractDeployBinding.ReadPayload(tx.Data, height);
             if (payload.Function != "Mint()" || string.IsNullOrEmpty(payload.Data)) return null;
             // As for a vault: code that is not timeless is never a V1 contract to any reader, and is not run to ask.
             if (height >= Globals.PathAuditRulesHeight && !ContractCodeIsTimeless(payload.Data)) return null;
@@ -1290,6 +1376,69 @@ namespace VerifiedXCore.Services
             if (tx == null || height < Globals.FeeBelowOneVfxHeight) return null;
             if (VerifiedXCore.Privacy.PrivateTransactionTypes.IsPrivateTransaction(tx.TransactionType)) return null;
             return tx.Fee >= 1M ? "A transaction's fee must be below 1 VFX (ambiguous hash)." : null;
+        }
+
+        internal const string NonCanonicalAmountReason =
+            "A transaction's Amount must be written as the shortest decimal with at least one digit after the point (for example 1.0, 1.5 or 0.0).";
+        internal const string NonCanonicalFeeReason =
+            "A transaction's Fee must be written as the shortest decimal with at least one digit after the point (for example 0.000006 or 0.0).";
+
+        /// <summary>
+        /// From Globals.CanonicalInputHeight a transaction's Amount and Fee are each written one way: the shortest decimal
+        /// with at least one digit after the point. The hash covers how the two are written, and a decimal keeps the
+        /// number of places it was read with, so "1", "1.0" and "1.00" were three spellings, and three hashes, of one
+        /// amount. Judged on the value as it arrived, before admission gives it a block's spelling. A shield hashes its
+        /// Amount as written but its Fee by value; the other private transactions hash neither, so only a shield's Amount
+        /// is held to it among them. Null when the rule passes.
+        /// </summary>
+        public static string? CanonicalAmountAndFee(Transaction tx, long height)
+        {
+            if (tx == null || height < Globals.CanonicalInputHeight) return null;
+            var isPrivate = VerifiedXCore.Privacy.PrivateTransactionTypes.IsPrivateTransaction(tx.TransactionType);
+            if (isPrivate && !VerifiedXCore.Privacy.PrivateTransactionTypes.IsTransparentShield(tx.TransactionType)) return null;
+            if (!IsCanonicalDecimal(tx.Amount)) return NonCanonicalAmountReason;
+            if (!isPrivate && !IsCanonicalDecimal(tx.Fee)) return NonCanonicalFeeReason;
+            return null;
+        }
+
+        /// <summary>
+        /// Whether a decimal is written the one accepted way: with at least one place, and with no trailing zero unless
+        /// that zero is its only place ("1.0", "1.5", "0.00002", "0.0"; not "1", "1.00" or "0.000006000"). Read from the
+        /// decimal's scale and digits, never its value, since every spelling of a number has the same value.
+        /// </summary>
+        public static bool IsCanonicalDecimal(decimal value)
+        {
+            var bits = decimal.GetBits(value);
+            var scale = (bits[3] >> 16) & 0xFF;
+            if (scale == 0) return false;
+            if (scale == 1) return true;
+            var digits = ((System.Numerics.BigInteger)(uint)bits[2] << 64) | ((System.Numerics.BigInteger)(uint)bits[1] << 32) | (uint)bits[0];
+            return !(digits % 10).IsZero;
+        }
+
+        /// <summary>The height a transaction this node builds now is judged for: the next block.</summary>
+        public static long NextBlockHeight => (Globals.LastBlock?.Height ?? 0) + 1;
+
+        /// <summary>
+        /// The Amount or Fee this node writes into a transaction it builds for <paramref name="height"/>: from
+        /// Globals.CanonicalInputHeight the canonical spelling of <paramref name="value"/>; below it
+        /// <paramref name="legacy"/>, the value exactly as Core has always written it, decimal places included. Below the
+        /// height nothing Core builds changes.
+        /// </summary>
+        public static decimal SpellForHeight(decimal value, decimal legacy, long height) =>
+            height >= Globals.CanonicalInputHeight ? CanonicalDecimal(value) : legacy;
+
+        /// <summary>As <see cref="SpellForHeight"/>, for a transaction built now (judged for the next block).</summary>
+        public static decimal SpellForNextBlock(decimal value, decimal legacy) => SpellForHeight(value, legacy, NextBlockHeight);
+
+        /// <summary>
+        /// The one accepted spelling of a decimal (see <see cref="IsCanonicalDecimal"/>): its trailing zeros removed, and a
+        /// whole number given one place. The value does not change. For transactions this node builds.
+        /// </summary>
+        public static decimal CanonicalDecimal(decimal value)
+        {
+            var shortest = value / 1.000000000000000000000000000000000m;
+            return ((decimal.GetBits(shortest)[3] >> 16) & 0xFF) == 0 ? shortest + 0.0M : shortest;
         }
 
         // ── NEW-17: NFT sale amounts ─────────────────────────────────────────────────────────────────────────────
@@ -1688,7 +1837,7 @@ namespace VerifiedXCore.Services
             // From TokenMintRulesHeight one TokenMint() per contract in a block: each is judged against the supply and
             // balance before the block, so a second could overflow at apply after the first (balance written, supply not).
             if (height >= Globals.TokenMintRulesHeight && ContractFunctionTypes.Contains(tx.TransactionType)
-                && DispatchedCall(tx.Data) is { Function: "TokenMint()", ContractUID: { Length: > 0 } mintedUid })
+                && DispatchedCall(tx.Data, height) is { Function: "TokenMint()", ContractUID: { Length: > 0 } mintedUid })
                 return state.TokenMints.Add(mintedUid) ? null : $"{TokenMintedTwiceInBlock}: {mintedUid}";
             var moveOrSale = height >= Globals.PathAuditRulesHeight;
             var oneMove = height >= Globals.OneMovePerContractHeight;

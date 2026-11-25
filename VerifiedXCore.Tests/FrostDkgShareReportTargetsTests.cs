@@ -92,9 +92,15 @@ namespace VerifiedXCore.Tests
                 Assert.Contains("not addressed to this validator", await outsiderOnly.Content.ReadAsStringAsync());
                 Assert.False(session.Reported);
 
+                // More entries than any ceremony has participants: refused before it is read.
+                var tooMany = new JObject();
+                for (var i = 0; i <= FrostSessionStorage.MAX_PARTICIPANTS + 16; i++) tooMany["xNotAParticipant" + i] = "{}";
+                Assert.Equal(HttpStatusCode.BadRequest, (await Post(tooMany)).StatusCode);
+                Assert.False(session.Reported);
+
                 // Names that are not participants, ahead of a participant's share that will not open.
                 var shares = new JObject();
-                for (var i = 0; i < 2_000; i++) shares["xNotAParticipant" + i] = i == 0 ? forMe : "{}";
+                for (var i = 0; i < FrostSessionStorage.MAX_PARTICIPANTS; i++) shares["xNotAParticipant" + i] = i == 0 ? forMe : "{}";
                 shares["xV2"] = forMe;
                 var response = await Post(shares);
                 Assert.Equal(HttpStatusCode.OK, response.StatusCode);

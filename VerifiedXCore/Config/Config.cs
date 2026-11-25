@@ -33,6 +33,7 @@ namespace VerifiedXCore.Config
 		public string? ValidatorAddress { get; set; }
 		public string ValidatorName { get; set; }
 		public int NFTTimeout { get; set; }
+		public bool BoundRequestBodies { get; set; } = true;
 		public int PasswordClearTime { get; set; }
         public bool AutoDownloadNFTAsset { get; set; }
         public bool IgnoreIncomingNFTs { get; set; }
@@ -128,6 +129,7 @@ namespace VerifiedXCore.Config
 				config.APIPort = dict.ContainsKey("APIPort") ? Convert.ToInt32(dict["APIPort"]) : 7292;
 				config.TestNet = dict.ContainsKey("TestNet") ? Convert.ToBoolean(dict["TestNet"]) : false;
 				config.NFTTimeout = dict.ContainsKey("NFTTimeout") ? Convert.ToInt32(dict["NFTTimeout"]) : 15;
+				config.BoundRequestBodies = dict.ContainsKey("BoundRequestBodies") ? Convert.ToBoolean(dict["BoundRequestBodies"]) : true;
 				config.WalletPassword = dict.ContainsKey("WalletPassword") ? dict["WalletPassword"] : null;
 				config.AlwaysRequireWalletPassword = dict.ContainsKey("AlwaysRequireWalletPassword") ? Convert.ToBoolean(dict["AlwaysRequireWalletPassword"]) : false;
 				config.APIPassword = dict.ContainsKey("APIPassword") ? dict["APIPassword"] : null;
@@ -280,6 +282,7 @@ namespace VerifiedXCore.Config
             Globals.APICallURL = config.APICallURL;
 			Globals.APICallURLLogging = config.APICallURLLogging;
 			Globals.NFTTimeout = config.NFTTimeout;
+			Globals.BoundRequestBodies = config.BoundRequestBodies;
 			Globals.PasswordClearTime = config.PasswordClearTime;
 			if (config.RejectAssetExtensionTypes != null)
 				foreach (var type in config.RejectAssetExtensionTypes)
@@ -452,6 +455,8 @@ namespace VerifiedXCore.Config
                         Count = 0,
                         FailCount = 0
                     }).ToList();
+                    // The heights were applied before this config was read; again now, with Marigold's (all rules by 401).
+                    Globals.ApplyNetworkHeights();
                 }
                 else if(config.TestNetName == "someothernet")
                 {
@@ -647,8 +652,10 @@ namespace VerifiedXCore.Config
             return records;
         }
 
-        public static async void EstablishConfigFile()
-		{
+        public static void EstablishConfigFile() => VerifiedXCore.Utilities.SafeTask.Forget(EstablishConfigFileAsync(), "Config.EstablishConfigFile");
+
+        private static async Task EstablishConfigFileAsync()
+        {
 			var path = GetPathUtility.GetConfigPath();
 			var fileExist = File.Exists(path + "config.txt");
 
@@ -678,7 +685,7 @@ namespace VerifiedXCore.Config
                     File.AppendAllText(path + "config.txt", Environment.NewLine + "BitcoinAddressFormat=1");
                     // Base Bridge V2 defaults (devnet — Base Sepolia)
                     File.AppendAllText(path + "config.txt", Environment.NewLine + "BaseBridgeRpcUrl=https://sepolia.base.org");
-                    File.AppendAllText(path + "config.txt", Environment.NewLine + "BaseBridgeContract=0x3669EE313f9Aa14b9eBb787DfdB0E97Ca67A0510");
+                    File.AppendAllText(path + "config.txt", Environment.NewLine + "BaseBridgeContract=0x19e41519CE1Dbe9cED703E406B8a6C728D2B7a30");
                     File.AppendAllText(path + "config.txt", Environment.NewLine + "BaseBridgeChainId=84532");
                 }
                 else //testnet
@@ -698,7 +705,9 @@ namespace VerifiedXCore.Config
 			}
 		}
 
-        public static async void EstablishABLFile()
+        public static void EstablishABLFile() => VerifiedXCore.Utilities.SafeTask.Forget(EstablishABLFileAsync(), "Config.EstablishABLFile");
+
+        private static async Task EstablishABLFileAsync()
         {
             var path = GetPathUtility.GetABLPath();
             var fileExist = File.Exists(path + "abl.txt");

@@ -527,7 +527,9 @@ namespace VerifiedXCore.Data
 			Console.WriteLine("*** Be sure to save private key!                   ***");
 			Console.WriteLine("*** Use your private key to restore account!       ***");
 		}
-		public static async void AddToAccount(Account account)
+		public static void AddToAccount(Account account) => VerifiedXCore.Utilities.SafeTask.Forget(AddToAccountAsync(account), "AccountData.AddToAccount");
+
+		private static async Task AddToAccountAsync(Account account)
 		{
 			var accountList = GetAccounts();
 			// VX-11: dedupe by ADDRESS. The key text can differ for the same key ("0ff…" vs "ff…"), while the

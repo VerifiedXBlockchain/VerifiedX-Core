@@ -50,6 +50,13 @@ namespace VerifiedXCore.Bitcoin.Services
         public const long TaprootDustSats = 330;
 
         /// <summary>
+        /// The smallest bridge lock, in sats: the smallest withdrawal from a vault the chain watches (the smallest withdrawal
+        /// transaction's fee at 1 sat/vB, and a payout of at least <see cref="Attestation.BtcCanonicalWithdrawal.DustSats"/>).
+        /// Each lock costs every node a mint attestation and a record of its own, whatever its amount.
+        /// </summary>
+        public const long MinBridgeLockSats = MinWithdrawalTxVBytes + Attestation.BtcCanonicalWithdrawal.DustSats;
+
+        /// <summary>
         /// Consensus rule (VbtcWithdrawalConcurrencyHeight), shared with the wallet paths so both give the same message:
         /// a withdrawal pays its Bitcoin fee out of the amount, so the amount must cover the fee of the smallest withdrawal
         /// transaction at the request's own fee rate and still leave a relayable payout. Uses only the request's fields, so
@@ -988,6 +995,8 @@ namespace VerifiedXCore.Bitcoin.Services
         public const int MaxMultiTransferInputs = 25;
 
         private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, (string ScUid, decimal Amount)[]> _outflowsByData = new(StringComparer.Ordinal);
+        /// <summary>The same, read by the strict Data reader (from Globals.StrictDataReaderHeight).</summary>
+        private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, (string ScUid, decimal Amount)[]> _strictOutflowsByData = new(StringComparer.Ordinal);
 
         /// <summary>Data longer than this is read each time, not remembered (an honest 25-input transfer is about 3 KB).</summary>
         internal const int MaxRememberedOutflowData = 4096;
@@ -1009,23 +1018,29 @@ namespace VerifiedXCore.Bitcoin.Services
         /// single — that matches how pre-gate nodes validate/apply it, and post-gate the
         /// validator rejects the hybrid shape outright. Empty list on parse failure.
         /// </para>
+        /// <para>
+        /// Read at <paramref name="height"/> (the block being validated, or the next block at admission when null): from
+        /// Globals.StrictDataReaderHeight with the strict Data reader, as the validator and the apply read the transfer.
+        /// </para>
         /// </summary>
-        public static List<(string ScUid, decimal Amount)> GetVbtcV2TransferOutflows(Transaction tx)
+        public static List<(string ScUid, decimal Amount)> GetVbtcV2TransferOutflows(Transaction tx, long? height = null)
         {
             if (tx == null || tx.TransactionType != TransactionType.VBTC_V2_TRANSFER || string.IsNullOrEmpty(tx.Data))
                 return new List<(string, decimal)>();
+            var strict = ConsensusData.IsStrict(height ?? ((Globals.LastBlock?.Height ?? 0) + 1));
+            var remembered = strict ? _strictOutflowsByData : _outflowsByData;
             if (tx.Data.Length > MaxRememberedOutflowData)
-                return ReadVbtcV2TransferOutflows(tx);
-            if (_outflowsByData.TryGetValue(tx.Data, out var known))
+                return ReadVbtcV2TransferOutflows(tx, strict);
+            if (remembered.TryGetValue(tx.Data, out var known))
                 return known.ToList();
-            var read = ReadVbtcV2TransferOutflows(tx);
-            if (_outflowsByData.Count >= 50_000)
-                _outflowsByData.Clear();
-            _outflowsByData[tx.Data] = read.ToArray();
+            var read = ReadVbtcV2TransferOutflows(tx, strict);
+            if (remembered.Count >= 50_000)
+                remembered.Clear();
+            remembered[tx.Data] = read.ToArray();
             return read;
         }
 
-        private static List<(string ScUid, decimal Amount)> ReadVbtcV2TransferOutflows(Transaction tx)
+        private static List<(string ScUid, decimal Amount)> ReadVbtcV2TransferOutflows(Transaction tx, bool strict)
         {
             var outflows = new List<(string, decimal)>();
             try
@@ -1033,13 +1048,13 @@ namespace VerifiedXCore.Bitcoin.Services
                 if (tx.TransactionType != TransactionType.VBTC_V2_TRANSFER || string.IsNullOrEmpty(tx.Data))
                     return outflows;
 
-                var jobj = JObject.Parse(tx.Data);
+                var jobj = strict ? ConsensusData.Read(tx.Data) as JObject ?? throw new JsonReaderException("Data is not a JSON object.") : JObject.Parse(tx.Data);
                 var function = jobj["Function"]?.ToObject<string>();
                 var scUID = jobj["ContractUID"]?.ToObject<string>();
 
                 if (function == MultiTransferFunction && string.IsNullOrEmpty(scUID))
                 {
-                    var inputs = jobj["Inputs"]?.ToObject<List<VBTCV2MultiTransferInput>>();
+                    var inputs = jobj["Inputs"] is { } inputsToken ? (strict ? ConsensusData.ToObject<List<VBTCV2MultiTransferInput>>(inputsToken) : inputsToken.ToObject<List<VBTCV2MultiTransferInput>>()) : null;
                     if (inputs != null)
                     {
                         foreach (var input in inputs)
@@ -3126,14 +3141,18 @@ namespace VerifiedXCore.Bitcoin.Services
         /// S3C §6.3: resolve a contract's IsS3C flag — local record first, else state-trei
         /// decompile (works on any node; used by the consensus bridge-lock rejection too).
         /// </summary>
-        public static bool ResolveContractIsS3C(string scUID)
+        public static bool ResolveContractIsS3C(string scUID) =>
+            ResolveContractIsS3C(scUID, SmartContractStateTrei.GetSmartContractState(scUID));
+
+        /// <summary>As <see cref="ResolveContractIsS3C(string)"/>, from the contract's state already read by the caller
+        /// (null: not on chain).</summary>
+        public static bool ResolveContractIsS3C(string scUID, SmartContractStateTrei? scState)
         {
             // Chain state first: block validation asks this (the bridge-lock refusal), and a record in this node's
             // own wallet tables (which anyone could have a public node write, before the contract existed) must not
             // decide what a block is. The local record answers only for a contract that is not on chain yet.
             try
             {
-                var scState = SmartContractStateTrei.GetSmartContractState(scUID);
                 if (scState != null && !string.IsNullOrEmpty(scState.ContractData))
                 {
                     var scMain = SmartContractMain.GenerateSmartContractInMemory(scState.ContractData);
@@ -3148,7 +3167,7 @@ namespace VerifiedXCore.Bitcoin.Services
             catch
             {
                 // A contract that is on chain and cannot be read is not answered for from this node's own records.
-                if (SmartContractStateTrei.GetSmartContractState(scUID) != null) return false;
+                if (scState != null) return false;
             }
             var local = VBTCContractV2.GetContract(scUID);
             return local != null && local.IsS3C;
@@ -3316,9 +3335,15 @@ namespace VerifiedXCore.Bitcoin.Services
                 var result = await TransactionValidatorService.VerifyTX(lockTx);
                 if (result.Item1)
                 {
+                    // Into the mempool first: a lock it does not take (its sender has the most locks waiting it allows) is
+                    // not recorded in the wallet, charged or sent, and the caller is told.
+                    if (!await TransactionData.AddToPool(lockTx))
+                    {
+                        SCLogUtility.Log($"vBTC V2 Bridge Lock TX not admitted to the mempool: {scUID}", "VBTCService.CreateBridgeLockTx()");
+                        return (false, MempoolEvictionUtility.SenderLimitRefusal(lockTx) ?? "The mempool did not take the bridge lock.", string.Empty);
+                    }
                     await TransactionData.AddTxToWallet(lockTx, true);
                     await AccountData.UpdateLocalBalance(ownerAddress, lockTx.Fee + lockTx.Amount);
-                    await TransactionData.AddToPool(lockTx);
                     await P2PClient.SendTXMempool(lockTx);
                     SCLogUtility.Log($"vBTC V2 Bridge Lock TX Success. SCUID: {scUID}, TxHash: {lockTx.Hash}, LockId: {lockId}", "VBTCService.CreateBridgeLockTx()");
                     return (true, lockTx.Hash, lockId);
@@ -3407,7 +3432,7 @@ namespace VerifiedXCore.Bitcoin.Services
                     Data = txData
                 };
 
-                unlockTx.Fee = 0.00M;
+                unlockTx.Fee = VerifiedXCore.Services.LedgerIntegrityRules.SpellForNextBlock(0M, legacy: 0.00M);
 
                 // Build and sign
                 unlockTx.Build();
@@ -3505,7 +3530,7 @@ namespace VerifiedXCore.Bitcoin.Services
                     TransactionType = TransactionType.VBTC_V2_BRIDGE_EXIT_TO_BTC,
                     Data = txData
                 };
-                tx.Fee = 0.00M;
+                tx.Fee = VerifiedXCore.Services.LedgerIntegrityRules.SpellForNextBlock(0M, legacy: 0.00M);
                 tx.Build();
                 var privateKey = account.GetPrivKey;
                 var publicKey = account.PublicKey;
@@ -3594,7 +3619,7 @@ namespace VerifiedXCore.Bitcoin.Services
                 };
 
                 // Do NOT call FeeCalcService.CalculateTXFee here — bridge TXs must remain fee-free.
-                completionTx.Fee = 0.00M;
+                completionTx.Fee = VerifiedXCore.Services.LedgerIntegrityRules.SpellForNextBlock(0M, legacy: 0.00M);
                 completionTx.Build();
 
                 var signature = VerifiedXCore.Services.SignatureService.CreateSignature(completionTx.Hash, privateKey, publicKey);
@@ -3690,7 +3715,7 @@ namespace VerifiedXCore.Bitcoin.Services
                     Data = txData
                 };
 
-                failTx.Fee = 0.00M;
+                failTx.Fee = VerifiedXCore.Services.LedgerIntegrityRules.SpellForNextBlock(0M, legacy: 0.00M);
                 failTx.Build();
 
                 var signature = VerifiedXCore.Services.SignatureService.CreateSignature(failTx.Hash, privateKey, publicKey);

@@ -1,4 +1,5 @@
 using Newtonsoft.Json;
+using Newtonsoft.Json.Linq;
 using VerifiedXCore.Bitcoin.FROST.Models;
 using VerifiedXCore.Bitcoin.Models;
 using VerifiedXCore.Data;
@@ -81,22 +82,23 @@ namespace VerifiedXCore.Bitcoin.Services
                     return (null, null);
                 }
 
-                // Derive deterministic nonce from encryption key + contract UID
-                var nonce = DeriveNonce(encryptionKey, smartContractUID);
-
-                // Encrypt with AES-256-GCM
+                // A fresh random nonce for every encryption, kept with the blob. The nonce used to be derived from the key and
+                // the contract UID alone, so two encryptions under one UID (a UID used again for another key) reused it:
+                // the two ciphertexts then gave away each other's plaintext, and the key that authenticates them.
+                var nonce = System.Security.Cryptography.RandomNumberGenerator.GetBytes(NonceBytes);
                 var ciphertext = new byte[plaintextBytes.Length];
                 var tag = new byte[16]; // GCM tag is 16 bytes
 
                 // CrossPlatformAesGcm: AesGcm is not supported on macOS under .NET 6; the managed fallback writes the same format.
-                VerifiedXCore.Privacy.CrossPlatformAesGcm.Encrypt(encryptionKey, nonce, plaintextBytes, ciphertext, tag, null);
+                VerifiedXCore.Privacy.CrossPlatformAesGcm.Encrypt(encryptionKey, nonce, plaintextBytes, ciphertext, tag, BlobBinding(smartContractUID));
 
-                // Combine tag + ciphertext for storage (tag first for easy extraction on decrypt)
-                var combined = new byte[tag.Length + ciphertext.Length];
-                Buffer.BlockCopy(tag, 0, combined, 0, tag.Length);
-                Buffer.BlockCopy(ciphertext, 0, combined, tag.Length, ciphertext.Length);
+                // nonce, tag, ciphertext; marked as this form so a blob of the earlier form is still read as before
+                var combined = new byte[nonce.Length + tag.Length + ciphertext.Length];
+                Buffer.BlockCopy(nonce, 0, combined, 0, nonce.Length);
+                Buffer.BlockCopy(tag, 0, combined, nonce.Length, tag.Length);
+                Buffer.BlockCopy(ciphertext, 0, combined, nonce.Length + tag.Length, ciphertext.Length);
 
-                var encryptedBlob = Convert.ToBase64String(combined);
+                var encryptedBlob = RandomNonceBlobPrefix + Convert.ToBase64String(combined);
 
                 // Clear sensitive data
                 Array.Clear(encryptionKey, 0, encryptionKey.Length);
@@ -119,6 +121,10 @@ namespace VerifiedXCore.Bitcoin.Services
         {
             try
             {
+                if (encryptedBlob.StartsWith(RandomNonceBlobPrefix, StringComparison.Ordinal))
+                    return DecryptRandomNonceBlob(validatorAddress, smartContractUID, encryptedBlob.Substring(RandomNonceBlobPrefix.Length));
+
+                // A blob of the earlier form: its nonce is derived from the key and the contract UID.
                 var combined = Convert.FromBase64String(encryptedBlob);
                 if (combined.Length < 17) // minimum: 16-byte tag + 1 byte ciphertext
                 {
@@ -206,10 +212,52 @@ namespace VerifiedXCore.Bitcoin.Services
             }
         }
 
+        /// <summary>Marks a blob written with a random nonce: <c>v2:</c> then base64 of nonce, tag and ciphertext.</summary>
+        public const string RandomNonceBlobPrefix = "v2:";
+        private const int NonceBytes = 12;
+
+        /// <summary>What a blob is bound to besides its key: the contract it backs up, so it decrypts under no other UID.</summary>
+        private static byte[] BlobBinding(string smartContractUID) => Encoding.UTF8.GetBytes("vfx-frost-backup|" + smartContractUID);
+
+        private static FrostKeyBackupPlaintext? DecryptRandomNonceBlob(string validatorAddress, string smartContractUID, string base64)
+        {
+            var combined = Convert.FromBase64String(base64);
+            if (combined.Length < NonceBytes + 16 + 1) return null;
+            var nonce = combined.AsSpan(0, NonceBytes).ToArray();
+            var tag = combined.AsSpan(NonceBytes, 16).ToArray();
+            var ciphertext = combined.AsSpan(NonceBytes + 16).ToArray();
+            var encryptionKey = DeriveEncryptionKey(validatorAddress);
+            if (encryptionKey == null) return null;
+            try
+            {
+                var plaintext = new byte[ciphertext.Length];
+                VerifiedXCore.Privacy.CrossPlatformAesGcm.Decrypt(encryptionKey, nonce, ciphertext, tag, plaintext, BlobBinding(smartContractUID));
+                return JsonConvert.DeserializeObject<FrostKeyBackupPlaintext>(Encoding.UTF8.GetString(plaintext));
+            }
+            catch (CryptographicException)
+            {
+                LogUtility.Log("[FROST Backup] Decryption failed: GCM authentication tag mismatch (tampered or wrong key)", "FrostKeyBackupService.DecryptKeyPackage");
+                return null;
+            }
+            finally { Array.Clear(encryptionKey, 0, encryptionKey.Length); }
+        }
+
         /// <summary>
-        /// Derive a deterministic 12-byte nonce from the encryption key and contract UID.
-        /// nonce = first 12 bytes of HMAC-SHA256(encryption_key, smartContractUID)
-        /// Safe because each (key, contractUID) pair is unique and never reused with different plaintext.
+        /// Why a decrypted backup is not restored, or null: its group key is not the key the chain records for its
+        /// contract. A blob that decrypts is not enough when an earlier form's reused nonce may have given its key away.
+        /// </summary>
+        internal static string? GroupKeyRefusal(string smartContractUID, string? groupPublicKey)
+        {
+            var onChain = VerifiedXCore.Bitcoin.FROST.FrostDkgGuard.ResolveOnChainGroupPublicKey(smartContractUID);
+            if (string.IsNullOrEmpty(onChain)) return null; // an id that names no contract yet: nothing on chain to judge by
+            return string.Equals(VerifiedXCore.Bitcoin.FROST.FrostKeyShareBinding.NormalizeKey(onChain),
+                    VerifiedXCore.Bitcoin.FROST.FrostKeyShareBinding.NormalizeKey(groupPublicKey), StringComparison.Ordinal)
+                ? null : $"the backup's group key is not the key the chain records for {smartContractUID}";
+        }
+
+        /// <summary>
+        /// The nonce of a blob of the earlier form: the first 12 bytes of HMAC-SHA256(encryption key, contract UID). It is
+        /// only read now: two encryptions under one UID reused it.
         /// </summary>
         private static byte[] DeriveNonce(byte[] encryptionKey, string smartContractUID)
         {
@@ -553,50 +601,49 @@ namespace VerifiedXCore.Bitcoin.Services
                 LogUtility.Log($"[FROST Backup] Starting key recovery for {validatorAddress} from {validators.Count} peers",
                     "FrostKeyBackupService.RecoverKeysFromPeers");
 
-                // Sign recovery request
-                var timestamp = TimeUtil.GetTime();
-                var signMessage = $"frost-recovery.{validatorAddress}.{timestamp}";
-                var signature = VerifiedXCore.Services.SignatureService.AddressSignature(validatorAddress, signMessage);
-                if (signature == "ERROR")
-                {
-                    ErrorLogUtility.LogError("Failed to sign recovery request",
-                        "FrostKeyBackupService.RecoverKeysFromPeers");
-                    return result;
-                }
-
-                var requestPayload = JsonConvert.SerializeObject(new
-                {
-                    RequesterAddress = validatorAddress,
-                    Timestamp = timestamp,
-                    Signature = signature
-                });
-
-                // Every peer is asked: each holds the backups that reached it, and one peer's answer can be missing
-                // shares another holds. The answers are joined per contract (the owner is this validator).
+                // Every peer is asked, several at once and in an order no peer chooses, each with a request signed for it
+                // alone: a request signed once was accepted for five minutes, so one peer that answered slowly made it
+                // expire for every peer asked after it. The answers are joined per contract (the owner is this validator).
                 var copiesByContract = new Dictionary<string, List<BackupRecoveryItem>>(StringComparer.Ordinal);
-                foreach (var validator in validators)
+                var blobsByContract = new Dictionary<string, HashSet<string>>(StringComparer.Ordinal);
+                var merge = new object();
+                var peers = validators.Where(v => v.ValidatorAddress != validatorAddress && !string.IsNullOrEmpty(v.IPAddress))
+                    .OrderBy(_ => System.Security.Cryptography.RandomNumberGenerator.GetInt32(int.MaxValue)).ToList();
+                using var asking = new SemaphoreSlim(PeersAskedAtOnce);
+                await Task.WhenAll(peers.Select(async validator =>
                 {
-                    if (validator.ValidatorAddress == validatorAddress) continue;
-                    if (string.IsNullOrEmpty(validator.IPAddress)) continue;
-
-                    result.PeersAsked++;
-                    var backups = await FetchBackupsFromPeer(validator, requestPayload);
-                    if (backups == null)
+                    await asking.WaitAsync();
+                    try
                     {
-                        result.PeersFailed++;
-                        continue;
+                        var requestPayload = SignedRecoveryRequest(validatorAddress);
+                        if (requestPayload == null) { lock (merge) { result.PeersAsked++; result.PeersFailed++; } return; }
+                        var answer = await FetchBackupsFromPeer(validator, requestPayload);
+                        var backups = answer?.Items;
+                        lock (merge)
+                        {
+                            result.PeersAsked++;
+                            if (backups == null) { result.PeersFailed++; return; }
+                            if (!answer!.Complete) result.PeersIncomplete.Add(validator.ValidatorAddress);
+                            result.FromPeer[validator.ValidatorAddress] = backups.Count;
+                            var fromThisPeer = new HashSet<string>(StringComparer.Ordinal);
+                            foreach (var backup in backups.Where(x => x != null && !string.IsNullOrEmpty(x.SmartContractUID)))
+                            {
+                                if (!fromThisPeer.Add(backup.SmartContractUID)) continue; // a peer keeps one backup a contract for an owner
+                                // One copy a contract from each peer (the reader keeps no more), distinct copies compared by a
+                                // hash of the blob: no peer can take the places of another peer's copy.
+                                if (!blobsByContract.TryGetValue(backup.SmartContractUID, out var seen))
+                                {
+                                    blobsByContract[backup.SmartContractUID] = seen = new HashSet<string>(StringComparer.Ordinal);
+                                    copiesByContract[backup.SmartContractUID] = new List<BackupRecoveryItem>();
+                                }
+                                if (seen.Add(Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(backup.EncryptedBlob)))))
+                                    copiesByContract[backup.SmartContractUID].Add(backup);
+                            }
+                        }
+                        LogUtility.Log($"[FROST Backup] Peer {validator.ValidatorAddress} returned {backups?.Count ?? 0} backup(s)", "FrostKeyBackupService.RecoverKeysFromPeers");
                     }
-                    result.FromPeer[validator.ValidatorAddress] = backups.Count;
-                    LogUtility.Log($"[FROST Backup] Peer {validator.ValidatorAddress} returned {backups.Count} backup(s)",
-                        "FrostKeyBackupService.RecoverKeysFromPeers");
-                    foreach (var backup in backups.Where(x => x != null && !string.IsNullOrEmpty(x.SmartContractUID)))
-                    {
-                        if (!copiesByContract.TryGetValue(backup.SmartContractUID, out var copies))
-                            copiesByContract[backup.SmartContractUID] = copies = new List<BackupRecoveryItem>();
-                        if (!copies.Any(c => c.EncryptedBlob == backup.EncryptedBlob))
-                            copies.Add(backup);
-                    }
-                }
+                    finally { asking.Release(); }
+                }));
 
                 if (copiesByContract.Count == 0)
                 {
@@ -616,6 +663,12 @@ namespace VerifiedXCore.Bitcoin.Services
                         {
                             LogUtility.Log($"[FROST Backup] Failed to decrypt backup for contract {backup.SmartContractUID} — skipping (may be tampered)",
                                 "FrostKeyBackupService.RecoverKeysFromPeers");
+                            continue;
+                        }
+
+                        if (GroupKeyRefusal(backup.SmartContractUID, plaintext.GroupPublicKey) is { } keyRefusal)
+                        {
+                            LogUtility.Log($"[FROST Backup] Not restoring a backup for {backup.SmartContractUID}: {keyRefusal}", "FrostKeyBackupService.RecoverKeysFromPeers");
                             continue;
                         }
 
@@ -640,7 +693,9 @@ namespace VerifiedXCore.Bitcoin.Services
                             }
                         }
 
-                        // Save to local FrostValidatorKeyStore
+                        // Save to local FrostValidatorKeyStore. A share this node did not hold is marked restored: its
+                        // signing records were not in the backups, and it gives no share for a payment opened before now.
+                        var held = FrostValidatorKeyStore.GetKeyPackage(backup.SmartContractUID, validatorAddress);
                         var keyStoreRecord = new FrostValidatorKeyStore
                         {
                             SmartContractUID = backup.SmartContractUID,
@@ -649,7 +704,8 @@ namespace VerifiedXCore.Bitcoin.Services
                             PubkeyPackage = plaintext.PubkeyPackage,
                             GroupPublicKey = plaintext.GroupPublicKey,
                             ParticipantOrderJson = plaintext.ParticipantOrderJson,
-                            CreatedTimestamp = TimeUtil.GetTime()
+                            CreatedTimestamp = TimeUtil.GetTime(),
+                            RestoredFromPeersAt = held != null ? held.RestoredFromPeersAt : TimeUtil.GetTime(),
                         };
 
                         if (FrostValidatorKeyStore.SaveKeyPackage(keyStoreRecord))
@@ -687,7 +743,10 @@ namespace VerifiedXCore.Bitcoin.Services
         public static async Task<PeerRecoveryResult> RecoverKeysFromPeersWithRetry(string validatorAddress, List<VBTCValidator> validators)
         {
             var first = await RecoverKeysFromPeers(validatorAddress, validators);
-            if (first.PeersFailed == 0) return first;
+            if (first.PeersIncomplete.Count > 0)
+                ErrorLogUtility.LogError($"[FROST Backup] {first.PeersIncomplete.Count} peer(s) sent answers longer than any honest one; they were read only in part: {string.Join(", ", first.PeersIncomplete)}",
+                    "FrostKeyBackupService.RecoverKeysFromPeersWithRetry");
+            if (first.PeersFailed == 0 && first.PeersIncomplete.Count == 0) return first;
             LogUtility.Log($"[FROST Backup] {first.PeersFailed} of {first.PeersAsked} peers did not answer; asking every peer once more",
                 "FrostKeyBackupService.RecoverKeysFromPeersWithRetry");
             var second = await RecoverKeysFromPeers(validatorAddress, validators);
@@ -700,18 +759,189 @@ namespace VerifiedXCore.Bitcoin.Services
         internal static Func<VBTCValidator, Task<List<BackupRecoveryItem>?>>? FetchFromPeerForTests;
 
         /// <summary>The backups a peer holds for the requester, an empty list when it holds none, null when it did not answer.</summary>
-        private static async Task<List<BackupRecoveryItem>?> FetchBackupsFromPeer(VBTCValidator validator, string requestPayload)
+        /// <summary>Peers asked at once during a recovery.</summary>
+        public const int PeersAskedAtOnce = 4;
+        /// <summary>
+        /// Items read from one peer's answer, counted whether kept or not: at least this many, and as many as an honest
+        /// answer can hold (<see cref="HonestAnswerItems"/>), so a validator with shares in many vaults is never cut short.
+        /// </summary>
+        public const int MinItemsPerAnswer = 20_000;
+        /// <summary>Bytes read from one peer's answer: at least this, and an honest answer's most at the longest rows.</summary>
+        public const long MinAnswerBytes = 32L * 1024 * 1024;
+        private const long MaxItemBytes = 20 * 1024;
+        /// <summary>
+        /// Bytes the stream may give while one item is read: an honest item is under <see cref="MaxItemBytes"/>, but the
+        /// JSON reader reads ahead to fill a buffer it doubles for the longest token, about 250 KB for an honest 16 KB
+        /// blob. This window is four times that, and is what one item can make the node hold.
+        /// </summary>
+        internal const long ItemWindowBytes = 1024 * 1024;
+
+        /// <summary>
+        /// The most items an honest answer holds: a peer keeps one backup a contract for an owner, so one for each contract on
+        /// chain and each key of a watched vault, and the unbound ones.
+        /// </summary>
+        internal static int HonestAnswerItems()
         {
-            if (FetchFromPeerForTests != null) return await FetchFromPeerForTests(validator);
+            long contracts = 0, keys = 0;
+            try { contracts = VerifiedXCore.Models.SmartContractStateTrei.GetSCST()?.Count() ?? 0; } catch { }
+            try { keys = VerifiedXCore.Bitcoin.Attestation.BtcAttestStore.Db.GetCollection<VerifiedXCore.Bitcoin.Attestation.VaultDepositScriptRow>(VerifiedXCore.Bitcoin.Attestation.BtcAttestStore.Scripts).Count(); } catch { }
+            return (int)Math.Min(int.MaxValue, contracts + keys + MaxUnboundItemsPerAnswer + 64);
+        }
+
+        public static int MaxItemsPerAnswer => Math.Max(MinItemsPerAnswer, HonestAnswerItems());
+        public static long MaxAnswerBytes => Math.Max(MinAnswerBytes, (long)MaxItemsPerAnswer * MaxItemBytes);
+
+        /// <summary>One peer's answer as read: the items kept, and whether the whole answer was read.</summary>
+        public sealed record RecoveryAnswer(List<BackupRecoveryItem> Items, bool Complete);
+        /// <summary>How long one peer has to answer in full: the request, and every read of its body.</summary>
+        public static readonly TimeSpan AnswerDeadline = TimeSpan.FromSeconds(60);
+        /// <summary>Items one answer may carry under ids that name no contract on chain (a ceremony's id before its vault exists).</summary>
+        public const int MaxUnboundItemsPerAnswer = VerifiedXCore.Bitcoin.FROST.Models.FrostPeerKeyBackup.MaxUnboundBackupsPerOwner;
+
+        /// <summary>A recovery request signed now, for one peer; null when this node cannot sign.</summary>
+        private static string? SignedRecoveryRequest(string validatorAddress)
+        {
+            var timestamp = TimeUtil.GetTime();
+            var signature = VerifiedXCore.Services.SignatureService.AddressSignature(validatorAddress, $"frost-recovery.{validatorAddress}.{timestamp}");
+            if (signature == "ERROR")
+            {
+                ErrorLogUtility.LogError("Failed to sign recovery request", "FrostKeyBackupService.RecoverKeysFromPeers");
+                return null;
+            }
+            return JsonConvert.SerializeObject(new { RequesterAddress = validatorAddress, Timestamp = timestamp, Signature = signature });
+        }
+
+        /// <summary>
+        /// One peer's answer, read item by item as it arrives, within <see cref="MaxAnswerBytes"/> and
+        /// <see cref="MaxItemsPerAnswer"/> items (every item counted, kept or not), each with fields no longer than an
+        /// owner's node writes. A peer keeps one backup a contract for an owner, so the first item for a contract is kept
+        /// and any later one for it is not; items under ids that name no contract on chain are kept up to
+        /// <see cref="MaxUnboundItemsPerAnswer"/>. What is kept is therefore one item a contract, whatever the peer sends.
+        /// </summary>
+        internal static async Task<RecoveryAnswer?> ReadRecoveryAnswerAsync(Stream body, CancellationToken deadline = default, Func<string, bool>? namesAContract = null,
+            int? maxItems = null, long? maxBytes = null)
+        {
+            var itemLimit = maxItems ?? MaxItemsPerAnswer;
+            namesAContract ??= uid => !string.IsNullOrEmpty(VerifiedXCore.Bitcoin.FROST.FrostDkgGuard.ResolveOnChainGroupPublicKey(uid));
+            var items = new List<BackupRecoveryItem>();
+            var seen = new HashSet<string>(StringComparer.Ordinal);
+            var unbound = 0;
+            var read = 0;
+            using var limited = new BoundedReadStream(body, maxBytes ?? MaxAnswerBytes, deadline);
+            using var text = new StreamReader(limited, Encoding.UTF8);
+            using var json = new JsonTextReader(text) { MaxDepth = 8 };
+            var serializer = JsonSerializer.CreateDefault();
+            bool? success = null;
+            // Every token is read within the window, at any level: a long string anywhere in the answer, under a name read
+            // or skipped, ends the answer before it is held.
+            async Task<bool> Next()
+            {
+                limited.BeginItem(ItemWindowBytes);
+                try { return await json.ReadAsync(deadline); }
+                finally { limited.EndItem(); }
+            }
+            async Task<bool?> NextBoolean()
+            {
+                limited.BeginItem(ItemWindowBytes);
+                try { return await json.ReadAsBooleanAsync(deadline); }
+                finally { limited.EndItem(); }
+            }
+            try
+            {
+                while (await Next())
+                {
+                    if (json.TokenType != JsonToken.PropertyName || json.Depth != 1) continue;
+                    var name = (string?)json.Value;
+                    if (string.Equals(name, "Success", StringComparison.OrdinalIgnoreCase)) { success = await NextBoolean(); continue; }
+                    if (!string.Equals(name, "Backups", StringComparison.OrdinalIgnoreCase)) continue;
+                    if (!await Next() || json.TokenType != JsonToken.StartArray) continue;
+                    while (await Next() && json.TokenType != JsonToken.EndArray)
+                    {
+                        if (++read > itemLimit) return new RecoveryAnswer(items, Complete: false);
+                        // Each item is read token by token, with the deadline, and within a window no honest item comes
+                        // near: one longer than that ends the answer before it is held, whatever field it is in.
+                        limited.BeginItem(ItemWindowBytes);
+                        var token = await JToken.ReadFromAsync(json, deadline);
+                        limited.EndItem();
+                        BackupRecoveryItem? item;
+                        try { item = token is JObject obj ? obj.ToObject<BackupRecoveryItem>(serializer) : null; }
+                        catch (JsonException) { continue; }
+                        if (item == null || string.IsNullOrEmpty(item.SmartContractUID)) continue;
+                        if (item.SmartContractUID.Length > VerifiedXCore.Bitcoin.FROST.Models.FrostPeerKeyBackup.MaxIdChars
+                            || item.EncryptedBlob.Length > VerifiedXCore.Bitcoin.FROST.Models.FrostPeerKeyBackup.MaxBlobChars + RandomNonceBlobPrefix.Length + 64
+                            || item.PlaintextHash.Length > VerifiedXCore.Bitcoin.FROST.Models.FrostPeerKeyBackup.PlaintextHashChars) continue;
+                        if (!seen.Add(item.SmartContractUID)) continue; // one a contract from one peer
+                        if (!namesAContract(item.SmartContractUID) && ++unbound > MaxUnboundItemsPerAnswer) continue;
+                        items.Add(item);
+                    }
+                }
+            }
+            catch (BoundedReadStream.LimitReached) { return new RecoveryAnswer(items, Complete: false); } // longer than any honest one: what came first is kept
+            return success == false ? null : new RecoveryAnswer(items, Complete: true);
+        }
+
+        /// <summary>A stream that ends with <see cref="LimitReached"/> once more than its limit has been read.</summary>
+        private sealed class BoundedReadStream : Stream
+        {
+            public sealed class LimitReached : IOException { public LimitReached() : base("The answer is longer than any honest one.") { } }
+            private readonly Stream _inner;
+            private readonly long _limit;
+            private readonly CancellationToken _deadline;
+            private long _read;
+            private long _itemEnd = long.MaxValue;
+            /// <param name="deadline">Applies to every read: the reader above passes no token of its own down to the stream.</param>
+            public BoundedReadStream(Stream inner, long limit, CancellationToken deadline) { _inner = inner; _limit = limit; _deadline = deadline; }
+            /// <summary>From here at most <paramref name="window"/> more bytes are read until <see cref="EndItem"/>.</summary>
+            public void BeginItem(long window) => _itemEnd = _read + window;
+            public void EndItem() => _itemEnd = long.MaxValue;
+            public override bool CanRead => true;
+            public override bool CanSeek => false;
+            public override bool CanWrite => false;
+            public override long Length => throw new NotSupportedException();
+            public override long Position { get => _read; set => throw new NotSupportedException(); }
+            public override void Flush() { }
+            public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+            public override void SetLength(long value) => throw new NotSupportedException();
+            public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+            public override int Read(byte[] buffer, int offset, int count)
+            {
+                _deadline.ThrowIfCancellationRequested(); // a read under way is ended by the caller closing the body at the deadline
+                return Count(_inner.Read(buffer, offset, count));
+            }
+            public override async Task<int> ReadAsync(byte[] buffer, int offset, int count, CancellationToken cancellationToken)
+            {
+                using var both = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, _deadline);
+                return Count(await _inner.ReadAsync(buffer, offset, count, both.Token));
+            }
+            public override async ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default)
+            {
+                using var both = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, _deadline);
+                return Count(await _inner.ReadAsync(buffer, both.Token));
+            }
+            private int Count(int n)
+            {
+                _read += n;
+                if (_read > _limit || _read > _itemEnd) throw new LimitReached();
+                return n;
+            }
+        }
+
+        private static async Task<RecoveryAnswer?> FetchBackupsFromPeer(VBTCValidator validator, string requestPayload)
+        {
+            if (FetchFromPeerForTests != null) return await FetchFromPeerForTests(validator) is { } given ? new RecoveryAnswer(given, Complete: true) : null;
             try
             {
                 var url = $"http://{validator.IPAddress}:{Globals.FrostValidatorPort}/frost/backup/recover";
-                var content = new StringContent(requestPayload, Encoding.UTF8, "application/json");
-                var response = await _backupHttpClient.PostAsync(url, content);
+                // One deadline for the request and every read of its body: a peer that sends its headers and then holds
+                // the body open is given up on at the deadline.
+                using var deadline = new CancellationTokenSource(AnswerDeadline);
+                using var request = new HttpRequestMessage(HttpMethod.Post, url) { Content = new StringContent(requestPayload, Encoding.UTF8, "application/json") };
+                using var response = await _backupHttpClient.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, deadline.Token);
                 if (!response.IsSuccessStatusCode) return null;
-                var responseObj = JsonConvert.DeserializeObject<BackupRecoveryResponse>(await response.Content.ReadAsStringAsync());
-                if (responseObj == null) return null;
-                return responseObj.Backups ?? new List<BackupRecoveryItem>();
+                await using var body = await response.Content.ReadAsStreamAsync(deadline.Token);
+                // Whatever read is under way at the deadline, closing the body ends it.
+                using var closeAtDeadline = deadline.Token.Register(() => { try { response.Dispose(); } catch { } });
+                return await ReadRecoveryAnswerAsync(body, deadline.Token);
             }
             catch (Exception ex)
             {
@@ -728,6 +958,11 @@ namespace VerifiedXCore.Bitcoin.Services
             public int Restored => RestoredContracts.Count;
             public int PeersAsked { get; set; }
             public int PeersFailed { get; set; }
+            /// <summary>
+            /// Peers whose answer was longer than any honest one and was read only in part: what they hold past that may be
+            /// missing. The recovery reports it and asks again.
+            /// </summary>
+            public HashSet<string> PeersIncomplete { get; } = new(StringComparer.Ordinal);
             /// <summary>Backups each answering peer returned.</summary>
             public Dictionary<string, int> FromPeer { get; } = new(StringComparer.Ordinal);
         }

@@ -43,6 +43,7 @@ namespace VerifiedXCore.Arbiter
 
         public void Configure(IApplicationBuilder app)
         {
+            app.Use(VerifiedXCore.Utilities.BoundedJsonBodies.ForPaths(_ => VerifiedXCore.Utilities.BoundedJson.Arbiter, VerifiedXCore.Utilities.BoundedJson.ArbiterBodies));
             app.UseRouting();
             app.UseEndpoints(endpoints =>
             {
@@ -87,11 +88,29 @@ namespace VerifiedXCore.Arbiter
                         return;
                     }
 
-                    var publicKey = BitcoinAccount.CreatePublicKeyForArbiter(Globals.ArbiterSigningAddress.GetKey, scUID);
+                    if (Globals.ArbiterSigningAddress == null)
+                    {
+                        context.Response.StatusCode = StatusCodes.Status503ServiceUnavailable;
+                        await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = "This arbiter has no signing key." }, Formatting.Indented));
+                        return;
+                    }
 
-                    var message = publicKey + scUID;
-
-                    var signature = Services.SignatureService.CreateSignature(message, Globals.ArbiterSigningAddress.GetPrivKey, Globals.ArbiterSigningAddress.PublicKey);
+                    // A contract id the key derivation cannot use is the caller's mistake, answered as one, not a server fault.
+                    string publicKey;
+                    string signature;
+                    try
+                    {
+                        publicKey = BitcoinAccount.CreatePublicKeyForArbiter(Globals.ArbiterSigningAddress.GetKey, scUID);
+                        var message = publicKey + scUID;
+                        signature = Services.SignatureService.CreateSignature(message, Globals.ArbiterSigningAddress.GetPrivKey, Globals.ArbiterSigningAddress.PublicKey);
+                    }
+                    catch (Exception ex)
+                    {
+                        ErrorLogUtility.LogError($"Deposit address for {scUID} could not be made: {ex.Message}", "ArbiterStartup.depositaddress");
+                        context.Response.StatusCode = StatusCodes.Status400BadRequest;
+                        await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = "No deposit address can be made for this contract id." }, Formatting.Indented));
+                        return;
+                    }
 
                     if (signature == "F")
 

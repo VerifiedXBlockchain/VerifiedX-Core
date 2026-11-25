@@ -6,7 +6,9 @@ namespace VerifiedXCore.Utilities
 {
     public class ErrorLogUtility
     {
-        public static async void LogError(string message, string location)
+        public static void LogError(string message, string location) => VerifiedXCore.Utilities.SafeTask.Forget(LogErrorAsync(message, location), "ErrorLogUtility.LogError");
+
+        private static async Task LogErrorAsync(string message, string location)
         {
             try
             {
@@ -47,7 +49,7 @@ namespace VerifiedXCore.Utilities
                 
                 if (File.Exists(path + "errorlog.txt")) 
                 { 
-                    var bytes = File.ReadAllBytes(path + "errorlog.txt").Length;
+                    var bytes = LogFile.Length(path + "errorlog.txt");
                     var totalMB = bytes / 1024 / 1024;
                     if (totalMB > 100)
                         writeLog = false; 
@@ -57,7 +59,7 @@ namespace VerifiedXCore.Utilities
 
                 if (writeLog)
                 {
-                    await File.AppendAllTextAsync(path + "errorlog.txt", Environment.NewLine + text);
+                    await LogFile.AppendAsync(path + "errorlog.txt", Environment.NewLine + text);
                     //VFXLogging.LogInfo(message, location);
                 }
                     

@@ -71,7 +71,9 @@ namespace VerifiedXCore.Models
             return conListJson;
         }
 
-        public static async void WriteToConHistFile(string text)
+        public static void WriteToConHistFile(string text) => VerifiedXCore.Utilities.SafeTask.Forget(WriteToConHistFileAsync(text), "ConnectionHistory.WriteToConHistFile");
+
+        private static async Task WriteToConHistFileAsync(string text)
         {
             try
             {

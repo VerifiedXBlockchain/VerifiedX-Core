@@ -60,6 +60,134 @@ namespace VerifiedXCore.Bitcoin.FROST.Models
         /// </summary>
         public const long StaleGraceSeconds = 30L * 24 * 60 * 60;
 
+        /// <summary>An owner's address and a contract or ceremony id are at most as long as a ceremony's ids.</summary>
+        public const int MaxIdChars = FrostSessionStorage.MAX_SESSION_ID_LENGTH;
+        /// <summary>The encrypted key package, as the owner's node sends it.</summary>
+        public const int MaxBlobChars = 16 * 1024;
+        /// <summary>The plaintext hash is a SHA-256 in hex.</summary>
+        public const int PlaintextHashChars = 64;
+        /// <summary>A group public key in hex, compressed or not, as some nodes write it with a 0x in front.</summary>
+        public const int MaxGroupKeyChars = 132;
+
+        /// <summary>
+        /// Recovery answers this node is sending at once, each counted at <see cref="AnswerBatchBytes"/>, for the network
+        /// the request came from and for the node. A request signed once could be sent many times at once, each answer
+        /// held while a slow reader took it. One that does not fit is answered 503 before anything is read for it, and
+        /// may be asked again; an answer for one network never waits on another's.
+        /// </summary>
+        internal static readonly BoundedJsonBodies.BodiesInProgress AnswersInProgress = new(perSource: 32L * 1024 * 1024, total: 128L * 1024 * 1024);
+
+        /// <summary>
+        /// Rows a recovery answer reads and writes at a time. The answer is written batch by batch, so serving one holds
+        /// at most <see cref="AnswerBatchBytes"/> however many backups the owner has.
+        /// </summary>
+        public const int AnswerBatchRows = 64;
+
+        /// <summary>The most one recovery answer holds at once: a batch of the longest rows, as read and as written.</summary>
+        public const long AnswerBatchBytes = 4L * AnswerBatchRows * (MaxBlobChars + 2 * MaxIdChars + PlaintextHashChars + MaxGroupKeyChars + 64);
+
+        /// <summary>The ids of the owner's backups, read without the backups themselves being kept.</summary>
+        public static List<long> GetBackupIdsForOwner(string ownerAddress)
+        {
+            try { return GetDb().Query().Where(x => x.OwnerAddress == ownerAddress).Select(x => x.Id).ToList(); }
+            catch (Exception ex)
+            {
+                ErrorLogUtility.LogError($"Failed to list FROST peer backups for owner {ownerAddress}: {ex.Message}", "FrostPeerKeyBackup.GetBackupIdsForOwner");
+                return new List<long>();
+            }
+        }
+
+        /// <summary>
+        /// The backups with these ids. A row kept before the field limits that is longer than any owner's node writes is
+        /// deleted here, not returned: it is not a backup.
+        /// </summary>
+        public static List<FrostPeerKeyBackup> GetBackupsWithinLimits(IEnumerable<long> ids)
+        {
+            var kept = new List<FrostPeerKeyBackup>();
+            var db = GetDb();
+            foreach (var id in ids)
+            {
+                var backup = db.FindById(id);
+                if (backup == null) continue;
+                if (!ExceedsLengths(backup)) { kept.Add(backup); continue; }
+                try { db.Delete(backup.Id); }
+                catch (Exception ex) { ErrorLogUtility.LogError($"Deleting an over-long FROST peer backup failed: {ex.Message}", "FrostPeerKeyBackup.GetBackupsWithinLimits"); }
+            }
+            return kept;
+        }
+
+        /// <summary>
+        /// Writes the owner's recovery answer, <c>{"Success":true,"Backups":[...]}</c>, to <paramref name="body"/>, reading
+        /// and writing <see cref="AnswerBatchRows"/> backups at a time. Returns how many were sent.
+        /// </summary>
+        public static async Task<int> WriteRecoveryAnswerAsync(Stream body, string ownerAddress)
+        {
+            var ids = GetBackupIdsForOwner(ownerAddress);
+            var sent = 0;
+            await using var text = new StreamWriter(body, new System.Text.UTF8Encoding(false), 16 * 1024, leaveOpen: true);
+            using var json = new Newtonsoft.Json.JsonTextWriter(text) { CloseOutput = false };
+            await json.WriteStartObjectAsync();
+            await json.WritePropertyNameAsync("Success");
+            await json.WriteValueAsync(true);
+            await json.WritePropertyNameAsync("Backups");
+            await json.WriteStartArrayAsync();
+            foreach (var batch in ids.Chunk(AnswerBatchRows))
+            {
+                foreach (var b in GetBackupsWithinLimits(batch))
+                {
+                    await json.WriteStartObjectAsync();
+                    await json.WritePropertyNameAsync("SmartContractUID"); await json.WriteValueAsync(b.SmartContractUID);
+                    await json.WritePropertyNameAsync("EncryptedBlob"); await json.WriteValueAsync(b.EncryptedBlob);
+                    await json.WritePropertyNameAsync("PlaintextHash"); await json.WriteValueAsync(b.PlaintextHash);
+                    await json.WritePropertyNameAsync("Version"); await json.WriteValueAsync(b.Version);
+                    await json.WriteEndObjectAsync();
+                    sent++;
+                }
+                await json.FlushAsync();
+            }
+            await json.WriteEndArrayAsync();
+            await json.WriteEndObjectAsync();
+            await json.FlushAsync();
+            return sent;
+        }
+
+        /// <summary>
+        /// Why a backup with these fields is not kept, or null. Each field is held to what the owner's node writes: a row
+        /// is then at most about 16 KB, whoever sent it.
+        /// </summary>
+        public static string? FieldRefusal(string? ownerAddress, string? smartContractUID, string? encryptedBlob, string? plaintextHash, string? groupPublicKey)
+        {
+            if ((ownerAddress?.Length ?? 0) > MaxIdChars) return $"The owner address is longer than {MaxIdChars} characters.";
+            if ((smartContractUID?.Length ?? 0) > MaxIdChars) return $"The contract id is longer than {MaxIdChars} characters.";
+            if ((encryptedBlob?.Length ?? 0) > MaxBlobChars) return "EncryptedBlob exceeds 16 KB limit";
+            if (!string.IsNullOrEmpty(plaintextHash) && (plaintextHash.Length != PlaintextHashChars || !IsHex(plaintextHash)))
+                return "PlaintextHash is not a SHA-256 in hex.";
+            if (!string.IsNullOrEmpty(groupPublicKey) && (groupPublicKey.Length > MaxGroupKeyChars
+                    || !IsHex(groupPublicKey.StartsWith("0x", StringComparison.OrdinalIgnoreCase) ? groupPublicKey.Substring(2) : groupPublicKey)))
+                return "GroupPublicKey is not a public key in hex.";
+            return null;
+        }
+
+        private static bool IsHex(string text)
+        {
+            foreach (var c in text)
+                if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F'))) return false;
+            return true;
+        }
+
+        /// <summary>Whether a stored row has a field longer than any owner's node writes. Its form is not judged here.</summary>
+        public static bool ExceedsLengths(FrostPeerKeyBackup backup) =>
+            backup.OwnerAddress.Length > MaxIdChars || backup.SmartContractUID.Length > MaxIdChars || backup.EncryptedBlob.Length > MaxBlobChars
+            || backup.PlaintextHash.Length > PlaintextHashChars || backup.GroupPublicKey.Length > MaxGroupKeyChars;
+
+        /// <summary>
+        /// The owner's backups. A row kept before the field limits that is longer than any owner's node writes is deleted
+        /// here: it is not a backup. A row of honest lengths is kept and sent whatever the form of its fields, so no real
+        /// backup is lost to these limits.
+        /// </summary>
+        public static List<FrostPeerKeyBackup> GetBackupsForOwnerWithinLimits(string ownerAddress) =>
+            GetBackupsWithinLimits(GetBackupIdsForOwner(ownerAddress));
+
         #region Database Methods
 
         private static ILiteCollection<FrostPeerKeyBackup> GetDb()

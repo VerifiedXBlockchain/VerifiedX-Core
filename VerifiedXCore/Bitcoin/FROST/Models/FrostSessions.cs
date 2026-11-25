@@ -396,6 +396,157 @@ namespace VerifiedXCore.Bitcoin.FROST.Models
         }
 
         /// <summary>
+        /// What a vault's key ceremony leader holds on chain: the fee of the largest vault creation its owner then sends.
+        /// Nothing is charged for it. A ceremony's leader is the vault's owner, whose account pays that creation, so an
+        /// honest leader always holds it; a key made up for the occasion does not.
+        /// </summary>
+        public static decimal MinDkgLeaderBalance => VerifiedXCore.Services.FeeCalcService.CalculateFeeForBytes(Globals.MaxVbtcVaultTxSizeBytes);
+
+        /// <summary>
+        /// Why this leader may not start a vault's key ceremony, or null: its account on chain holds less than
+        /// <see cref="MinDkgLeaderBalance"/>. Read from the state, as every validator holds it.
+        /// </summary>
+        public static string? LeaderBalanceRefusal(string? leaderAddress, Func<string, decimal?>? balanceOf = null)
+        {
+            if (string.IsNullOrEmpty(leaderAddress)) return "A key ceremony needs a leader.";
+            var balance = (balanceOf ?? (a => VerifiedXCore.Data.StateData.GetSpecificAccountStateTrei(a)?.Balance))(leaderAddress);
+            return balance >= MinDkgLeaderBalance ? null
+                : $"A key ceremony is led by the vault's owner, whose account holds at least {MinDkgLeaderBalance} VFX on chain (nothing is charged for it).";
+        }
+
+        /// <summary>
+        /// What all key ceremonies on this validator may hold in memory: commitment sets, shares, secrets and key packages.
+        /// A session is kept for an hour (<see cref="CleanupOldSessions"/>) and gives up its place after
+        /// <see cref="DKG_UNPROGRESSED_SECONDS"/> without progress, so places alone did not bound it: a sender that kept
+        /// opening ceremonies with funded keys kept every commitment set it sent for the hour. A mainnet ceremony holds
+        /// about 1 to 3 MB here. The bound follows the validator set (<see cref="HonestCeremonyBytes"/>) up to
+        /// <see cref="PlannedMaxValidators"/>: three networks' worth of ceremonies, and never less than 256 MB.
+        /// </summary>
+        public static long MAX_DKG_HELD_BYTES => Math.Max(256L * 1024 * 1024, 3 * MAX_DKG_HELD_BYTES_PER_SOURCE);
+        /// <summary>
+        /// What the ceremonies started from one network (a /24 or /64) may hold: its <see cref="MAX_DKG_SESSIONS_PER_SOURCE"/>
+        /// places, each with an honest ceremony of today's validator set, and never less than 32 MB.
+        /// </summary>
+        public static long MAX_DKG_HELD_BYTES_PER_SOURCE =>
+            Math.Max(32L * 1024 * 1024, MAX_DKG_SESSIONS_PER_SOURCE * HonestCeremonyBytes(ActiveValidatorCount()));
+
+        /// <summary>The most validators the ceremony budgets are sized for. Past it, they stay at this size.</summary>
+        public const int PlannedMaxValidators = 350;
+
+        /// <summary>
+        /// About what one honest ceremony of <paramref name="validators"/> participants holds here, as text: each
+        /// participant's commitment (a 33-byte coefficient in hex for each signer the key needs, at a two-thirds
+        /// threshold), and the shares made from them. 350 validators: about 12 MB.
+        /// </summary>
+        public static long HonestCeremonyBytes(int validators)
+        {
+            var v = Math.Clamp(validators, 1, PlannedMaxValidators);
+            var coefficients = (long)Math.Ceiling(v * 0.67);
+            return 2L * v * (coefficients * 66 + 512) + 2048L * v;
+        }
+
+        private static int ActiveValidatorCount()
+        {
+            try { return VerifiedXCore.Bitcoin.Services.VBTCValidatorRegistry.GetActiveValidatorCount(); }
+            catch { return 0; }
+        }
+        private static readonly object DkgMemoryGate = new();
+        /// <summary>Room taken for state a session is about to keep, until it keeps it (<see cref="MakeRoomForDkgState"/>).</summary>
+        private static readonly Dictionary<DKGSession, long> DkgReserved = new(ReferenceEqualityComparer.Instance);
+        /// <summary>
+        /// Starts given room and not yet ended: counted with the sessions kept, so starts at once each see the others'
+        /// state before any of them is kept.
+        /// </summary>
+        private static readonly HashSet<DKGSession> DkgStarting = new(ReferenceEqualityComparer.Instance);
+
+        /// <summary>Sessions holding taken room now: none once every request that took it has ended.</summary>
+        internal static int DkgReservedCount { get { lock (DkgMemoryGate) return DkgReserved.Count + DkgStarting.Count; } }
+
+        /// <summary>Room taken by <see cref="MakeRoomForDkgState"/>, given back when the work it was taken for ends.</summary>
+        public sealed class DkgRoom : IDisposable
+        {
+            private readonly DKGSession _session;
+            private long _bytes;
+            private bool _starting;
+            internal DkgRoom(DKGSession session, long bytes, bool starting) { _session = session; _bytes = bytes; _starting = starting; }
+
+            public void Dispose()
+            {
+                lock (DkgMemoryGate)
+                {
+                    if (_starting) { DkgStarting.Remove(_session); _starting = false; }
+                    var bytes = _bytes;
+                    _bytes = 0;
+                    if (bytes == 0 || !DkgReserved.TryGetValue(_session, out var held)) return;
+                    if (held > bytes) DkgReserved[_session] = held - bytes;
+                    else DkgReserved.Remove(_session);
+                }
+            }
+        }
+
+        /// <summary>About what a session holds in memory, as text.</summary>
+        public static long DkgHeldBytes(DKGSession s) => 2L * (
+            s.Round1Commitments.Values.Sum(v => (long)(v?.Length ?? 0)) + s.ReceivedSharesJson.Values.Sum(v => (long)(v?.Length ?? 0))
+            + (s.GeneratedSharesJson?.Length ?? 0) + (s.Round1SecretPackage?.Length ?? 0) + (s.Round2Secret?.Length ?? 0)
+            + (s.FinalKeyPackage?.Length ?? 0) + (s.FinalPubkeyPackage?.Length ?? 0));
+
+        /// <summary>
+        /// Whether a session may be dropped to make room: it holds no place (finished, given up, or without progress for
+        /// <see cref="DKG_UNPROGRESSED_SECONDS"/>), and a finished one only once its leader has had
+        /// <see cref="DKG_LEADER_CAP_WINDOW_SECONDS"/> to collect its result.
+        /// </summary>
+        public static bool DkgMayBeDropped(DKGSession s, long nowSeconds) =>
+            !DkgIsUnderWay(s, nowSeconds) && (!s.IsCompleted || s.StartTimestamp < nowSeconds - DKG_LEADER_CAP_WINDOW_SECONDS);
+
+        /// <summary>
+        /// Room for <paramref name="session"/> to keep <paramref name="incomingBytes"/> more, within
+        /// <see cref="MAX_DKG_HELD_BYTES_PER_SOURCE"/> for its network and <see cref="MAX_DKG_HELD_BYTES"/> in all. Where
+        /// there is none, sessions that may be dropped (<see cref="DkgMayBeDropped"/>) are, oldest first: first its own
+        /// network's, then any. Null when there is room; otherwise why not, and the caller refuses what it was given.
+        /// The room is taken here, under the same lock that judged it, and held by <paramref name="room"/> until the
+        /// caller has kept what it was taken for: two requests at once cannot both be given the same room.
+        /// <paramref name="starting"/>: the session is a start not yet kept; while its room is held its own state is
+        /// counted for every other request.
+        /// </summary>
+        public static string? MakeRoomForDkgState(DKGSession session, long incomingBytes, long nowSeconds, out DkgRoom? room, bool starting = false)
+        {
+            room = null;
+            lock (DkgMemoryGate)
+            {
+                bool SameSource(DKGSession s) => string.Equals(s.SourceIp, session.SourceIp, StringComparison.Ordinal);
+                long Reserved(DKGSession s) => DkgReserved.TryGetValue(s, out var r) ? r : 0;
+                var others = DKGSessions.Values.Concat(DkgStarting).Distinct(ReferenceEqualityComparer.Instance).Cast<DKGSession>()
+                    .Where(s => !ReferenceEquals(s, session)).ToList();
+                var held = others.ToDictionary(s => s, s => DkgHeldBytes(s) + Reserved(s));
+                var mine = DkgHeldBytes(session) + Reserved(session);
+                long OfSource() => mine + held.Where(h => SameSource(h.Key)).Sum(h => h.Value);
+                long OfAll() => mine + held.Values.Sum();
+
+                bool DropOldest(Func<DKGSession, bool> among, Func<long> holding, long limit)
+                {
+                    foreach (var s in others.Where(s => among(s) && held.ContainsKey(s) && Reserved(s) == 0 && !DkgStarting.Contains(s) && DkgMayBeDropped(s, nowSeconds)).OrderBy(s => s.StartTimestamp).ToList())
+                    {
+                        if (holding() + incomingBytes <= limit) break;
+                        AbortDkg(s);
+                        DKGSessions.TryRemove(s.SessionId, out _);
+                        held.Remove(s);
+                    }
+                    return holding() + incomingBytes <= limit;
+                }
+
+                if (!DropOldest(SameSource, OfSource, MAX_DKG_HELD_BYTES_PER_SOURCE))
+                    return "Busy: the key ceremonies started from this network hold all the memory they may. Ask again later.";
+                if (!DropOldest(_ => true, OfAll, MAX_DKG_HELD_BYTES))
+                    return "Busy: key ceremonies hold all the memory this validator gives them. Ask again later.";
+                // Nothing is held for no bytes: an entry is only ever made for room that its release gives back.
+                if (incomingBytes > 0) DkgReserved[session] = Reserved(session) + incomingBytes;
+                if (starting) DkgStarting.Add(session);
+                room = new DkgRoom(session, Math.Max(0, incomingBytes), starting);
+                return null;
+            }
+        }
+
+        /// <summary>
         /// Why a re-key's start is not taken from this leader: only a validator that may hold a key share leads one (active,
         /// funded, its stake bonded for the minimum age, as for a ceremony's participants). Null when it may.
         /// </summary>

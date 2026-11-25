@@ -107,12 +107,12 @@ namespace VerifiedXCore.Bitcoin.FROST
                 // with by that key's UID (the vault's own UID for its first key), every input must be held under that
                 // key, and everything else below is judged for the vault the key belongs to.
                 var watchedKey = Attestation.BtcVaultKeys.KeyRow(request.SmartContractUID);
-                var vaultUid = watchedKey?.SmartContractUID ?? request.SmartContractUID;
+                var vaultUid = VaultOf(request.SmartContractUID);
                 var depositAddress = watchedKey?.DepositAddress ?? ResolveDepositAddress(request.SmartContractUID);
                 if (string.IsNullOrWhiteSpace(depositAddress)) return (false, "Contract deposit address could not be resolved");
 
                 Script depositScript;
-                try { depositScript = BitcoinAddress.Create(depositAddress, Globals.BTCNetwork).ScriptPubKey; }
+                try { depositScript = VerifiedXCore.Utilities.BoundedDecode.BitcoinAddress(depositAddress, Globals.BTCNetwork).ScriptPubKey; }
                 catch (Exception ex) { return (false, $"Contract deposit address invalid: {ApiErrorText.For(ex)}"); }
 
                 for (int i = 0; i < inputCount; i++)
@@ -235,7 +235,7 @@ namespace VerifiedXCore.Bitcoin.FROST
                 {
                     destinationScript = pinnedDestinationScriptHex != null
                         ? Script.FromHex(pinnedDestinationScriptHex)
-                        : BitcoinAddress.Create(destination, Globals.BTCNetwork).ScriptPubKey;
+                        : VerifiedXCore.Utilities.BoundedDecode.BitcoinAddress(destination, Globals.BTCNetwork).ScriptPubKey;
                 }
                 catch (Exception ex) { return (false, $"Authorized destination invalid: {ApiErrorText.For(ex)}"); }
 
@@ -369,8 +369,16 @@ namespace VerifiedXCore.Bitcoin.FROST
         /// when a ceremony starts and again just before Round 2 gives the share: a signing session lives longer than a
         /// cancellation vote waits for a ceremony to end.
         /// </summary>
+        /// <summary>
+        /// The vault a key belongs to: a vault the chain watches has one UID per key (its own UID for its first key), and
+        /// a signing session names the key. Any other UID is a vault's own. Every check that asks about a vault's
+        /// withdrawals or exits maps its UID here first, so a session's key UID and the vault's UID give one answer.
+        /// </summary>
+        public static string VaultOf(string uid) => Attestation.BtcVaultKeys.VaultOf(uid) is { Length: > 0 } vault ? vault : uid;
+
         public static string? WithdrawalNoLongerSignable(string wrh, string vaultUid)
         {
+            vaultUid = VaultOf(vaultUid); // a session names its key; the withdrawal is the vault's
             if (VBTCWithdrawalStoreRebuildService.IsRunning)
                 return "The withdrawal store is being rebuilt; signing resumes when it finishes";
             if (VBTCWithdrawalCancellation.GetCancellationsFor(wrh, vaultUid).Any(c => c.IsProcessed && c.IsApproved))
@@ -588,6 +596,7 @@ namespace VerifiedXCore.Bitcoin.FROST
         /// </summary>
         public static string? BridgeExitNoLongerSignable(string reference, string scUID)
         {
+            scUID = VaultOf(scUID); // a session names its key; the exit draws on the vault
             var (exit, _, reason) = ResolveBtcExitForContract(reference, scUID);
             if (exit == null) return reason;
             if (exit.IsFailedRecord) return "Bridge exit has failed";
@@ -615,6 +624,7 @@ namespace VerifiedXCore.Bitcoin.FROST
         public static (VBTCBridgeBtcExitState? Exit, long CapSats, string Reason) ResolveBtcExitForContract(string syntheticHash, string scUID)
         {
             if (string.IsNullOrWhiteSpace(scUID)) return (null, 0, "SmartContractUID required for bridge exit signing");
+            scUID = VaultOf(scUID); // the reference and the allocations name the vault, whichever of its keys signs
             if (string.IsNullOrWhiteSpace(syntheticHash) || !syntheticHash.StartsWith(BtcExitPrefix, StringComparison.OrdinalIgnoreCase))
                 return (null, 0, "Not a bridge exit reference");
 

@@ -6,7 +6,9 @@ namespace VerifiedXCore.Utilities
 {
     public class BeaconLogUtility
     {
-        public static async void Log(string message, string location, bool firstEntry = false)
+        public static void Log(string message, string location, bool firstEntry = false) => VerifiedXCore.Utilities.SafeTask.Forget(LogAsync(message, location, firstEntry), "BeaconLogUtility.Log");
+
+        private static async Task LogAsync(string message, string location, bool firstEntry = false)
         {
             try
             {
@@ -42,12 +44,12 @@ namespace VerifiedXCore.Utilities
                 }
                 if (firstEntry == true)
                 {
-                    await File.AppendAllTextAsync(path + "beaconlog.txt", Environment.NewLine + " ");
+                    await LogFile.AppendAsync(path + "beaconlog.txt", Environment.NewLine + " ");
 
 
                 }
 
-                await File.AppendAllTextAsync(path + "beaconlog.txt", Environment.NewLine + text);
+                await LogFile.AppendAsync(path + "beaconlog.txt", Environment.NewLine + text);
             }
             catch (Exception ex)
             {

@@ -991,7 +991,7 @@ namespace VerifiedXCore.Bitcoin.Services
             // NEW-26: the address must be the group key's Taproot address (consensus derives it the same way).
             try
             {
-                if (BitcoinAddress.Create(taprootAddress, Globals.BTCNetwork) is not TaprootAddress
+                if (VerifiedXCore.Utilities.BoundedDecode.BitcoinAddress(taprootAddress, Globals.BTCNetwork) is not TaprootAddress
                     || FrostDkgAttestation.DeriveTaprootAddress(groupPublicKey, FrostDkgAttestation.ConsensusNetwork) != taprootAddress)
                 {
                     ErrorLogUtility.LogError($"FROST DKG: address {taprootAddress} is not the Taproot address of the group key", "FrostMPCService.AggregateDKGResult");

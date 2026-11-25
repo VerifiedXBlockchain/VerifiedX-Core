@@ -45,6 +45,11 @@ namespace VerifiedXCore
             Globals.BridgeVoidKeepsLocksHeight = Globals.IsTestNet ? Globals.BridgeVoidKeepsLocksTestnetHeight : Globals.BridgeVoidKeepsLocksHeight;
             Globals.BridgeFailKeepsLocksHeight = Globals.IsTestNet ? Globals.BridgeFailKeepsLocksTestnetHeight : Globals.BridgeFailKeepsLocksHeight;
             Globals.VaultMinimumPositionHeight = Globals.IsTestNet ? Globals.VaultMinimumPositionTestnetHeight : Globals.VaultMinimumPositionHeight;
+            Globals.RawDataVerbatimHeight = Globals.IsTestNet ? Globals.RawDataVerbatimTestnetHeight : Globals.RawDataVerbatimHeight;
+            Globals.ContractBodyKeySpellingHeight = Globals.IsTestNet ? Globals.ContractBodyKeySpellingTestnetHeight : Globals.ContractBodyKeySpellingHeight;
+            Globals.ContractRunLimitsHeight = Globals.IsTestNet ? Globals.ContractRunLimitsTestnetHeight : Globals.ContractRunLimitsHeight;
+            Globals.BridgeLockMinimumHeight = Globals.IsTestNet ? Globals.BridgeLockMinimumTestnetHeight : Globals.BridgeLockMinimumHeight;
+            Globals.VrfMixHeight = Globals.IsTestNet ? Globals.VrfMixTestnetHeight : Globals.VrfMixHeight;
             Globals.ReserveRecoverReadsEveryRowHeight = Globals.IsTestNet ? Globals.LedgerRulesBatchTestnetHeight : Globals.ReserveRecoverReadsEveryRowHeight;
             Globals.VbtcEnvelopeRulesHeight = Globals.IsTestNet ? Globals.LedgerRulesBatchTestnetHeight : Globals.VbtcEnvelopeRulesHeight;
             Globals.ReserveNonTransferAmountHeight = Globals.IsTestNet ? Globals.LedgerRulesBatchTestnetHeight : Globals.ReserveNonTransferAmountHeight;
@@ -74,6 +79,7 @@ namespace VerifiedXCore
             Globals.SalePaymentSharesHeight = Globals.IsTestNet ? Globals.SalePaymentSharesTestnetHeight : Globals.SalePaymentSharesHeight;
             Globals.BridgeVoteOncePerCasterHeight = Globals.IsTestNet ? Globals.BridgeVoteOncePerCasterTestnetHeight : Globals.BridgeVoteOncePerCasterHeight;
             Globals.BridgeExitCarriesTotalsHeight = Globals.IsTestNet ? Globals.BridgeExitCarriesTotalsTestnetHeight : Globals.BridgeExitCarriesTotalsHeight;
+            Globals.CanonicalInputHeight = Globals.IsTestNet ? Globals.CanonicalInputTestnetHeight : Globals.CanonicalInputHeight;
             Globals.WithdrawalUniqueIdRulesHeight = Globals.IsTestNet ? Globals.FundLossAuditTestnetHeight : Globals.WithdrawalUniqueIdRulesHeight;
             Globals.RoyaltyRewriteRulesHeight = Globals.IsTestNet ? Globals.FundLossAuditTestnetHeight : Globals.RoyaltyRewriteRulesHeight;
             Globals.ReserveTokenRulesHeight = Globals.IsTestNet ? Globals.FundLossAuditTestnetHeight : Globals.ReserveTokenRulesHeight;
@@ -82,6 +88,7 @@ namespace VerifiedXCore
             // Privacy stage 2 on testnet: with the fund-loss rules (reset 2026-10-13 from 1,099,400, which had passed).
             Globals.PrivateTxProofRulesHeight = Globals.IsTestNet ? Globals.FundLossAuditTestnetHeight : Globals.PrivateTxProofRulesHeight;
             Globals.PlonkCurrentRulesHeight = Globals.IsTestNet ? Globals.PlonkCurrentRulesTestnetHeight : Globals.PlonkCurrentRulesHeight;
+            Globals.StrictDataReaderHeight = Globals.IsTestNet ? Globals.StrictDataReaderTestnetHeight : Globals.StrictDataReaderHeight;
             // Bitcoin attestation (plan 8.4): observe from the tip of 2026-10-13, record with the fund-loss rules, enforce three days later.
             Globals.BitcoinAttestationObserveHeight = Globals.IsTestNet ? Globals.BitcoinAttestationObserveTestnetHeight : Globals.BitcoinAttestationObserveHeight;
             Globals.BitcoinAttestationRecordHeight = Globals.IsTestNet ? Globals.BitcoinAttestationRecordTestnetHeight : Globals.BitcoinAttestationRecordHeight;
@@ -89,6 +96,83 @@ namespace VerifiedXCore
             Globals.VreeActivationHeight = Globals.IsTestNet ? Globals.VreeActivationTestnetHeight : Globals.VreeActivationHeight;
             Globals.BaseBridgeV4Height = Globals.IsTestNet ? Globals.BaseBridgeV4TestnetHeight : Globals.BaseBridgeV4Height;
             if (Globals.IsTestNet) Globals.ShieldedSupplyCorrections.Clear(); // the testnet pool was never forged against
+            if (Globals.IsCustomTestNet) ApplyCustomTestNetHeights();
+        }
+
+        /// <summary>
+        /// The block by which every rule is active on a custom testnet (Marigold). Such a chain starts from genesis, so
+        /// the heights the live testnet staged later (7,400, 107,700, 152,000, 205,615: that chain was already running)
+        /// start here instead: the last of the genesis-staged heights (bonds 399, fund-loss rules 400, Bitcoin
+        /// attestation 401). The heights at or below it keep their testnet values. VrfSeedHeight here puts the first
+        /// epoch's anchor at block 301: a validator produces from 401 only if registered before block 301.
+        /// </summary>
+        public const long CustomTestNetRulesHeight = BitcoinAttestationTestnetHeight;
+
+        /// <summary>
+        /// Rules added after Marigold was already running take effect from this later block, not from
+        /// <see cref="CustomTestNetRulesHeight"/>: a rule dated before the chain's tip would judge blocks that were
+        /// produced under the old rules, so a node syncing Marigold from block 0 would refuse its own history. 8,500 was
+        /// about 1,950 blocks past the tip (6,549) when the input-format rules reached devnet on 2026-11-24, room to
+        /// upgrade every Marigold node first.
+        /// </summary>
+        public const long CustomTestNetInputRulesHeight = 8500;
+
+        /// <summary>
+        /// The custom testnet's heights, over the testnet ones. Config.ProcessConfig selects a custom testnet after
+        /// Program.cs and the Warden first apply the heights, so it applies them again once it has.
+        /// </summary>
+        private static void ApplyCustomTestNetHeights()
+        {
+            const long h = CustomTestNetRulesHeight;
+            Globals.TXHeightRule3 = h;
+            // Testnet 7,400 (LedgerRulesBatchTestnetHeight)
+            Globals.ReserveRecoverReadsEveryRowHeight = h;
+            Globals.VbtcEnvelopeRulesHeight = h;
+            Globals.ReserveNonTransferAmountHeight = h;
+            Globals.FeeBelowOneVfxHeight = h;
+            Globals.OneMovePerContractHeight = h;
+            Globals.VrfSeedHeight = h;
+            Globals.TxHashGuardByTimeHeight = h;
+            Globals.DataOwnerBoundHeight = h;
+            Globals.TokenTransferRecipientFirstHeight = h;
+            Globals.AdnrNameGrammarHeight = h;
+            Globals.TokenMintRulesHeight = h;
+            Globals.BlockTransactionCapHeight = h;
+            Globals.FractionalAmountRehashHeight = h;
+            Globals.RecipientNetworkByteHeight = h;
+            Globals.VoteTopicRulesHeight = h;
+            Globals.TopicAddDeterministicHeight = h;
+            Globals.LegacyNameReservedHeight = h;
+            Globals.EvolveRulesHeight = h;
+            Globals.ShieldSpendsNothingHeight = h;
+            Globals.SignerAgeFromEpochZeroHeight = h;
+            Globals.ContractPayloadArrayHeight = h;
+            Globals.BtcNameOneRecordPerAddressHeight = h;
+            Globals.BtcNameSignerOwnsAddressHeight = h;
+            // Testnet 107,700
+            Globals.VreeActivationHeight = h;
+            // Testnet 152,000
+            Globals.ContractBodyLimitsHeight = h;
+            Globals.EvolveSpecificNeedsContractHeight = h;
+            Globals.BridgeVoidKeepsLocksHeight = h;
+            // Testnet 205,615
+            Globals.SaleListingKeyHeight = h;
+            Globals.JsonCommentDataRuleHeight = h;
+            Globals.WithdrawalDestinationRecheckHeight = h;
+            Globals.BridgeFailKeepsLocksHeight = h;
+            Globals.VaultMinimumPositionHeight = h;
+            Globals.SalePaymentSharesHeight = h;
+            Globals.BridgeVoteOncePerCasterHeight = h;
+            Globals.BridgeExitCarriesTotalsHeight = h;
+            Globals.PlonkCurrentRulesHeight = h;
+            // Not yet on the live testnet. Added while Marigold was running, so from a later block (see above).
+            Globals.CanonicalInputHeight = CustomTestNetInputRulesHeight;
+            Globals.RawDataVerbatimHeight = CustomTestNetInputRulesHeight;
+            Globals.StrictDataReaderHeight = CustomTestNetInputRulesHeight;
+            Globals.ContractBodyKeySpellingHeight = CustomTestNetInputRulesHeight;
+            Globals.ContractRunLimitsHeight = CustomTestNetInputRulesHeight;
+            Globals.VrfMixHeight = CustomTestNetInputRulesHeight;
+            Globals.BridgeLockMinimumHeight = CustomTestNetInputRulesHeight;
         }
     }
 }

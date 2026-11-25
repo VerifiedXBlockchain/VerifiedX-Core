@@ -736,6 +736,13 @@ namespace VerifiedXCore.Services
                         DbContext.Rollback("BlockValidatorService.ValidateBlock()-3");
                         return result;//block rejected due to failed validator signature
                     }
+
+                    // From the VRF height: the producer's VRF proof and the chain's mix (BlockVrf).
+                    if (BlockVrf.Refusal(block, BlockVrf.PreviousOf(block)) is { } vrfRefusal)
+                    {
+                        DbContext.Rollback("BlockValidatorService.ValidateBlock()-vrf", vrfRefusal);
+                        return result;
+                    }
                 }
 
 
@@ -1105,7 +1112,9 @@ namespace VerifiedXCore.Services
                     Validator = block.Validator,
                     ChainRefId = block.ChainRefId,
                     TotalValidators = block.TotalValidators,
-                    ValidatorAnswer = block.ValidatorAnswer
+                    ValidatorAnswer = block.ValidatorAnswer,
+                    VrfProof = block.VrfProof,
+                    VrfMix = block.VrfMix,
                 };
 
                 newBlock.Build();
@@ -1217,7 +1226,7 @@ namespace VerifiedXCore.Services
                         List<(string ScUid, decimal Amount)> VbtcOutflows(Transaction t)
                         {
                             if (!vbtcOutflowsOf.TryGetValue(t, out var known))
-                                vbtcOutflowsOf[t] = known = Bitcoin.Services.VBTCService.GetVbtcV2TransferOutflows(t);
+                                vbtcOutflowsOf[t] = known = Bitcoin.Services.VBTCService.GetVbtcV2TransferOutflows(t, block.Height);
                             return known;
                         }
 
@@ -2161,6 +2170,13 @@ namespace VerifiedXCore.Services
                     ValidatorLogUtility.Log("Block failed with bad validator signature", "BlockValidatorService.ValidateBlockForTask()");
                     return result;//block rejected due to failed validator signature
                 }
+
+                // From the VRF height: the producer's VRF proof and the chain's mix (BlockVrf).
+                if (BlockVrf.Refusal(block, BlockVrf.PreviousOf(block)) is { } vrfRefusal)
+                {
+                    ValidatorLogUtility.Log($"Block refused: {vrfRefusal}", "BlockValidatorService.ValidateBlockForTask()");
+                    return result;
+                }
             }
 
             if(block.Height != 0)
@@ -2196,7 +2212,9 @@ namespace VerifiedXCore.Services
                 Validator = block.Validator,
                 ChainRefId = block.ChainRefId,
                 TotalValidators = block.TotalValidators,
-                ValidatorAnswer = block.ValidatorAnswer
+                ValidatorAnswer = block.ValidatorAnswer,
+                VrfProof = block.VrfProof,
+                VrfMix = block.VrfMix,
             };
 
             newBlock.Build();
@@ -2304,7 +2322,9 @@ namespace VerifiedXCore.Services
             return result;//block accepted
         }
 
-        private static async void RemoveTxFromMempool(Transaction tx)
+        private static void RemoveTxFromMempool(Transaction tx) => VerifiedXCore.Utilities.SafeTask.Forget(RemoveTxFromMempoolAsync(tx), "BlockValidatorService.RemoveTxFromMempool");
+
+        private static async Task RemoveTxFromMempoolAsync(Transaction tx)
         {
             var mempool = TransactionData.GetPool();
             if(mempool != null)

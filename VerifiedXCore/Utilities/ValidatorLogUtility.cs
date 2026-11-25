@@ -44,12 +44,12 @@ namespace VerifiedXCore.Utilities
                 }
                 if (firstEntry == true)
                 {
-                    File.AppendAllText(path + "validatorlog.txt", Environment.NewLine + " ");
+                    LogFile.Append(path + "validatorlog.txt", Environment.NewLine + " ");
                 }
 
                 if (File.Exists(path + "validatorlog.txt"))
                 {
-                    var bytes = File.ReadAllBytes(path + "validatorlog.txt").Length;
+                    var bytes = LogFile.Length(path + "validatorlog.txt");
                     var totalMB = bytes / 1024 / 1024;
                     if (totalMB > 100)
                         writeLog = false;
@@ -59,7 +59,7 @@ namespace VerifiedXCore.Utilities
 
                 if (writeLog)
                 {
-                    File.AppendAllText(path + "validatorlog.txt", Environment.NewLine + text);
+                    LogFile.Append(path + "validatorlog.txt", Environment.NewLine + text);
                     VFXLogging.LogInfo(message, location, false, true);
                 }
 

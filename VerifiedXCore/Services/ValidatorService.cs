@@ -876,7 +876,9 @@ namespace VerifiedXCore.Services
                 await Task.Delay(delay);
             }
         }
-        public static async void DoValidate()
+        public static void DoValidate() => VerifiedXCore.Utilities.SafeTask.Forget(DoValidateAsync(), "ValidatorService.DoValidate");
+
+        private static async Task DoValidateAsync()
         {
             try
             {
@@ -1360,7 +1362,9 @@ namespace VerifiedXCore.Services
             return result;
         }
 
-        public static async void StopValidating(Validators validator)
+        public static void StopValidating(Validators validator) => VerifiedXCore.Utilities.SafeTask.Forget(StopValidatingAsync(validator), "ValidatorService.StopValidating");
+
+        private static async Task StopValidatingAsync(Validators validator)
         {
             try
             {
@@ -1405,7 +1409,9 @@ namespace VerifiedXCore.Services
             return 5_000M;
         }
 
-        public static async void ClearOldValidator()
+        public static void ClearOldValidator() => VerifiedXCore.Utilities.SafeTask.Forget(ClearOldValidatorAsync(), "ValidatorService.ClearOldValidator");
+
+        private static async Task ClearOldValidatorAsync()
         {
             try
             {
@@ -1439,7 +1445,9 @@ namespace VerifiedXCore.Services
             }
         }
 
-        public static async void ClearDuplicates()
+        public static void ClearDuplicates() => VerifiedXCore.Utilities.SafeTask.Forget(ClearDuplicatesAsync(), "ValidatorService.ClearDuplicates");
+
+        private static async Task ClearDuplicatesAsync()
         {
             try
             {
