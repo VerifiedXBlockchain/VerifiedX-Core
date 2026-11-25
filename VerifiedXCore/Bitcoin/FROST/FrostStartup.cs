@@ -2920,6 +2920,17 @@ namespace VerifiedXCore.Bitcoin.FROST
                                 return;
                             }
 
+                            // The share chosen, whichever way it was found (a share restored under a ceremony id is relabeled
+                            // above): one restored from peers gives no share for a payment opened before it was restored.
+                            if (!string.IsNullOrEmpty(request.WithdrawalRequestHash)
+                                && RestoredShareRefusal(keyStore, request.SmartContractUID, request.WithdrawalRequestHash) is { } restoredRefusal)
+                            {
+                                LogUtility.Log($"[FROST Dedup] BLOCKED signing start for {request.WithdrawalRequestHash}: {restoredRefusal}", "FrostStartup.SignStart");
+                                context.Response.StatusCode = StatusCodes.Status409Conflict;
+                                await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = restoredRefusal }));
+                                return;
+                            }
+
                             // Call FROST native library to generate nonce commitment
                             var (nonceCommitment, nonceSecret, nonceError) = FrostNative.SignRound1Nonces(keyStore.KeyPackage);
                             if (nonceError != FrostNative.SUCCESS || string.IsNullOrEmpty(nonceCommitment))
@@ -3919,6 +3930,36 @@ namespace VerifiedXCore.Bitcoin.FROST
         /// </summary>
         internal static bool FromStartEndpoint(DKGSession session, HttpContext context) =>
             session.LeaderSigned || FrostSigningAuthorization.SameLeaderEndpoint(session.StartRemoteIp, FrostSigningAuthorization.NormalizeRemoteIp(context.Connection.RemoteIpAddress));
+
+        /// <summary>
+        /// Why this validator gives no share from <paramref name="share"/> for a payment on <paramref name="scUID"/>, or
+        /// null. On a vault the chain does not watch, this validator's records are all that stop a second transaction; a
+        /// share restored from peers (<see cref="FrostValidatorKeyStore.RestoredFromPeersAt"/>) came without them, so it
+        /// signs no payment opened before the restore, or one whose opening is not known, until it holds a record of its
+        /// own for the payment. Judged on the share the signing uses, however it was found.
+        /// </summary>
+        internal static string? RestoredShareRefusal(FrostValidatorKeyStore? share, string scUID, string paymentReference)
+        {
+            if (share == null || share.RestoredFromPeersAt <= 0) return null;
+            if (VerifiedXCore.Bitcoin.Attestation.BtcVaultKeys.KeyRow(scUID) != null) return null; // its transactions are fixed in state
+            if (VerifiedXCore.Bitcoin.Models.FrostSignedWithdrawalEvidence.ForPayment(scUID, paymentReference).Any(e => !string.IsNullOrEmpty(e.BtcTxId)))
+                return null; // it has signed for this payment since, and its records say what
+            var opened = PaymentOpenedAt(scUID, paymentReference);
+            if (opened.HasValue && opened.Value >= share.RestoredFromPeersAt) return null;
+            return "This validator's share for this vault was restored from peers after the payment was opened, and its records of what it signed did not come with it: it gives no share for this payment.";
+        }
+
+        /// <summary>When the block that opened a payment (a withdrawal request, or a bridge exit) was made, or null when not known.</summary>
+        private static long? PaymentOpenedAt(string scUID, string paymentReference)
+        {
+            long height = 0;
+            if (paymentReference.StartsWith(FrostSigningAuthorization.BtcExitPrefix, StringComparison.OrdinalIgnoreCase))
+                height = FrostSigningAuthorization.ResolveBtcExitForContract(paymentReference, scUID).Exit?.ExitVfxHeight ?? 0;
+            else
+                height = VerifiedXCore.Bitcoin.Models.VBTCWithdrawalRequest.GetByTransactionHash(paymentReference, scUID)?.RequestBlockHeight ?? 0;
+            if (height <= 0) return null;
+            return VerifiedXCore.Data.BlockchainData.GetBlockByHeight(height)?.Timestamp;
+        }
 
         internal static async Task<(bool Ok, string Reason)> CheckPriorSignedTransactionAsync(string scUID, string withdrawalRequestHash, string? requestedTxId, IEnumerable<string>? requestedOutpoints = null)
         {
