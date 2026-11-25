@@ -168,9 +168,18 @@ namespace VerifiedXCore.Tests
         [Fact]
         public void A_use_under_the_builds_symbols_counts()
         {
-            var counts = Count();
-            Assert.True(counts.TryGetValue("SecretSharing/Cryptography/FinitePoint`1.cs|hex", out var n) && n > 0,
-                "a call under #if NET6_0_OR_GREATER is compiled into the node and counted");
+            var code = "class C { void A() {
+#if NET6_0_OR_GREATER
+ var b = Convert.FromHexString(t);
+#endif
+#if RELEASE
+ var j = JObject.Parse(t);
+#endif
+ } }";
+            var seen = BuildSymbols.SelectMany(symbols => CSharpSyntaxTree.ParseText(code, new CSharpParseOptions(preprocessorSymbols: symbols))
+                .GetRoot().DescendantNodes().SelectMany(Names)).ToList();
+            Assert.Contains("Convert.FromHexString", seen); // compiled into every build of the node
+            Assert.Contains("JObject.Parse", seen);         // compiled into the Release build
         }
 
         [Fact]
