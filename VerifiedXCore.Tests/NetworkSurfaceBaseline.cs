@@ -9,10 +9,14 @@ namespace VerifiedXCore.Tests
         /// <summary>"host METHOD route flag", as the test prints them.</summary>
         public static readonly HashSet<string> KnownFailures = new(StringComparer.Ordinal)
         {
-            "arbiter GET /depositaddress/x/x unhandled-error",
         };
 
-        /// <summary>"HubType.Method" for every SignalR hub method. The test does not probe these yet.</summary>
+        /// <summary>"host HubType.Method flag", as NetworkHubSurfaceTests prints them. Entries are only ever removed.</summary>
+        public static readonly HashSet<string> KnownHubFailures = new(StringComparer.Ordinal)
+        {
+        };
+
+        /// <summary>"HubType.Method" for every SignalR hub method: a new one is a moment to ask what an unknown caller can make it do.</summary>
         public static readonly HashSet<string> KnownHubMethods = new(StringComparer.Ordinal)
         {
             "ConsensusServer.RequestMethodCode",
