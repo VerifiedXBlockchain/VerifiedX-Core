@@ -76,6 +76,14 @@ namespace VerifiedXCore.Tests
                 Assert.False(vrf.Verify(vrf.PublicKeyOf(KeyA), bent, alpha, out _));
             }
             Assert.False(vrf.Verify(vrf.PublicKeyOf(KeyA), proof[..^1], alpha, out _));
+            // A valid Gamma with c and s zero makes the check's points the identity: refused, not thrown.
+            var zeros = (byte[])proof.Clone();
+            Array.Clear(zeros, 33, Ecvrf.ProofLength - 33);
+            Assert.False(vrf.Verify(vrf.PublicKeyOf(KeyA), zeros, alpha, out _));
+            // c zero and s one: U is B, V is H, neither the identity, and the challenge does not match.
+            var sOne = (byte[])zeros.Clone();
+            sOne[^1] = 1;
+            Assert.False(vrf.Verify(vrf.PublicKeyOf(KeyA), sOne, alpha, out _));
             // A proof of one suite is no proof in another.
             Assert.False(Ecvrf.P256.Verify(Ecvrf.P256.PublicKeyOf(KeyA), proof, alpha, out _));
         }

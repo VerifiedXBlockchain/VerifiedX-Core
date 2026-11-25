@@ -58,6 +58,8 @@ namespace VerifiedXCore.Utilities
             var h = EncodeToCurve(Encode(y), alpha);
             var u = Sub(Mul(_c.G, s), Mul(y, c));
             var v = Sub(Mul(h, s), Mul(gamma, c));
+            // No valid proof gives the identity here (k is 1 to q-1): a proof that does is refused, not encoded.
+            if (IsIdentity(u) || IsIdentity(v)) return false;
             if (Challenge(y, h, gamma, u, v) != c) return false;
             beta = OutputOf(gamma);
             return true;

@@ -83,8 +83,13 @@ namespace VerifiedXCore.Utilities
             if (key == null) return "the producer's key is not known";
             byte[] proof;
             try { proof = Convert.FromHexString(block.VrfProof); } catch (FormatException) { return "the VRF proof is not hex"; }
-            if (!Ecvrf.Secp256k1.Verify(key, proof, alpha, out var beta))
-                return "the VRF proof does not verify";
+            byte[] beta;
+            try
+            {
+                if (!Ecvrf.Secp256k1.Verify(key, proof, alpha, out beta))
+                    return "the VRF proof does not verify";
+            }
+            catch (Exception) { return "the VRF proof does not verify"; } // a proof is judged, never thrown out of validation
             if (!string.Equals(block.VrfMix, MixOf(previousMix, beta), StringComparison.Ordinal))
                 return "the VRF mix does not follow from the block before it";
             return null;

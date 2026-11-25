@@ -116,7 +116,7 @@ namespace VerifiedXCore.Tests
             Assert.Equal(Ecvrf.ProofLength * 2, block.VrfProof!.Length);
         }
 
-        public static TheoryData<string> Bends => new() { "no proof", "no mix", "another key's proof", "a mix that does not follow" };
+        public static TheoryData<string> Bends => new() { "no proof", "no mix", "another key's proof", "a mix that does not follow", "a proof whose checks are the identity" };
 
         [Theory]
         [MemberData(nameof(Bends))]
@@ -128,6 +128,7 @@ namespace VerifiedXCore.Tests
                 "no proof" => NextBlock(producer, b => b.VrfProof = null),
                 "no mix" => NextBlock(producer, b => b.VrfMix = null),
                 "another key's proof" => NextBlock(producer, prover: NewProducer()),
+                "a proof whose checks are the identity" => NextBlock(producer, b => b.VrfProof = b.VrfProof![..66] + new string('0', (Ecvrf.ProofLength - 33) * 2)),
                 _ => NextBlock(producer, b => b.VrfMix = new string('0', 64)),
             };
             Assert.NotNull(BlockVrf.Refusal(block, BlockVrf.PreviousOf(block)));
