@@ -832,16 +832,30 @@ namespace VerifiedXCore.Bitcoin.Services
             using var json = new JsonTextReader(text) { MaxDepth = 8 };
             var serializer = JsonSerializer.CreateDefault();
             bool? success = null;
+            // Every token is read within the window, at any level: a long string anywhere in the answer, under a name read
+            // or skipped, ends the answer before it is held.
+            async Task<bool> Next()
+            {
+                limited.BeginItem(ItemWindowBytes);
+                try { return await json.ReadAsync(deadline); }
+                finally { limited.EndItem(); }
+            }
+            async Task<bool?> NextBoolean()
+            {
+                limited.BeginItem(ItemWindowBytes);
+                try { return await json.ReadAsBooleanAsync(deadline); }
+                finally { limited.EndItem(); }
+            }
             try
             {
-                while (await json.ReadAsync(deadline))
+                while (await Next())
                 {
                     if (json.TokenType != JsonToken.PropertyName || json.Depth != 1) continue;
                     var name = (string?)json.Value;
-                    if (string.Equals(name, "Success", StringComparison.OrdinalIgnoreCase)) { success = await json.ReadAsBooleanAsync(deadline); continue; }
+                    if (string.Equals(name, "Success", StringComparison.OrdinalIgnoreCase)) { success = await NextBoolean(); continue; }
                     if (!string.Equals(name, "Backups", StringComparison.OrdinalIgnoreCase)) continue;
-                    if (!await json.ReadAsync(deadline) || json.TokenType != JsonToken.StartArray) continue;
-                    while (await json.ReadAsync(deadline) && json.TokenType != JsonToken.EndArray)
+                    if (!await Next() || json.TokenType != JsonToken.StartArray) continue;
+                    while (await Next() && json.TokenType != JsonToken.EndArray)
                     {
                         if (++read > itemLimit) return new RecoveryAnswer(items, Complete: false);
                         // Each item is read token by token, with the deadline, and within a window no honest item comes

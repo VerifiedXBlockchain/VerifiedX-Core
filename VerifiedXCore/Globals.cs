@@ -473,6 +473,16 @@ namespace VerifiedXCore
         public const long ContractBodyKeySpellingTestnetHeight = long.MaxValue;
 
         /// <summary>
+        /// From this height a block's contract code runs within ContractRunLimits.Contract (steps, the length of any one
+        /// string, the text it works through), and a block carrying a body whose run a limit stops is refused. Below it a
+        /// block's code runs as before the limits. Admission and every reader outside a block use the limits at every
+        /// height. A tightening rule: no mined body on mainnet comes near the limits. Unset (long.MaxValue) on both
+        /// networks until the release that activates it. Testnet value in GlobalsNetworkHeights.
+        /// </summary>
+        public static long ContractRunLimitsHeight = long.MaxValue;
+        public const long ContractRunLimitsTestnetHeight = long.MaxValue;
+
+        /// <summary>
         /// From this height a reserve's Recover() reads each pending NFT_TX row's call as the dispatchers read it. Below it
         /// a row whose Data was not an array of objects made the recovery throw part-way, so every later row, the balance
         /// sweep, the contract re-own and the vBTC sweep never ran, and the reserve stayed under its vault key. Active from LedgerRulesBatchHeight.
