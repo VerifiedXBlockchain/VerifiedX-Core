@@ -34,6 +34,18 @@ namespace VerifiedXCore.Models
 		[Newtonsoft.Json.JsonProperty(NullValueHandling = Newtonsoft.Json.NullValueHandling.Ignore)]
 		public CasterMembershipRecord? MembershipRecord { get; set; }
 
+		/// <summary>
+		/// From Globals.VrfMixHeight: the producer's VRF proof over its height's seed, hex (BlockVrf). In
+		/// <see cref="GetBlockHash"/> from that height; left out of the JSON when null, so every older block serializes as
+		/// it always did.
+		/// </summary>
+		[Newtonsoft.Json.JsonProperty(NullValueHandling = Newtonsoft.Json.NullValueHandling.Ignore)]
+		public string? VrfProof { get; set; }
+
+		/// <summary>From Globals.VrfMixHeight: the running mix of the chain's VRF outputs up to this block, hex (BlockVrf).</summary>
+		[Newtonsoft.Json.JsonProperty(NullValueHandling = Newtonsoft.Json.NullValueHandling.Ignore)]
+		public string? VrfMix { get; set; }
+
 		[VerifiedXCore.Utilities.JsonBound(VerifiedXCore.Utilities.ListSize.BlockTransactions)]
 		public IList<Transaction> Transactions { get; set; }
 		//Methods
@@ -100,6 +112,10 @@ namespace VerifiedXCore.Models
 		public string GetBlockHash()
 		{
 			var strSum = Version + PrevHash + MerkleRoot + Timestamp + NumOfTx + Validator + TotalValidators.ToString() + ValidatorAnswer + ChainRefId;
+			// From the VRF height the producer's proof and the mix are the block's: a copy with either changed or left out
+			// is another block.
+			if (Height >= Globals.VrfMixHeight)
+				strSum += "|vrf|" + (VrfProof ?? "") + "|" + (VrfMix ?? "");
 			var hash = HashingService.GenerateHash(strSum);
 			return hash;
 		}

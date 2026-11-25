@@ -532,6 +532,17 @@ namespace VerifiedXCore
         public const long VrfAnchorLagBlocks = 100;
 
         /// <summary>
+        /// From this height every block carries its producer's VRF proof (BlockVrf) over its height's seed, and a running mix
+        /// of those outputs, both in the block's hash. An epoch whose anchor is at or above it is seeded from the anchor's
+        /// mix, not the anchor's hash: the hash's producer could try block after block until the next epoch's draw, the
+        /// emergency committee election and the Base signer order favoured it, where a VRF output is the one its key gives
+        /// for the seed, so a producer can only publish its block or withhold it. Unset (long.MaxValue) on both networks
+        /// until the release that activates it. Testnet value in GlobalsNetworkHeights.
+        /// </summary>
+        public static long VrfMixHeight = long.MaxValue;
+        public const long VrfMixTestnetHeight = long.MaxValue;
+
+        /// <summary>
         /// From this height the recent-transaction-hash replay guard holds every block within the transaction time window
         /// of the newest block, by block timestamp, and never fewer than 400 blocks (TxHashGuard). Active from LedgerRulesBatchHeight.
         /// </summary>

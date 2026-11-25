@@ -79,7 +79,9 @@ namespace VerifiedXCore.Bitcoin.Services
             var registered = VBTCValidatorRegistry.FundedOnly(VBTCValidatorRegistry.GetActiveValidatorsAt(epochHeight).Where(v => !v.IsS3C))
                 .Select(v => BaseAddressOf(v.FrostPublicKey));
             var kept = VBTCValidatorRegistry.FundedOnly(SeenAt(epochHeight, block.Hash)).Select(v => BaseAddressOf(v.FrostPublicKey));
-            return Compute(epochHeight, block.Hash, registered, kept, contractValidators);
+            // Ranked by what the boundary block gives as a seed: from the VRF height its mix, which its producer cannot choose.
+            var seed = VerifiedXCore.Utilities.VrfSeed.SeedMaterialAt(epochHeight);
+            return seed == null ? null : Compute(epochHeight, seed, registered, kept, contractValidators);
         }
 
         // ── The casters ─────────────────────────────────────────────────────────────────────────────────────
@@ -133,9 +135,9 @@ namespace VerifiedXCore.Bitcoin.Services
         /// <summary>The casters' change at <paramref name="epochHeight"/> from this node's caster records (see <see cref="ComputeCasters"/>).</summary>
         public static CasterPlan? CastersForEpoch(long epochHeight, IEnumerable<string> contractCasters)
         {
-            var block = BlockchainData.GetBlockByHeight(epochHeight);
-            if (block == null || string.IsNullOrEmpty(block.Hash)) return null;
-            return ComputeCasters(epochHeight, block.Hash, CommitteeAt(epochHeight), CommitteeAt(epochHeight - EpochBlocks),
+            var seed = VerifiedXCore.Utilities.VrfSeed.SeedMaterialAt(epochHeight);
+            if (seed == null) return null;
+            return ComputeCasters(epochHeight, seed, CommitteeAt(epochHeight), CommitteeAt(epochHeight - EpochBlocks),
                 CommitteeAt(epochHeight - 2 * EpochBlocks), contractCasters);
         }
 

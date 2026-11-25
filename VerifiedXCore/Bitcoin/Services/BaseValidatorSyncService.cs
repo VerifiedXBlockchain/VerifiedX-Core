@@ -393,7 +393,7 @@ namespace VerifiedXCore.Bitcoin.Services
             var myBase = ValidatorEthKeyService.DeriveBaseAddressFromAccount(Globals.ValidatorAddress);
             var members = view.Validators.Concat(view.CasterList).Select(m => m.ToLowerInvariant()).Distinct().ToList();
             if (string.IsNullOrEmpty(myBase) || !members.Contains(myBase.ToLowerInvariant())) return;
-            var epochHash = BlockchainData.GetBlockByHeight(epoch)?.Hash;
+            var epochHash = VerifiedXCore.Utilities.VrfSeed.SeedMaterialAt(epoch); // the signer order is drawn from the boundary block's seed
             if (string.IsNullOrEmpty(epochHash)) return;
 
             var turn = members.OrderBy(m => BaseSignerSetPolicy.RankOf(epochHash, m), StringComparer.Ordinal).ToList().IndexOf(myBase.ToLowerInvariant());
