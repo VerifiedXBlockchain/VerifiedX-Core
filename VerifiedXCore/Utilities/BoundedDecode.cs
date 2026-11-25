@@ -63,7 +63,11 @@ namespace VerifiedXCore.Utilities
             if (text == null) throw new FormatException("The Base64 text is missing.");
             if (text.Length > 4L * ((maxBytes + 2L) / 3))
                 throw new FormatException($"The Base64 text is longer than {maxBytes} bytes of data.");
-            return Convert.FromBase64String(text);
+            // The text length rounds up to whole groups of four: the data itself is held to the limit too.
+            var data = Convert.FromBase64String(text);
+            if (data.Length > maxBytes)
+                throw new FormatException($"The Base64 text holds more than {maxBytes} bytes of data.");
+            return data;
         }
     }
 }

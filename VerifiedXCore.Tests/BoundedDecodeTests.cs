@@ -76,6 +76,8 @@ namespace VerifiedXCore.Tests
             Assert.Equal(new byte[] { 1, 2, 3 }, BoundedDecode.Base64(Convert.ToBase64String(new byte[] { 1, 2, 3 }), 3));
             Assert.Equal(new byte[] { 1, 2, 3, 4 }, BoundedDecode.Base64(Convert.ToBase64String(new byte[] { 1, 2, 3, 4 }), 4));
             Assert.Throws<FormatException>(() => BoundedDecode.Base64(Convert.ToBase64String(new byte[7]), 4));
+            Assert.Throws<FormatException>(() => BoundedDecode.Base64("AAAAAAAA", 4)); // six bytes in the length of four
+            Assert.Throws<FormatException>(() => BoundedDecode.Base64(Convert.ToBase64String(new byte[5]), 4));
             Assert.Throws<FormatException>(() => BoundedDecode.Base64(new string('A', 10_000_000), 32));
         }
     }
