@@ -3141,14 +3141,18 @@ namespace VerifiedXCore.Bitcoin.Services
         /// S3C §6.3: resolve a contract's IsS3C flag — local record first, else state-trei
         /// decompile (works on any node; used by the consensus bridge-lock rejection too).
         /// </summary>
-        public static bool ResolveContractIsS3C(string scUID)
+        public static bool ResolveContractIsS3C(string scUID) =>
+            ResolveContractIsS3C(scUID, SmartContractStateTrei.GetSmartContractState(scUID));
+
+        /// <summary>As <see cref="ResolveContractIsS3C(string)"/>, from the contract's state already read by the caller
+        /// (null: not on chain).</summary>
+        public static bool ResolveContractIsS3C(string scUID, SmartContractStateTrei? scState)
         {
             // Chain state first: block validation asks this (the bridge-lock refusal), and a record in this node's
             // own wallet tables (which anyone could have a public node write, before the contract existed) must not
             // decide what a block is. The local record answers only for a contract that is not on chain yet.
             try
             {
-                var scState = SmartContractStateTrei.GetSmartContractState(scUID);
                 if (scState != null && !string.IsNullOrEmpty(scState.ContractData))
                 {
                     var scMain = SmartContractMain.GenerateSmartContractInMemory(scState.ContractData);
@@ -3163,7 +3167,7 @@ namespace VerifiedXCore.Bitcoin.Services
             catch
             {
                 // A contract that is on chain and cannot be read is not answered for from this node's own records.
-                if (SmartContractStateTrei.GetSmartContractState(scUID) != null) return false;
+                if (scState != null) return false;
             }
             var local = VBTCContractV2.GetContract(scUID);
             return local != null && local.IsS3C;

@@ -4142,15 +4142,18 @@ namespace VerifiedXCore.Services
                     if (txRequest.FromAddress.StartsWith("xRBX"))
                         return (txResult, "Reserve accounts cannot bridge vBTC. Move the vBTC to a normal VFX address first.");
 
+                    // The vault's state, read once for every check below: the document holds the vault's whole ledger.
+                    var lockScState = SmartContractStateTrei.GetSmartContractState(scUID);
+
                     // S3C §6.3: consensus-enforced bridge block — reject bridge-lock for an S3C
                     // contract (IsS3C read from state trei) so a malicious owner can't bypass the
                     // client gate and recreate the third-party stuck-funds danger (§6.2).
-                    if (Bitcoin.Services.VBTCService.ResolveContractIsS3C(scUID))
+                    if (Bitcoin.Services.VBTCService.ResolveContractIsS3C(scUID, lockScState))
                         return (txResult, "vBTC.b bridge is not available for S3C contracts.");
 
                     // A watched vault whose key cannot sign any more pays nobody: its vBTC does not go into the pool
                     // that bridge exits are paid from (plan 8.8).
-                    if (Bitcoin.Attestation.BtcVaultKeys.CannotSignRefusal(SmartContractStateTrei.GetSmartContractState(scUID)?.SmartContractUID ?? scUID) is { } cannotSign)
+                    if (Bitcoin.Attestation.BtcVaultKeys.CannotSignRefusal(lockScState?.SmartContractUID ?? scUID) is { } cannotSign)
                         return (txResult, cannotSign);
 
                     if (txRequest.FromAddress != txRequest.ToAddress)
@@ -4163,7 +4166,6 @@ namespace VerifiedXCore.Services
                         return (txResult, lockAmountError);
 
                     // VX-01: the tokenization ledger may only be operated on a vBTC V2 contract.
-                    var lockScState = SmartContractStateTrei.GetSmartContractState(scUID);
                     if (lockScState == null)
                         return (txResult, $"vBTC V2 contract not found in state trei: {scUID}");
                     if (!Bitcoin.Services.VBTCService.IsVbtcV2Contract(lockScState))
@@ -4195,7 +4197,7 @@ namespace VerifiedXCore.Services
                     if (VBTCBridgeLockState.GetByLockId(lockId) != null)
                         return (txResult, "Bridge LockId already exists on-chain.");
 
-                    var spendCheck = await ValidateVbtcTransparentSpendForBridgeLock(scUID, txRequest.FromAddress, amount.Value, blockVerify, blockDownloads, blockHeight ?? Globals.LastBlock?.Height ?? 0);
+                    var spendCheck = await ValidateVbtcTransparentSpendForBridgeLock(lockScState, txRequest.FromAddress, amount.Value, blockVerify, blockDownloads, blockHeight ?? Globals.LastBlock?.Height ?? 0);
                     if (!spendCheck.Ok)
                         return (txResult, spendCheck.Message);
                 }
@@ -5075,18 +5077,17 @@ namespace VerifiedXCore.Services
             return true;
         }
 
-        /// <summary>Same transparent balance rules as <see cref="TransactionType.VBTC_V2_TRANSFER"/> for a bridge lock debit.</summary>
+        /// <summary>Same transparent balance rules as <see cref="TransactionType.VBTC_V2_TRANSFER"/> for a bridge lock debit,
+        /// on the vault's state the caller has read.</summary>
         private static async Task<(bool Ok, string Message)> ValidateVbtcTransparentSpendForBridgeLock(
-            string scUID,
+            SmartContractStateTrei scStateTreiRec,
             string fromAddress,
             decimal amount,
             bool blockVerify,
             bool blockDownloads,
             long currentHeight)
         {
-            var scStateTreiRec = SmartContractStateTrei.GetSmartContractState(scUID);
-            if (scStateTreiRec == null)
-                return (false, $"vBTC V2 contract not found in state trei: {scUID}");
+            var scUID = scStateTreiRec.SmartContractUID;
 
             bool isOwner = fromAddress == scStateTreiRec.OwnerAddress;
 
