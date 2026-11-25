@@ -164,6 +164,18 @@ namespace VerifiedXCore.Tests
             Assert.True(body.Taken < 3 * FrostKeyBackupService.ItemWindowBytes, $"read {body.Taken} bytes");
         }
 
+        [Theory]
+        [InlineData("{{\"Success\":true,\"Backups\":\"{0}\"}}")]                    // the list given as one string
+        [InlineData("{{\"Note\":\"{0}\",\"Success\":true,\"Backups\":[]}}")]       // a name the reader skips
+        [InlineData("{{\"Success\":true,\"Extra\":{{\"Deep\":\"{0}\"}},\"Backups\":[]}}")] // inside a value it skips
+        public async Task A_long_string_outside_the_items_ends_the_answer_before_it_is_held(string shape)
+        {
+            var body = new CountingStream(Encoding.UTF8.GetBytes(string.Format(shape, new string('z', 16 * 1024 * 1024))));
+            var read = await FrostKeyBackupService.ReadRecoveryAnswerAsync(body, default, _ => true);
+            Assert.False(read!.Complete);
+            Assert.True(body.Taken < 3 * FrostKeyBackupService.ItemWindowBytes, $"read {body.Taken} bytes");
+        }
+
         [Fact]
         public async Task A_peer_that_stops_inside_an_item_is_given_up_on_at_the_deadline()
         {
