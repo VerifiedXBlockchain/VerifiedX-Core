@@ -145,9 +145,8 @@ namespace VerifiedXCore.Tests
         }
 
         /// <summary>
-        /// SignalR hub methods are entry points too, and this test does not send them anything yet. Until it does, a new
-        /// hub method has to be added to the baseline by hand, which is the moment to ask what an unknown caller can
-        /// make it do.
+        /// SignalR hub methods are entry points too. NetworkHubSurfaceTests invokes every one of them as an unknown caller;
+        /// this list still makes a new hub method a moment to ask what a caller the node does know can make it do.
         /// </summary>
         [Fact]
         public void Every_hub_method_is_one_the_baseline_knows()
