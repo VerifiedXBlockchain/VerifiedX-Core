@@ -50,6 +50,13 @@ namespace VerifiedXCore.Bitcoin.Services
         public const long TaprootDustSats = 330;
 
         /// <summary>
+        /// The smallest bridge lock, in sats: the smallest withdrawal from a vault the chain watches (the smallest withdrawal
+        /// transaction's fee at 1 sat/vB, and a payout of at least <see cref="Attestation.BtcCanonicalWithdrawal.DustSats"/>).
+        /// Each lock costs every node a mint attestation and a record of its own, whatever its amount.
+        /// </summary>
+        public const long MinBridgeLockSats = MinWithdrawalTxVBytes + Attestation.BtcCanonicalWithdrawal.DustSats;
+
+        /// <summary>
         /// Consensus rule (VbtcWithdrawalConcurrencyHeight), shared with the wallet paths so both give the same message:
         /// a withdrawal pays its Bitcoin fee out of the amount, so the amount must cover the fee of the smallest withdrawal
         /// transaction at the request's own fee rate and still leave a relayable payout. Uses only the request's fields, so

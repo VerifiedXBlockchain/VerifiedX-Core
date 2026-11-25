@@ -4169,6 +4169,12 @@ namespace VerifiedXCore.Services
                     if (expectedSats != amountSats.Value)
                         return (txResult, "AmountSats does not match Amount for bridge lock.");
 
+                    // A lock is at least the smallest withdrawal. Refused at admission at every height; in blocks from
+                    // BridgeLockMinimumHeight.
+                    if ((blockHeight == null || blockHeight.Value >= Globals.BridgeLockMinimumHeight)
+                        && amountSats.Value < Bitcoin.Services.VBTCService.MinBridgeLockSats)
+                        return (txResult, $"A bridge lock is at least {Bitcoin.Services.VBTCService.MinBridgeLockSats} sats ({Bitcoin.Services.VBTCService.MinBridgeLockSats / 100_000_000M:0.########} vBTC), the smallest withdrawal.");
+
                     if (string.IsNullOrEmpty(evmDestination) || !evmDestination.StartsWith("0x") || evmDestination.Length != 42)
                         return (txResult, "Invalid EvmDestination for bridge lock.");
 
