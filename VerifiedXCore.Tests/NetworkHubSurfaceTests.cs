@@ -201,27 +201,63 @@ namespace VerifiedXCore.Tests
         // ── Arguments ──────────────────────────────────────────────────────────────────────────────────────────
 
         /// <summary>
-        /// Small: an empty or zero value of each parameter's kind. Large: each text-carrying parameter holds an equal share
-        /// of the most the hub takes in one message, as a string, an object member or a list item.
+        /// Small: an empty or zero value of each parameter's kind. Large: the most the hub takes in one message, shared
+        /// among the parameters and, inside each, among the text fields of its real type (two levels down, list items
+        /// included), so the large values reach the fields the method reads.
         /// </summary>
         private static object?[] Arguments(MethodInfo method, string shape, int maxMessage)
         {
             var parameters = method.GetParameters().Where(p => p.ParameterType != typeof(CancellationToken)).ToArray();
             var share = Math.Max(1, (maxMessage - 8 * Kb) / Math.Max(1, parameters.Length));
-            return parameters.Select(p => Value(p.ParameterType, shape == "large" ? new string('x', share) : null)).ToArray();
+            return parameters.Select(p => Value(p.ParameterType, shape == "large" ? share : 0, 0)).ToArray();
         }
 
-        private static object? Value(Type type, string? big)
+        /// <summary>The text fields a value of this type carries, two levels down: how many ways its share is split.</summary>
+        private static int TextFields(Type type, int depth)
         {
             type = Nullable.GetUnderlyingType(type) ?? type;
-            if (type == typeof(string)) return big ?? "x";
+            if (type == typeof(string) || type == typeof(byte[])) return 1;
+            if (Simple(type) || depth >= 2) return 0;
+            var element = ElementOf(type);
+            if (element != null) return Math.Max(1, TextFields(element, depth + 1));
+            return Math.Max(1, Properties(type).Sum(p => TextFields(p.PropertyType, depth + 1)));
+        }
+
+        private static bool Simple(Type type) => type == typeof(bool) || type.IsEnum || type.IsPrimitive || type == typeof(decimal) || type == typeof(DateTime);
+
+        private static Type? ElementOf(Type type)
+        {
+            if (type.IsArray) return type.GetElementType();
+            if (typeof(IDictionary).IsAssignableFrom(type) || !typeof(IEnumerable).IsAssignableFrom(type)) return null;
+            return type.IsGenericType ? type.GetGenericArguments()[0] : typeof(object);
+        }
+
+        private static IEnumerable<PropertyInfo> Properties(Type type) =>
+            type.GetProperties(BindingFlags.Public | BindingFlags.Instance).Where(p => p.CanWrite && p.GetIndexParameters().Length == 0);
+
+        /// <summary>A value of <paramref name="type"/> whose text adds up to about <paramref name="share"/> characters (none when 0).</summary>
+        private static object? Value(Type type, int share, int depth)
+        {
+            type = Nullable.GetUnderlyingType(type) ?? type;
+            if (type == typeof(string)) return share > 0 ? new string('x', share) : "x";
             if (type == typeof(bool)) return false;
             if (type.IsEnum || type.IsPrimitive || type == typeof(decimal)) return 0;
             if (type == typeof(DateTime)) return DateTime.UnixEpoch;
-            if (type == typeof(byte[])) return big == null ? Array.Empty<byte>() : Encoding.ASCII.GetBytes(big[..Math.Max(1, big.Length * 3 / 4)]);
-            if (typeof(IEnumerable).IsAssignableFrom(type) && !typeof(IDictionary).IsAssignableFrom(type))
-                return big == null ? Array.Empty<object>() : new object[] { new Dictionary<string, object> { ["x"] = big } };
-            return big == null ? new Dictionary<string, object>() : new Dictionary<string, object> { ["x"] = big };
+            if (type == typeof(byte[])) return share > 0 ? new byte[Math.Max(1, share * 3 / 4)] : Array.Empty<byte>();
+            if (type == typeof(object)) return share > 0 ? new string('x', share) : "x";
+            var element = ElementOf(type);
+            if (element != null)
+                return share > 0 ? new[] { Value(element, share, depth + 1) } : Array.Empty<object>();
+            var fields = new Dictionary<string, object?>();
+            if (depth >= 2) return fields;
+            var each = TextFields(type, depth);
+            foreach (var property in Properties(type))
+            {
+                var weight = TextFields(property.PropertyType, depth + 1);
+                if (share > 0 && weight == 0 && !Simple(Nullable.GetUnderlyingType(property.PropertyType) ?? property.PropertyType)) continue;
+                fields[property.Name] = Value(property.PropertyType, share > 0 && weight > 0 ? Math.Max(1, share * weight / each) : 0, depth + 1);
+            }
+            return fields;
         }
 
         // ── One invocation, and what it cost the node ──────────────────────────────────────────────────────────
@@ -261,19 +297,20 @@ namespace VerifiedXCore.Tests
             using var deadline = new CancellationTokenSource(GiveUp);
             try
             {
-                await connection.StartAsync(deadline.Token);
+                // Measured from the first byte: what the hub does while an unknown caller connects is part of the cost.
                 before = GC.GetTotalAllocatedBytes(precise: true);
                 clock.Start();
+                await connection.StartAsync(deadline.Token);
                 await connection.InvokeCoreAsync(method, typeof(object), args, deadline.Token);
                 outcome = "answered";
             }
             catch (HubException ex) when (ex.Message.Contains("An unexpected error occurred", StringComparison.Ordinal)) { outcome = "unhandled error"; }
             catch (HubException ex) { outcome = "refused: " + ex.Message.Split((char)10)[0].TrimEnd((char)13).Replace("|", "/"); }
             // The client cancels what is pending when the hub closes the connection: only the deadline is no answer.
-            catch (OperationCanceledException) when (deadline.IsCancellationRequested) { outcome = clock.IsRunning ? "no answer" : "no connection"; }
+            catch (OperationCanceledException) when (deadline.IsCancellationRequested) { outcome = "no answer"; } // connecting or answering
             catch (Exception ex) { outcome = "closed: " + ex.GetType().Name; } // the hub closed the connection: a refusal
             clock.Stop();
-            var allocated = before == 0 ? 0 : GC.GetTotalAllocatedBytes(precise: true) - before;
+            var allocated = GC.GetTotalAllocatedBytes(precise: true) - before;
             try { await connection.DisposeAsync(); } catch { }
 
             var counted = Math.Max(messageBytes, 64 * Kb);
