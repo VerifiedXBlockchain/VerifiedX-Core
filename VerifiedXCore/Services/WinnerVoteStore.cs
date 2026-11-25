@@ -8,7 +8,7 @@ namespace VerifiedXCore.Services
         public long BlockHeight { get; set; }
         public string VoterAddress { get; set; } = "";
         public string WinnerAddress { get; set; } = "";
-        public List<string> ExcludedAddresses { get; set; } = new();
+        [VerifiedXCore.Utilities.JsonBound(VerifiedXCore.Utilities.ListSize.Validators)] public List<string> ExcludedAddresses { get; set; } = new();
         /// <summary>Per-voter increasing value (unix ms). A caster re-votes on retries within a height;
         /// only a NEWER signed vote from the same voter replaces its earlier one, so replaying an older
         /// vote changes nothing.</summary>
@@ -35,12 +35,18 @@ namespace VerifiedXCore.Services
         private static long _lastSequence;
 
         /// <summary>Records a vote if it is well-formed, signed by its voter and the voter is accepted.</summary>
-        public static WinnerVoteRecordResult TryRecord(SignedWinnerVote? vote, Func<string, bool> isAcceptedVoter)
+        /// <param name="relayed">A vote relayed in a peer's answer: one no newer than the vote held from its voter is not verified
+        /// again, as it would not be kept. A caster's own request is always verified.</param>
+        public static WinnerVoteRecordResult TryRecord(SignedWinnerVote? vote, Func<string, bool> isAcceptedVoter, bool relayed = false)
         {
             if (vote == null || vote.BlockHeight <= 0 || string.IsNullOrEmpty(vote.VoterAddress) || string.IsNullOrEmpty(vote.WinnerAddress))
                 return WinnerVoteRecordResult.Invalid;
             if (!isAcceptedVoter(vote.VoterAddress))
                 return WinnerVoteRecordResult.Invalid;
+            // A vote no newer than the one held from this voter would not be kept: it is not verified to find that out.
+            // An answer that repeats one signed vote thousands of times cost a signature check for each copy.
+            if (relayed && _signed.TryGetValue(vote.BlockHeight, out var held) && held.TryGetValue(vote.VoterAddress, out var existing) && existing.Sequence >= vote.Sequence)
+                return WinnerVoteRecordResult.AlreadyHeld;
             if (!ConsensusRequestAuth.VerifySigner(vote.VoterAddress, vote.SigningMessage(), vote.Signature))
                 return WinnerVoteRecordResult.Invalid;
 

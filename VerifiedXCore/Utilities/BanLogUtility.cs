@@ -41,7 +41,7 @@ namespace VerifiedXCore.Utilities
                     Directory.CreateDirectory(path);
                 }
 
-                await File.AppendAllTextAsync(path + "banlog.txt", Environment.NewLine + text);
+                await LogFile.AppendAsync(path + "banlog.txt", Environment.NewLine + text);
             }
             catch (Exception ex)
             {

@@ -42,12 +42,12 @@ namespace VerifiedXCore.Utilities
                 }
                 if (firstEntry == true)
                 {
-                    await File.AppendAllTextAsync(path + "beaconlog.txt", Environment.NewLine + " ");
+                    await LogFile.AppendAsync(path + "beaconlog.txt", Environment.NewLine + " ");
 
 
                 }
 
-                await File.AppendAllTextAsync(path + "beaconlog.txt", Environment.NewLine + text);
+                await LogFile.AppendAsync(path + "beaconlog.txt", Environment.NewLine + text);
             }
             catch (Exception ex)
             {

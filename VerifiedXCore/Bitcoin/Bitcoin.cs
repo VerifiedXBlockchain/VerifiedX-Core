@@ -260,7 +260,7 @@ namespace VerifiedXCore.Bitcoin
                                                 {
                                                     var rawTx = await client.GetRawTx(bTx.TxHash);
                                                     var tx = NBitcoin.Transaction.Parse(rawTx.RawTx, Globals.BTCNetwork);
-                                                    var bitcoinAddress = BitcoinAddress.Create(address.Address, Globals.BTCNetwork);
+                                                    var bitcoinAddress = VerifiedXCore.Utilities.BoundedDecode.BitcoinAddress(address.Address, Globals.BTCNetwork);
                                                     List<BitcoinAddress> outgoingAddrs = new List<BitcoinAddress>();
                                                     foreach (var input in tx.Inputs)
                                                     {
@@ -340,7 +340,7 @@ namespace VerifiedXCore.Bitcoin
                                                 {
                                                     var rawTx = await client.GetRawTx(bTx.TxHash);
                                                     var tx = NBitcoin.Transaction.Parse(rawTx.RawTx, Globals.BTCNetwork);
-                                                    var bitcoinAddress = BitcoinAddress.Create(address.Address, Globals.BTCNetwork);
+                                                    var bitcoinAddress = VerifiedXCore.Utilities.BoundedDecode.BitcoinAddress(address.Address, Globals.BTCNetwork);
                                                     List<BitcoinAddress> outgoingAddrs = new List<BitcoinAddress>();
                                                     foreach (var input in tx.Inputs)
                                                     {
@@ -555,7 +555,7 @@ namespace VerifiedXCore.Bitcoin
                                                     {
                                                         var rawTx = await client.GetRawTx(bTx.TxHash);
                                                         var tx = NBitcoin.Transaction.Parse(rawTx.RawTx, Globals.BTCNetwork);
-                                                        var bitcoinAddress = BitcoinAddress.Create(address.DepositAddress, Globals.BTCNetwork);
+                                                        var bitcoinAddress = VerifiedXCore.Utilities.BoundedDecode.BitcoinAddress(address.DepositAddress, Globals.BTCNetwork);
                                                         List<BitcoinAddress> outgoingAddrs = new List<BitcoinAddress>();
                                                         foreach (var input in tx.Inputs)
                                                         {
@@ -637,7 +637,7 @@ namespace VerifiedXCore.Bitcoin
                                                     {
                                                         var rawTx = await client.GetRawTx(bTx.TxHash);
                                                         var tx = NBitcoin.Transaction.Parse(rawTx.RawTx, Globals.BTCNetwork);
-                                                        var bitcoinAddress = BitcoinAddress.Create(address.DepositAddress, Globals.BTCNetwork);
+                                                        var bitcoinAddress = VerifiedXCore.Utilities.BoundedDecode.BitcoinAddress(address.DepositAddress, Globals.BTCNetwork);
                                                         List<BitcoinAddress> outgoingAddrs = new List<BitcoinAddress>();
                                                         foreach (var input in tx.Inputs)
                                                         {

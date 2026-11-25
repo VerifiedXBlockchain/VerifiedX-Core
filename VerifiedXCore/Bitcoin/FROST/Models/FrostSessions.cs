@@ -454,6 +454,9 @@ namespace VerifiedXCore.Bitcoin.FROST.Models
         /// <summary>Room taken for state a session is about to keep, until it keeps it (<see cref="MakeRoomForDkgState"/>).</summary>
         private static readonly Dictionary<DKGSession, long> DkgReserved = new(ReferenceEqualityComparer.Instance);
 
+        /// <summary>Sessions holding taken room now: none once every request that took it has ended.</summary>
+        internal static int DkgReservedCount { get { lock (DkgMemoryGate) return DkgReserved.Count; } }
+
         /// <summary>Room taken by <see cref="MakeRoomForDkgState"/>, given back when the work it was taken for ends.</summary>
         public sealed class DkgRoom : IDisposable
         {
@@ -525,8 +528,9 @@ namespace VerifiedXCore.Bitcoin.FROST.Models
                     return "Busy: the key ceremonies started from this network hold all the memory they may. Ask again later.";
                 if (!DropOldest(_ => true, OfAll, MAX_DKG_HELD_BYTES))
                     return "Busy: key ceremonies hold all the memory this validator gives them. Ask again later.";
-                DkgReserved[session] = Reserved(session) + incomingBytes;
-                room = new DkgRoom(session, incomingBytes);
+                // Nothing is held for no bytes: an entry is only ever made for room that its release gives back.
+                if (incomingBytes > 0) DkgReserved[session] = Reserved(session) + incomingBytes;
+                room = new DkgRoom(session, Math.Max(0, incomingBytes));
                 return null;
             }
         }

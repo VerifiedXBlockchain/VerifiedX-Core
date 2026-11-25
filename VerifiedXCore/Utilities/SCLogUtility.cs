@@ -46,7 +46,7 @@ namespace VerifiedXCore.Utilities
 
                 if (File.Exists(path + "sclog.txt"))
                 {
-                    var bytes = File.ReadAllBytes(path + "sclog.txt").Length;
+                    var bytes = LogFile.Length(path + "sclog.txt");
                     var totalMB = bytes / 1024 / 1024;
                     if (totalMB > 100)
                         writeLog = false;
@@ -55,7 +55,7 @@ namespace VerifiedXCore.Utilities
                 }
 
                 if (writeLog)
-                    await File.AppendAllTextAsync(path + "sclog.txt", Environment.NewLine + text);
+                    await LogFile.AppendAsync(path + "sclog.txt", Environment.NewLine + text);
             }
             catch (Exception ex)
             {
@@ -108,12 +108,12 @@ namespace VerifiedXCore.Utilities
                 }
                 if (firstEntry == true)
                 {
-                    await File.AppendAllTextAsync(path + "sclog.txt", Environment.NewLine + " ");
+                    await LogFile.AppendAsync(path + "sclog.txt", Environment.NewLine + " ");
                 }
 
                 if (File.Exists(path + "sclog.txt"))
                 {
-                    var bytes = File.ReadAllBytes(path + "sclog.txt").Length;
+                    var bytes = LogFile.Length(path + "sclog.txt");
                     var totalMB = bytes / 1024 / 1024;
                     if (totalMB > 100)
                         writeLog = false;
@@ -122,7 +122,7 @@ namespace VerifiedXCore.Utilities
                 }
 
                 if(writeLog)
-                    await File.AppendAllTextAsync(path + "sclog.txt", Environment.NewLine + text);
+                    await LogFile.AppendAsync(path + "sclog.txt", Environment.NewLine + text);
             }
             catch (Exception ex)
             {

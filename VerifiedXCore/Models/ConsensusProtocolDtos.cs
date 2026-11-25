@@ -190,6 +190,14 @@ namespace VerifiedXCore.Models
     /// every commitment the responder currently holds for the requested height (keyed by
     /// caster address). The caller merges these into its local store and re-tallies.
     /// </summary>
+    /// <summary>A caster's answer to a winner vote exchange: every signed vote it holds for the height.</summary>
+    public class WinnerVoteExchangeResponse
+    {
+        public long BlockHeight { get; set; }
+        /// <summary>One vote a committee member: held to the committee's size before any is verified.</summary>
+        public List<VerifiedXCore.Services.SignedWinnerVote> SignedVotes { get; set; } = new();
+    }
+
     public class ProofSetExchangeResponse
     {
         public long BlockHeight { get; set; }

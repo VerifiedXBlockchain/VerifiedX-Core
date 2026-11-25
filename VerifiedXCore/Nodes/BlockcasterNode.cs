@@ -4036,7 +4036,9 @@ namespace VerifiedXCore.Nodes
                                 var body = await resp.Content.ReadAsStringAsync();
                                 if (!string.IsNullOrEmpty(body) && body != "0")
                                 {
-                                    var voteResp = JsonConvert.DeserializeAnonymousType(body, new { BlockHeight = 0L, SignedVotes = new List<SignedWinnerVote>() });
+                                    // Held to its shape before it is read: one vote a committee member, not thousands.
+                                    var voteResp = Utilities.BoundedJson.Refusal(body, Utilities.BoundedJson.ValidatorApi, typeof(WinnerVoteExchangeResponse)) == null
+                                        ? JsonConvert.DeserializeObject<WinnerVoteExchangeResponse>(body) : null;
                                     if (voteResp?.SignedVotes != null)
                                     {
                                         // VX-08: merge only votes for THIS round that carry their voter's
@@ -4045,7 +4047,7 @@ namespace VerifiedXCore.Nodes
                                         foreach (var v in voteResp.SignedVotes)
                                         {
                                             if (v != null && v.BlockHeight == height)
-                                                WinnerVoteStore.TryRecord(v, IsCommitteeVoter);
+                                                WinnerVoteStore.TryRecord(v, IsCommitteeVoter, relayed: true);
                                         }
                                     }
                                 }
@@ -4228,6 +4230,8 @@ namespace VerifiedXCore.Nodes
                             if (!resp.IsSuccessStatusCode) return;
                             var body = await resp.Content.ReadAsStringAsync().ConfigureAwait(false);
                             if (string.IsNullOrEmpty(body) || body == "0") return;
+                            // Held to its shape before it is read: one commitment a committee member, not thousands.
+                            if (Utilities.BoundedJson.Refusal(body, Utilities.BoundedJson.ValidatorApi, typeof(Models.ProofSetExchangeResponse)) != null) return;
                             var psResp = JsonConvert.DeserializeObject<Models.ProofSetExchangeResponse>(body);
                             if (psResp?.Commitments == null) return;
                             foreach (var kv in psResp.Commitments)
@@ -4236,7 +4240,7 @@ namespace VerifiedXCore.Nodes
                                 if (kv.Value.BlockHeight != height) continue;
                                 // VX-16: each relayed commitment must be signed by its own caster, who must be in the
                                 // committee; hash re-verified inside. It used to be merged on the hash check alone.
-                                ProofSetCommitmentStore.TryRecord(kv.Value, IsCommitteeCaster);
+                                ProofSetCommitmentStore.TryRecord(kv.Value, IsCommitteeCaster, relayed: true);
                             }
                         }
                         catch { /* best-effort */ }

@@ -70,7 +70,7 @@ namespace VerifiedXCore.Bitcoin.ElectrumX
             BitcoinAddress destination;
             try
             {
-                destination = BitcoinAddress.Create(address, Globals.BTCNetwork);
+                destination = VerifiedXCore.Utilities.BoundedDecode.BitcoinAddress(address, Globals.BTCNetwork);
             }
             catch
             {

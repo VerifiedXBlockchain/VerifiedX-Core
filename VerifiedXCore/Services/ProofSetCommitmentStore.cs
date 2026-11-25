@@ -26,13 +26,20 @@ namespace VerifiedXCore.Services
             ConsensusMessageFormatter.FormatProofSetV1(c.BlockHeight, c.CasterAddress, c.CommitmentHash, c.Sequence);
 
         /// <summary>Records a commitment if it is well-formed, signed by its caster and the caster is accepted.</summary>
-        public static ProofSetRecordResult TryRecord(ProofSetCommitment? c, Func<string, bool> isAcceptedCaster)
+        /// <param name="relayed">A commitment relayed in a peer's answer: one no newer than the one held from its caster is not
+        /// hashed or verified again, as it would not be kept. A caster's own request is always verified.</param>
+        public static ProofSetRecordResult TryRecord(ProofSetCommitment? c, Func<string, bool> isAcceptedCaster, bool relayed = false)
         {
             if (c == null || c.BlockHeight <= 0 || string.IsNullOrEmpty(c.CasterAddress) || string.IsNullOrEmpty(c.CommitmentHash))
                 return ProofSetRecordResult.Invalid;
             var addresses = c.ProofAddressesSorted ?? new List<string>();
             if (addresses.Count > MaxAddresses)
                 return ProofSetRecordResult.Invalid;
+            // A commitment no newer than the one held from this caster would not be kept: it is neither hashed nor
+            // verified to find that out. An answer that repeated one commitment cost a hash and a signature check a copy.
+            if (relayed && Globals.CasterProofSetCommitDict.TryGetValue(c.BlockHeight, out var held) && held.TryGetValue(c.CasterAddress, out var existing)
+                && existing.Sequence >= c.Sequence && isAcceptedCaster(c.CasterAddress))
+                return ProofSetRecordResult.AlreadyHeld;
             if (!string.Equals(Nodes.BlockcasterNode.ComputeProofSetCommitmentHash(addresses), c.CommitmentHash, StringComparison.Ordinal))
                 return ProofSetRecordResult.Invalid;
             if (!isAcceptedCaster(c.CasterAddress))

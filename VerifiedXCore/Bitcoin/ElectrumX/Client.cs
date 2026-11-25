@@ -293,7 +293,7 @@ namespace VerifiedXCore.Bitcoin.ElectrumX
         {
             var prefix = "";
 
-            return string.IsNullOrEmpty(address) ? null : BitcoinAddress.Create(prefix + address, Globals.BTCNetwork);
+            return string.IsNullOrEmpty(address) ? null : VerifiedXCore.Utilities.BoundedDecode.BitcoinAddress(prefix + address, Globals.BTCNetwork);
         }
         #endregion
 
@@ -309,7 +309,7 @@ namespace VerifiedXCore.Bitcoin.ElectrumX
         {
             if (string.IsNullOrEmpty(baseAddr))
                 return new List<BlockchainScripthashGetHistoryResult>();
-            return await GetHistoryByScriptHash(GetScriptHash(BitcoinAddress.Create(baseAddr, Globals.BTCNetwork)));
+            return await GetHistoryByScriptHash(GetScriptHash(VerifiedXCore.Utilities.BoundedDecode.BitcoinAddress(baseAddr, Globals.BTCNetwork)));
         }
 
         private async Task<List<BlockchainScripthashGetHistoryResult>> GetHistoryByScriptHash(string scriptHash)
@@ -333,7 +333,7 @@ namespace VerifiedXCore.Bitcoin.ElectrumX
         #region Get Balance
         public async Task<BlockchainScripthashGetBalanceResult> GetBalance(string address, bool isLegacy)
         {
-            return await GetBalance(BitcoinAddress.Create(address, Globals.BTCNetwork));
+            return await GetBalance(VerifiedXCore.Utilities.BoundedDecode.BitcoinAddress(address, Globals.BTCNetwork));
         }
 
         public async Task<BlockchainScripthashGetBalanceResult> GetBalance(IDestination address)

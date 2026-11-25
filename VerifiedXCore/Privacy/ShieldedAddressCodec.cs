@@ -78,7 +78,7 @@ namespace VerifiedXCore.Privacy
             byte[] withChecksum;
             try
             {
-                withChecksum = Encoders.Base58.DecodeData(body);
+                withChecksum = VerifiedXCore.Utilities.BoundedDecode.Base58(body, ShieldedAddressConstants.PayloadLengthV2 + 4); // at most 97 characters
             }
             catch (Exception ex)
             {

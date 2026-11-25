@@ -43,12 +43,12 @@ namespace VerifiedXCore.Utilities
                 }
                 if (firstEntry == true)
                 {
-                    await File.AppendAllTextAsync(path + "apilog.txt", Environment.NewLine + " ");
+                    await LogFile.AppendAsync(path + "apilog.txt", Environment.NewLine + " ");
                 }
 
                 if (File.Exists(path + "apilog.txt"))
                 {
-                    var bytes = File.ReadAllBytes(path + "apilog.txt").Length;
+                    var bytes = LogFile.Length(path + "apilog.txt");
                     var totalMB = bytes / 1024 / 1024;
                     if (totalMB > 100)
                         writeLog = false;
@@ -57,7 +57,7 @@ namespace VerifiedXCore.Utilities
                 }
 
                 if(writeLog)
-                    await File.AppendAllTextAsync(path + "apilog.txt", Environment.NewLine + text);
+                    await LogFile.AppendAsync(path + "apilog.txt", Environment.NewLine + text);
             }
             catch (Exception ex)
             {
