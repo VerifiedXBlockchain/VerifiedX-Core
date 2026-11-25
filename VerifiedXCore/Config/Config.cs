@@ -652,8 +652,10 @@ namespace VerifiedXCore.Config
             return records;
         }
 
-        public static async void EstablishConfigFile()
-		{
+        public static void EstablishConfigFile() => VerifiedXCore.Utilities.SafeTask.Forget(EstablishConfigFileAsync(), "Config.EstablishConfigFile");
+
+        private static async Task EstablishConfigFileAsync()
+        {
 			var path = GetPathUtility.GetConfigPath();
 			var fileExist = File.Exists(path + "config.txt");
 
@@ -703,7 +705,9 @@ namespace VerifiedXCore.Config
 			}
 		}
 
-        public static async void EstablishABLFile()
+        public static void EstablishABLFile() => VerifiedXCore.Utilities.SafeTask.Forget(EstablishABLFileAsync(), "Config.EstablishABLFile");
+
+        private static async Task EstablishABLFileAsync()
         {
             var path = GetPathUtility.GetABLPath();
             var fileExist = File.Exists(path + "abl.txt");

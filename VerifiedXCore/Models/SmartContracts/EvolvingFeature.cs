@@ -249,7 +249,9 @@ namespace VerifiedXCore.Models.SmartContracts
 
         // Run as fire and forget from a block's incoming transactions: a fault in a call it cannot read is logged, never
         // left to end the process.
-        public static async void EvolveNFT(Transaction tx)
+        public static void EvolveNFT(Transaction tx) => VerifiedXCore.Utilities.SafeTask.Forget(EvolveNFTAsync(tx), "EvolvingFeature.EvolveNFT");
+
+        private static async Task EvolveNFTAsync(Transaction tx)
         {
             try { await EvolveNFTCore(tx); }
             catch (Exception ex) { ErrorLogUtility.LogError(ex.ToString(), "EvolvingFeature.EvolveNFT()"); }
@@ -323,7 +325,9 @@ namespace VerifiedXCore.Models.SmartContracts
         #endregion
 
         #region DevolveNFT
-        public static async void DevolveNFT(Transaction tx)
+        public static void DevolveNFT(Transaction tx) => VerifiedXCore.Utilities.SafeTask.Forget(DevolveNFTAsync(tx), "EvolvingFeature.DevolveNFT");
+
+        private static async Task DevolveNFTAsync(Transaction tx)
         {
             try { await DevolveNFTCore(tx); }
             catch (Exception ex) { ErrorLogUtility.LogError(ex.ToString(), "EvolvingFeature.DevolveNFT()"); }
@@ -399,7 +403,9 @@ namespace VerifiedXCore.Models.SmartContracts
         #endregion
 
         #region EvolveToSpecificStateNFT
-        public static async void EvolveToSpecificStateNFT(Transaction tx)
+        public static void EvolveToSpecificStateNFT(Transaction tx) => VerifiedXCore.Utilities.SafeTask.Forget(EvolveToSpecificStateNFTAsync(tx), "EvolvingFeature.EvolveToSpecificStateNFT");
+
+        private static async Task EvolveToSpecificStateNFTAsync(Transaction tx)
         {
             try { await EvolveToSpecificStateNFTCore(tx); }
             catch (Exception ex) { ErrorLogUtility.LogError(ex.ToString(), "EvolvingFeature.EvolveToSpecificStateNFT()"); }

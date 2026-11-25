@@ -27,7 +27,9 @@ namespace VerifiedXCore.Commands
 {
     public class BaseCommandServices
     {
-        public static async void UnlockWallet()
+        public static void UnlockWallet() => VerifiedXCore.Utilities.SafeTask.Forget(UnlockWalletAsync(), "BaseCommandServices.UnlockWallet");
+
+        private static async Task UnlockWalletAsync()
         {
             try
             {
@@ -57,7 +59,9 @@ namespace VerifiedXCore.Commands
             catch (Exception ex) { }
             
         }
-        public static async void PrintKeys()
+        public static void PrintKeys() => VerifiedXCore.Utilities.SafeTask.Forget(PrintKeysAsync(), "BaseCommandServices.PrintKeys");
+
+        private static async Task PrintKeysAsync()
         {
             var accounts = AccountData.GetAccounts();
 
@@ -377,7 +381,9 @@ namespace VerifiedXCore.Commands
             }
         }
 
-        public static async void StartMother()
+        public static void StartMother() => VerifiedXCore.Utilities.SafeTask.Forget(StartMotherAsync(), "BaseCommandServices.StartMother");
+
+        private static async Task StartMotherAsync()
         {
             var mom = Mother.GetMother();
             bool firstSave = false;
@@ -491,7 +497,9 @@ namespace VerifiedXCore.Commands
                 await Task.Delay(1000);
             }
         }
-        public static async void SetTrilliumOutput()
+        public static void SetTrilliumOutput() => VerifiedXCore.Utilities.SafeTask.Forget(SetTrilliumOutputAsync(), "BaseCommandServices.SetTrilliumOutput");
+
+        private static async Task SetTrilliumOutputAsync()
         {
             Globals.ShowTrilliumOutput ^= true;
             Globals.ShowTrilliumDiagnosticBag ^= true;
@@ -500,7 +508,9 @@ namespace VerifiedXCore.Commands
             Console.WriteLine($"Trillium Diagnostic Output Set to: {Globals.ShowTrilliumDiagnosticBag}");
         }
 
-        public static async void ResetValidator()
+        public static void ResetValidator() => VerifiedXCore.Utilities.SafeTask.Forget(ResetValidatorAsync(), "BaseCommandServices.ResetValidator");
+
+        private static async Task ResetValidatorAsync()
         {
             Globals.ValidatorAddress = "";
             Globals.ValidatorPublicKey = "";
@@ -517,7 +527,9 @@ namespace VerifiedXCore.Commands
                 ValidatorLogUtility.Log("ValidatorErrorReset() called manually. Results: Success!", "Program.validatorListCheckTimer_Elapsed()");
             }
         }
-        public static async void AddPeer()
+        public static void AddPeer() => VerifiedXCore.Utilities.SafeTask.Forget(AddPeerAsync(), "BaseCommandServices.AddPeer");
+
+        private static async Task AddPeerAsync()
         {
             IPAddress ip;
             Console.WriteLine("Please input the IP of the peer...");
@@ -585,7 +597,9 @@ namespace VerifiedXCore.Commands
             }
         }
 
-        public static async void BanPeer()
+        public static void BanPeer() => VerifiedXCore.Utilities.SafeTask.Forget(BanPeerAsync(), "BaseCommandServices.BanPeer");
+
+        private static async Task BanPeerAsync()
         {
             IPAddress ip;
             Console.WriteLine("Please input the IP of the peer...");
@@ -617,7 +631,9 @@ namespace VerifiedXCore.Commands
             }
         }
 
-        public static async void UnbanPeer()
+        public static void UnbanPeer() => VerifiedXCore.Utilities.SafeTask.Forget(UnbanPeerAsync(), "BaseCommandServices.UnbanPeer");
+
+        private static async Task UnbanPeerAsync()
         {
             IPAddress ip;
             Console.WriteLine("Please input the IP of the peer...");
@@ -739,7 +755,9 @@ namespace VerifiedXCore.Commands
             catch(Exception ex) { }
         }
 
-        public static async void CreateBeacon()
+        public static void CreateBeacon() => VerifiedXCore.Utilities.SafeTask.Forget(CreateBeaconAsync(), "BaseCommandServices.CreateBeacon");
+
+        private static async Task CreateBeaconAsync()
         {
             if(Globals.SelfBeacon != null)
             {
@@ -840,7 +858,9 @@ namespace VerifiedXCore.Commands
             }
         }
 
-        public static async void SwitchBeaconState()
+        public static void SwitchBeaconState() => VerifiedXCore.Utilities.SafeTask.Forget(SwitchBeaconStateAsync(), "BaseCommandServices.SwitchBeaconState");
+
+        private static async Task SwitchBeaconStateAsync()
         {
             var result = Beacons.SetBeaconActiveState();
 
@@ -855,7 +875,9 @@ namespace VerifiedXCore.Commands
             }
         }
 
-        public static async void CreateDecShop()
+        public static void CreateDecShop() => VerifiedXCore.Utilities.SafeTask.Forget(CreateDecShopAsync(), "BaseCommandServices.CreateDecShop");
+
+        private static async Task CreateDecShopAsync()
         {
             //Console.WriteLine("Please select the wallet you'd like to use to pay for shop registration...");
             //var accountList = AccountData.GetAccountsWithBalance();
@@ -2265,7 +2287,9 @@ namespace VerifiedXCore.Commands
             AnsiConsole.Write(table);
         }
 
-        private static async void MainMenuReturn()
+        private static void MainMenuReturn() => VerifiedXCore.Utilities.SafeTask.Forget(MainMenuReturnAsync(), "BaseCommandServices.MainMenuReturn");
+
+        private static async Task MainMenuReturnAsync()
         {
             var delay = Task.Delay(3000);
             Console.WriteLine("Returning you to main menu in 3 seconds.");

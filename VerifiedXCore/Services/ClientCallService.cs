@@ -129,7 +129,9 @@ namespace VerifiedXCore.Services
         }
 
         #region Checkpoint Work
-        private async void DoCheckpointWork(object? state)
+        private void DoCheckpointWork(object? state) => VerifiedXCore.Utilities.SafeTask.Forget(DoCheckpointWorkAsync(state), "ClientCallService.DoCheckpointWork");
+
+        private async Task DoCheckpointWorkAsync(object? state)
         {
             var retain = Globals.ChainCheckPointRetain;
             var path = GetPathUtility.GetDatabasePath();
@@ -160,7 +162,9 @@ namespace VerifiedXCore.Services
 
         #region Password Clear Work
 
-        private async void DoPasswordClearWork(object? state)
+        private void DoPasswordClearWork(object? state) => VerifiedXCore.Utilities.SafeTask.Forget(DoPasswordClearWorkAsync(state), "ClientCallService.DoPasswordClearWork");
+
+        private async Task DoPasswordClearWorkAsync(object? state)
         {
             if(Globals.IsWalletEncrypted == true)
             {
@@ -177,7 +181,9 @@ namespace VerifiedXCore.Services
 
         #region Asset Download/Upload Work
 
-        private async void DoAssetWork(object? state)
+        private void DoAssetWork(object? state) => VerifiedXCore.Utilities.SafeTask.Forget(DoAssetWorkAsync(state), "ClientCallService.DoAssetWork");
+
+        private async Task DoAssetWorkAsync(object? state)
         {
             if (!AssetLock && Globals.AutoDownloadNFTAsset)
             {
@@ -311,7 +317,9 @@ namespace VerifiedXCore.Services
         #endregion
 
         #region Block State Sync Work
-        private async void DoBlockStateSyncWork(object? state)
+        private void DoBlockStateSyncWork(object? state) => VerifiedXCore.Utilities.SafeTask.Forget(DoBlockStateSyncWorkAsync(state), "ClientCallService.DoBlockStateSyncWork");
+
+        private async Task DoBlockStateSyncWorkAsync(object? state)
         {
             if(!StateSyncLock)
             {
@@ -328,7 +336,9 @@ namespace VerifiedXCore.Services
         #endregion
 
         #region Fortis Pool Broadcast
-        private async void DoFortisPoolBroadcastWork(object? state)
+        private void DoFortisPoolBroadcastWork(object? state) => VerifiedXCore.Utilities.SafeTask.Forget(DoFortisPoolBroadcastWorkAsync(state), "ClientCallService.DoFortisPoolBroadcastWork");
+
+        private async Task DoFortisPoolBroadcastWorkAsync(object? state)
         {
             try
             {

@@ -347,7 +347,9 @@ namespace VerifiedXCore.Bitcoin
             }
         }
 
-        public static async void PrintKeys()
+        public static void PrintKeys() => VerifiedXCore.Utilities.SafeTask.Forget(PrintKeysAsync(), "BitcoinCommand.PrintKeys");
+
+        private static async Task PrintKeysAsync()
         {
             var accountList = BitcoinAccount.GetBitcoinAccounts();
 

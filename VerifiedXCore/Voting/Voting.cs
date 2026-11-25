@@ -77,7 +77,9 @@ namespace VerifiedXCore.Voting
             Nothing
         }
 
-        private static async void GetTopicDetails()
+        private static void GetTopicDetails() => VerifiedXCore.Utilities.SafeTask.Forget(GetTopicDetailsAsync(), "Voting.GetTopicDetails");
+
+        private static async Task GetTopicDetailsAsync()
         {
             Console.WriteLine("Please enter the topic ID");
             var topicUID = Console.ReadLine();
@@ -130,7 +132,9 @@ namespace VerifiedXCore.Voting
                 }
             }
         }
-        private static async void VoteOnTopic()
+        private static void VoteOnTopic() => VerifiedXCore.Utilities.SafeTask.Forget(VoteOnTopicAsync(), "Voting.VoteOnTopic");
+
+        private static async Task VoteOnTopicAsync()
         {
             Console.WriteLine("Please enter the topic ID");
             var topicUID = Console.ReadLine();
@@ -228,7 +232,9 @@ namespace VerifiedXCore.Voting
                 Console.WriteLine("You must enter a topic.");
             }
         }
-        private static async void CreateTopic()
+        private static void CreateTopic() => VerifiedXCore.Utilities.SafeTask.Forget(CreateTopicAsync(), "Voting.CreateTopic");
+
+        private static async Task CreateTopicAsync()
         {
             try
             {

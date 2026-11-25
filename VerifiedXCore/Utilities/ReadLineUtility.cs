@@ -22,7 +22,9 @@ namespace VerifiedXCore.Utilities
             return readLine;
         }
 
-        private static async void MainMenuReturn()
+        private static void MainMenuReturn() => VerifiedXCore.Utilities.SafeTask.Forget(MainMenuReturnAsync(), "ReadLineUtility.MainMenuReturn");
+
+        private static async Task MainMenuReturnAsync()
         {
             var delay = Task.Delay(3000);
             Console.WriteLine("Returning you to main menu in 3 seconds.");

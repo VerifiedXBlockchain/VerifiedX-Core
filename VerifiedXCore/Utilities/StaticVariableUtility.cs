@@ -12,7 +12,9 @@ namespace VerifiedXCore.Utilities
 {
     public class StaticVariableUtility
     {
-        public static async void PrintStaticVariables()
+        public static void PrintStaticVariables() => VerifiedXCore.Utilities.SafeTask.Forget(PrintStaticVariablesAsync(), "StaticVariableUtility.PrintStaticVariables");
+
+        private static async Task PrintStaticVariablesAsync()
         {
             var staticVars = await GetStaticVars();
 

@@ -5,7 +5,9 @@ namespace VerifiedXCore.Utilities
 {
     public class BanLogUtility
     {
-        public static async void Log(string message, string location)
+        public static void Log(string message, string location) => VerifiedXCore.Utilities.SafeTask.Forget(LogAsync(message, location), "BanLogUtility.Log");
+
+        private static async Task LogAsync(string message, string location)
         {
             try
             {

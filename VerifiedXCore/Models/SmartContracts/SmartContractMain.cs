@@ -169,7 +169,9 @@ namespace VerifiedXCore.Models.SmartContracts
                     ErrorLogUtility.LogError(ex.ToString(), "SmartContractMain.DeleteSmartContract()");
                 }
             }
-            public static async void SaveSCLocaly(SmartContractMain scMain, string scText)
+            public static void SaveSCLocaly(SmartContractMain scMain, string scText) => VerifiedXCore.Utilities.SafeTask.Forget(SaveSCLocalyAsync(scMain, scText), "SmartContractData.SaveSCLocaly");
+
+            private static async Task SaveSCLocalyAsync(SmartContractMain scMain, string scText)
             {
                 try
                 {
@@ -208,7 +210,9 @@ namespace VerifiedXCore.Models.SmartContracts
                 }
             }
 
-            public static async void CreateSmartContract(string scText, bool alreadyDecoded = false)
+            public static void CreateSmartContract(string scText, bool alreadyDecoded = false) => VerifiedXCore.Utilities.SafeTask.Forget(CreateSmartContractAsync(scText, alreadyDecoded), "SmartContractData.CreateSmartContract");
+
+            private static async Task CreateSmartContractAsync(string scText, bool alreadyDecoded = false)
             {
                 try
                 {

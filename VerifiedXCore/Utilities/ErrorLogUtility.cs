@@ -6,7 +6,9 @@ namespace VerifiedXCore.Utilities
 {
     public class ErrorLogUtility
     {
-        public static async void LogError(string message, string location)
+        public static void LogError(string message, string location) => VerifiedXCore.Utilities.SafeTask.Forget(LogErrorAsync(message, location), "ErrorLogUtility.LogError");
+
+        private static async Task LogErrorAsync(string message, string location)
         {
             try
             {

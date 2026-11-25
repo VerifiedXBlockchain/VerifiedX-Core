@@ -1095,7 +1095,9 @@ namespace VerifiedXCore
 
         }
 
-        private static async void RunCommand(string? command)
+        private static void RunCommand(string? command) => VerifiedXCore.Utilities.SafeTask.Forget(RunCommandAsync(command), "Program.RunCommand");
+
+        private static async Task RunCommandAsync(string? command)
         {
             if (!string.IsNullOrWhiteSpace(command))
             {
@@ -1237,7 +1239,9 @@ namespace VerifiedXCore
         #endregion
 
         #region DB Commits
-        private static async void dbCommitCheckTimer_Elapsed(object sender)
+        private static void dbCommitCheckTimer_Elapsed(object sender) => VerifiedXCore.Utilities.SafeTask.Forget(dbCommitCheckTimer_ElapsedAsync(sender), "Program.dbCommitCheckTimer_Elapsed");
+
+        private static async Task dbCommitCheckTimer_ElapsedAsync(object sender)
         {
             if (Globals.StopAllTimers == false)
             {
@@ -1249,7 +1253,9 @@ namespace VerifiedXCore
         #endregion
 
         #region Connection History Timer
-        private static async void connectionHistoryTimer_Elapsed(object sender)
+        private static void connectionHistoryTimer_Elapsed(object sender) => VerifiedXCore.Utilities.SafeTask.Forget(connectionHistoryTimer_ElapsedAsync(sender), "Program.connectionHistoryTimer_Elapsed");
+
+        private static async Task connectionHistoryTimer_ElapsedAsync(object sender)
         {
             try
             {
@@ -1275,7 +1281,9 @@ namespace VerifiedXCore
         #endregion
 
         #region Validator Registry Cleanup Timer (HAL-11 Fix)
-        private static async void validatorRegistryCleanupTimer_Elapsed(object sender)
+        private static void validatorRegistryCleanupTimer_Elapsed(object sender) => VerifiedXCore.Utilities.SafeTask.Forget(validatorRegistryCleanupTimer_ElapsedAsync(sender), "Program.validatorRegistryCleanupTimer_Elapsed");
+
+        private static async Task validatorRegistryCleanupTimer_ElapsedAsync(object sender)
         {
             try
             {
