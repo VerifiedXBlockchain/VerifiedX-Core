@@ -28,7 +28,7 @@ namespace VerifiedXCore.Utilities
         private static void Log(AggregateException? ex, string where)
         {
             Interlocked.Increment(ref _faults);
-            var message = $"Background work {where} failed: {ex?.GetBaseException().Message}";
+            var message = $"Background work {where} failed: {ex}"; // the whole exception: its type, stack and inner ones
             try { Console.Error.WriteLine(message); } catch { }
             // The error log's own writer is work of this kind: its failure is not logged through itself.
             if (where.StartsWith("ErrorLogUtility.", StringComparison.Ordinal)) return;

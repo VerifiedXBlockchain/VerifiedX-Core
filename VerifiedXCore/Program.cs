@@ -185,7 +185,7 @@ namespace VerifiedXCore
             {
                 Globals.StartArguments = args.ToStringFromArray();//store for later in case of update restart.
 
-                argList.ForEach(async x =>
+                argList.ForEach(arg => VerifiedXCore.Utilities.SafeTask.Forget(new Func<string, Task>(async x =>
                 {
                     var argC = x.ToLower();
                     if(argC.Contains("headless"))
@@ -330,7 +330,7 @@ namespace VerifiedXCore
                             }
                         }
                     }
-                });
+                })(arg), "Program.Main arguments"));
             }
 
             if(runSingleRequest)
@@ -561,7 +561,7 @@ namespace VerifiedXCore
             //To update this go to project -> right click properties -> go To debug -> general -> open debug launch profiles
             if (args.Length != 0)
             {
-                argList.ForEach(async x =>
+                argList.ForEach(arg => VerifiedXCore.Utilities.SafeTask.Forget(new Func<string, Task>(async x =>
                 {
                     var argC = x.ToLower();
                     if (argC == "enableapi")
@@ -637,7 +637,7 @@ namespace VerifiedXCore
                             //bad key
                         }
                     }
-                });
+                })(arg), "Program.Main arguments"));
             }
 
             if (!string.IsNullOrWhiteSpace(Globals.ConfigValidator))
