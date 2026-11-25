@@ -1,3 +1,4 @@
+using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 using VerifiedXCore.Bitcoin.Models;
 using VerifiedXCore.Bitcoin.Services;
@@ -1099,7 +1100,10 @@ namespace VerifiedXCore.Services
             var alsoRefused = height >= Globals.PathAuditRulesHeight ? ProcessBoundBuiltins : Array.Empty<string>();
             // The size, nesting and call limits: always at admission, in a block from ContractBodyLimitsHeight.
             var limits = !inBlock || height >= Globals.ContractBodyLimitsHeight;
-            foreach (var body in CarriedContractBodies(tx?.Data))
+            // Every spelling of the key the code that runs the body reads: always at admission, in a block from
+            // ContractBodyKeySpellingHeight. Below it a block's bodies are found as they always were.
+            var everySpelling = !inBlock || height >= Globals.ContractBodyKeySpellingHeight;
+            foreach (var body in everySpelling ? CarriedContractBodies(tx?.Data) : CarriedContractBodiesBeforeKeySpelling(tx?.Data))
             {
                 string text;
                 byte[]? unpacked;
@@ -1221,8 +1225,43 @@ namespace VerifiedXCore.Services
             return (n == 0 ? 0 : depth.Max(), Math.Max(globals, n == 0 ? 0 : calls.Max()));
         }
 
-        /// <summary>Every string "Data" value in the payload (array or object shape) - the contract bodies a transaction carries.</summary>
-        private static IEnumerable<string> CarriedContractBodies(string? txData)
+        /// <summary>
+        /// Every contract body a transaction carries: each string value under a key read as "Data" in any letter case, in
+        /// the payload's object or array shape. The payload is parsed as the code that runs the body parses it, so a key
+        /// written with an escape (<c>"\u0044ata"</c>), in single quotes or bare is found too. Every value under such a
+        /// key is returned, the same key written twice included (the payload is read token by token, so no copy is
+        /// replaced by a later one), so a reader that takes the first, the last or another casing never runs a body the
+        /// rules did not judge.
+        /// </summary>
+        internal static IEnumerable<string> CarriedContractBodies(string? txData)
+        {
+            var bodies = new List<string>();
+            if (string.IsNullOrEmpty(txData)) return bodies;
+            try
+            {
+                using var reader = new JsonTextReader(new StringReader(txData)) { DateParseHandling = DateParseHandling.None, MaxDepth = 64 };
+                int? keyDepth = null; // the depth of the names of the payload's objects: 1 for an object, 2 for an array of them
+                while (reader.Read())
+                {
+                    if (keyDepth == null)
+                    {
+                        if (reader.TokenType == JsonToken.Comment) continue;
+                        if (reader.TokenType != JsonToken.StartObject && reader.TokenType != JsonToken.StartArray) break;
+                        keyDepth = reader.TokenType == JsonToken.StartArray ? 2 : 1;
+                        continue;
+                    }
+                    if (reader.TokenType == JsonToken.PropertyName && reader.Depth == keyDepth
+                        && string.Equals((string?)reader.Value, "Data", StringComparison.OrdinalIgnoreCase)
+                        && reader.Read() && reader.TokenType == JsonToken.String && reader.Value is string body && body.Length > 0)
+                        bodies.Add(body);
+                }
+            }
+            catch (Exception ex) when (ex is JsonException or FormatException or OverflowException or ArgumentException) { } // what was found before is judged
+            return bodies;
+        }
+
+        /// <summary>The bodies as blocks below ContractBodyKeySpellingHeight were judged: under the exact text "Data" only.</summary>
+        private static IEnumerable<string> CarriedContractBodiesBeforeKeySpelling(string? txData)
         {
             if (string.IsNullOrEmpty(txData) || !txData.Contains("\"Data\"")) yield break;
             JToken root;

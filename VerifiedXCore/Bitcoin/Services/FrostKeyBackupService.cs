@@ -1,4 +1,5 @@
 using Newtonsoft.Json;
+using Newtonsoft.Json.Linq;
 using VerifiedXCore.Bitcoin.FROST.Models;
 using VerifiedXCore.Bitcoin.Models;
 using VerifiedXCore.Data;
@@ -768,6 +769,12 @@ namespace VerifiedXCore.Bitcoin.Services
         /// <summary>Bytes read from one peer's answer: at least this, and an honest answer's most at the longest rows.</summary>
         public const long MinAnswerBytes = 32L * 1024 * 1024;
         private const long MaxItemBytes = 20 * 1024;
+        /// <summary>
+        /// Bytes the stream may give while one item is read: an honest item is under <see cref="MaxItemBytes"/>, but the
+        /// JSON reader reads ahead to fill a buffer it doubles for the longest token, about 250 KB for an honest 16 KB
+        /// blob. This window is four times that, and is what one item can make the node hold.
+        /// </summary>
+        internal const long ItemWindowBytes = 1024 * 1024;
 
         /// <summary>
         /// The most items an honest answer holds: a peer keeps one backup a contract for an owner, so one for each contract on
@@ -837,7 +844,14 @@ namespace VerifiedXCore.Bitcoin.Services
                     while (await json.ReadAsync(deadline) && json.TokenType != JsonToken.EndArray)
                     {
                         if (++read > itemLimit) return new RecoveryAnswer(items, Complete: false);
-                        var item = serializer.Deserialize<BackupRecoveryItem>(json);
+                        // Each item is read token by token, with the deadline, and within a window no honest item comes
+                        // near: one longer than that ends the answer before it is held, whatever field it is in.
+                        limited.BeginItem(ItemWindowBytes);
+                        var token = await JToken.ReadFromAsync(json, deadline);
+                        limited.EndItem();
+                        BackupRecoveryItem? item;
+                        try { item = token is JObject obj ? obj.ToObject<BackupRecoveryItem>(serializer) : null; }
+                        catch (JsonException) { continue; }
                         if (item == null || string.IsNullOrEmpty(item.SmartContractUID)) continue;
                         if (item.SmartContractUID.Length > VerifiedXCore.Bitcoin.FROST.Models.FrostPeerKeyBackup.MaxIdChars
                             || item.EncryptedBlob.Length > VerifiedXCore.Bitcoin.FROST.Models.FrostPeerKeyBackup.MaxBlobChars + RandomNonceBlobPrefix.Length + 64
@@ -860,8 +874,12 @@ namespace VerifiedXCore.Bitcoin.Services
             private readonly long _limit;
             private readonly CancellationToken _deadline;
             private long _read;
+            private long _itemEnd = long.MaxValue;
             /// <param name="deadline">Applies to every read: the reader above passes no token of its own down to the stream.</param>
             public BoundedReadStream(Stream inner, long limit, CancellationToken deadline) { _inner = inner; _limit = limit; _deadline = deadline; }
+            /// <summary>From here at most <paramref name="window"/> more bytes are read until <see cref="EndItem"/>.</summary>
+            public void BeginItem(long window) => _itemEnd = _read + window;
+            public void EndItem() => _itemEnd = long.MaxValue;
             public override bool CanRead => true;
             public override bool CanSeek => false;
             public override bool CanWrite => false;
@@ -871,7 +889,11 @@ namespace VerifiedXCore.Bitcoin.Services
             public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
             public override void SetLength(long value) => throw new NotSupportedException();
             public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
-            public override int Read(byte[] buffer, int offset, int count) => Count(_inner.Read(buffer, offset, count));
+            public override int Read(byte[] buffer, int offset, int count)
+            {
+                _deadline.ThrowIfCancellationRequested(); // a read under way is ended by the caller closing the body at the deadline
+                return Count(_inner.Read(buffer, offset, count));
+            }
             public override async Task<int> ReadAsync(byte[] buffer, int offset, int count, CancellationToken cancellationToken)
             {
                 using var both = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, _deadline);
@@ -885,7 +907,7 @@ namespace VerifiedXCore.Bitcoin.Services
             private int Count(int n)
             {
                 _read += n;
-                if (_read > _limit) throw new LimitReached();
+                if (_read > _limit || _read > _itemEnd) throw new LimitReached();
                 return n;
             }
         }
@@ -903,6 +925,8 @@ namespace VerifiedXCore.Bitcoin.Services
                 using var response = await _backupHttpClient.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, deadline.Token);
                 if (!response.IsSuccessStatusCode) return null;
                 await using var body = await response.Content.ReadAsStreamAsync(deadline.Token);
+                // Whatever read is under way at the deadline, closing the body ends it.
+                using var closeAtDeadline = deadline.Token.Register(() => { try { response.Dispose(); } catch { } });
                 return await ReadRecoveryAnswerAsync(body, deadline.Token);
             }
             catch (Exception ex)

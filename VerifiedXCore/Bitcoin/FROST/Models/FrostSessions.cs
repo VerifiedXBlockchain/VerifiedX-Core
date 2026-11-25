@@ -453,21 +453,28 @@ namespace VerifiedXCore.Bitcoin.FROST.Models
         private static readonly object DkgMemoryGate = new();
         /// <summary>Room taken for state a session is about to keep, until it keeps it (<see cref="MakeRoomForDkgState"/>).</summary>
         private static readonly Dictionary<DKGSession, long> DkgReserved = new(ReferenceEqualityComparer.Instance);
+        /// <summary>
+        /// Starts given room and not yet ended: counted with the sessions kept, so starts at once each see the others'
+        /// state before any of them is kept.
+        /// </summary>
+        private static readonly HashSet<DKGSession> DkgStarting = new(ReferenceEqualityComparer.Instance);
 
         /// <summary>Sessions holding taken room now: none once every request that took it has ended.</summary>
-        internal static int DkgReservedCount { get { lock (DkgMemoryGate) return DkgReserved.Count; } }
+        internal static int DkgReservedCount { get { lock (DkgMemoryGate) return DkgReserved.Count + DkgStarting.Count; } }
 
         /// <summary>Room taken by <see cref="MakeRoomForDkgState"/>, given back when the work it was taken for ends.</summary>
         public sealed class DkgRoom : IDisposable
         {
             private readonly DKGSession _session;
             private long _bytes;
-            internal DkgRoom(DKGSession session, long bytes) { _session = session; _bytes = bytes; }
+            private bool _starting;
+            internal DkgRoom(DKGSession session, long bytes, bool starting) { _session = session; _bytes = bytes; _starting = starting; }
 
             public void Dispose()
             {
                 lock (DkgMemoryGate)
                 {
+                    if (_starting) { DkgStarting.Remove(_session); _starting = false; }
                     var bytes = _bytes;
                     _bytes = 0;
                     if (bytes == 0 || !DkgReserved.TryGetValue(_session, out var held)) return;
@@ -498,15 +505,18 @@ namespace VerifiedXCore.Bitcoin.FROST.Models
         /// network's, then any. Null when there is room; otherwise why not, and the caller refuses what it was given.
         /// The room is taken here, under the same lock that judged it, and held by <paramref name="room"/> until the
         /// caller has kept what it was taken for: two requests at once cannot both be given the same room.
+        /// <paramref name="starting"/>: the session is a start not yet kept; while its room is held its own state is
+        /// counted for every other request.
         /// </summary>
-        public static string? MakeRoomForDkgState(DKGSession session, long incomingBytes, long nowSeconds, out DkgRoom? room)
+        public static string? MakeRoomForDkgState(DKGSession session, long incomingBytes, long nowSeconds, out DkgRoom? room, bool starting = false)
         {
             room = null;
             lock (DkgMemoryGate)
             {
                 bool SameSource(DKGSession s) => string.Equals(s.SourceIp, session.SourceIp, StringComparison.Ordinal);
                 long Reserved(DKGSession s) => DkgReserved.TryGetValue(s, out var r) ? r : 0;
-                var others = DKGSessions.Values.Where(s => !ReferenceEquals(s, session)).ToList();
+                var others = DKGSessions.Values.Concat(DkgStarting).Distinct(ReferenceEqualityComparer.Instance).Cast<DKGSession>()
+                    .Where(s => !ReferenceEquals(s, session)).ToList();
                 var held = others.ToDictionary(s => s, s => DkgHeldBytes(s) + Reserved(s));
                 var mine = DkgHeldBytes(session) + Reserved(session);
                 long OfSource() => mine + held.Where(h => SameSource(h.Key)).Sum(h => h.Value);
@@ -514,7 +524,7 @@ namespace VerifiedXCore.Bitcoin.FROST.Models
 
                 bool DropOldest(Func<DKGSession, bool> among, Func<long> holding, long limit)
                 {
-                    foreach (var s in others.Where(s => among(s) && held.ContainsKey(s) && Reserved(s) == 0 && DkgMayBeDropped(s, nowSeconds)).OrderBy(s => s.StartTimestamp).ToList())
+                    foreach (var s in others.Where(s => among(s) && held.ContainsKey(s) && Reserved(s) == 0 && !DkgStarting.Contains(s) && DkgMayBeDropped(s, nowSeconds)).OrderBy(s => s.StartTimestamp).ToList())
                     {
                         if (holding() + incomingBytes <= limit) break;
                         AbortDkg(s);
@@ -530,7 +540,8 @@ namespace VerifiedXCore.Bitcoin.FROST.Models
                     return "Busy: key ceremonies hold all the memory this validator gives them. Ask again later.";
                 // Nothing is held for no bytes: an entry is only ever made for room that its release gives back.
                 if (incomingBytes > 0) DkgReserved[session] = Reserved(session) + incomingBytes;
-                room = new DkgRoom(session, Math.Max(0, incomingBytes));
+                if (starting) DkgStarting.Add(session);
+                room = new DkgRoom(session, Math.Max(0, incomingBytes), starting);
                 return null;
             }
         }

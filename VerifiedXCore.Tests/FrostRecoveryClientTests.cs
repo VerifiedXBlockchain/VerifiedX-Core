@@ -96,13 +96,12 @@ namespace VerifiedXCore.Tests
                 {
                     honest,
                     new { SmartContractUID = new string('u', 5_000), EncryptedBlob = "x", PlaintextHash = "", Version = 1 },
-                    new { SmartContractUID = "sc-big", EncryptedBlob = new string('b', 200_000), PlaintextHash = "", Version = 1 },
+                    Honest("sc-after"),
                 },
             });
             var read = await FrostKeyBackupService.ReadRecoveryAnswerAsync(new MemoryStream(Encoding.UTF8.GetBytes(answer)), default, _ => true);
             Assert.True(read!.Complete);
-            Assert.Single(read.Items);
-            Assert.Equal("sc-read", read.Items[0].SmartContractUID);
+            Assert.Equal(new[] { "sc-read", "sc-after" }, read.Items.Select(i => i.SmartContractUID));
 
             var refused = await FrostKeyBackupService.ReadRecoveryAnswerAsync(new MemoryStream(Encoding.UTF8.GetBytes("{\"Success\":false,\"Message\":\"no\"}")));
             Assert.Null(refused);
@@ -138,6 +137,40 @@ namespace VerifiedXCore.Tests
             var clock = Stopwatch.StartNew();
             await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
                 FrostKeyBackupService.ReadRecoveryAnswerAsync(new EndlessStream("{\"Success\":true,\"Backups\":["), deadline.Token, _ => true));
+            Assert.True(clock.ElapsedMilliseconds < 3_000);
+        }
+
+        /// <summary>A stream that counts what has been read from it.</summary>
+        private sealed class CountingStream : MemoryStream
+        {
+            public long Taken;
+            public CountingStream(byte[] b) : base(b) { }
+            public override int Read(byte[] b, int o, int c) { var n = base.Read(b, o, c); Taken += n; return n; }
+            public override async Task<int> ReadAsync(byte[] b, int o, int c, CancellationToken t) { var n = await base.ReadAsync(b, o, c, t); Taken += n; return n; }
+            public override async ValueTask<int> ReadAsync(Memory<byte> b, CancellationToken t = default) { var n = await base.ReadAsync(b, t); Taken += n; return n; }
+        }
+
+        [Theory]
+        [InlineData("EncryptedBlob")]
+        [InlineData("SomeFieldTheModelIgnores")]
+        public async Task An_item_longer_than_any_honest_one_ends_the_answer_before_it_is_held(string field)
+        {
+            var huge = "{\"SmartContractUID\":\"sc-big\",\"" + field + "\":\"" + new string('b', 16 * 1024 * 1024) + "\"}";
+            var answer = "{\"Success\":true,\"Backups\":[" + JsonConvert.SerializeObject(Honest("sc-first")) + "," + huge + "," + JsonConvert.SerializeObject(Honest("sc-later")) + "]}";
+            var body = new CountingStream(Encoding.UTF8.GetBytes(answer));
+            var read = await FrostKeyBackupService.ReadRecoveryAnswerAsync(body, default, _ => true);
+            Assert.False(read!.Complete); // reported, and asked again
+            Assert.Equal(new[] { "sc-first" }, read.Items.Select(i => i.SmartContractUID));
+            Assert.True(body.Taken < 3 * FrostKeyBackupService.ItemWindowBytes, $"read {body.Taken} bytes");
+        }
+
+        [Fact]
+        public async Task A_peer_that_stops_inside_an_item_is_given_up_on_at_the_deadline()
+        {
+            using var deadline = new CancellationTokenSource(TimeSpan.FromMilliseconds(300));
+            var clock = Stopwatch.StartNew();
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
+                FrostKeyBackupService.ReadRecoveryAnswerAsync(new EndlessStream("{\"Success\":true,\"Backups\":[{\"SmartContractUID\":\"sc-"), deadline.Token, _ => true));
             Assert.True(clock.ElapsedMilliseconds < 3_000);
         }
 

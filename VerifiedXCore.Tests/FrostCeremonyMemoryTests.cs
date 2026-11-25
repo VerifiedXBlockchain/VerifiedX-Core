@@ -201,6 +201,30 @@ namespace VerifiedXCore.Tests
         }
 
         [Fact]
+        public void Starts_at_once_each_count_the_others_state_before_any_is_kept()
+        {
+            var now = TimeUtil.GetTime();
+            var chars = (int)(FrostSessionStorage.MAX_DKG_HELD_BYTES_PER_SOURCE * 3 / 8); // held as text: twice that in bytes
+            DKGSession Start() => new()
+            {
+                SessionId = $"starting-{Guid.NewGuid():N}", SmartContractUID = "sc-starting", LeaderAddress = "xLeader", ParticipantAddresses = new List<string> { "x1", "x2" },
+                StartTimestamp = now, LastProgressTimestamp = now, Round1SecretPackage = new string('s', chars),
+            };
+            var first = Start();
+            var second = Start();
+
+            Assert.Null(FrostSessionStorage.MakeRoomForDkgState(first, 0, now, out var firstRoom, starting: true));
+            // Neither is kept yet: the second still sees the first's state.
+            Assert.Contains("Busy", FrostSessionStorage.MakeRoomForDkgState(second, 0, now, out var none, starting: true));
+            Assert.Null(none);
+
+            firstRoom!.Dispose(); // the first start's request ended without keeping its session
+            Assert.Null(FrostSessionStorage.MakeRoomForDkgState(second, 0, now, out var secondRoom, starting: true));
+            secondRoom!.Dispose();
+            Assert.Equal(0, FrostSessionStorage.DkgReservedCount);
+        }
+
+        [Fact]
         public void The_start_route_gives_back_taken_room_as_soon_as_the_state_is_kept()
         {
             // Production callers: the room is given back where the state is stored, before the answer is written.
@@ -208,7 +232,7 @@ namespace VerifiedXCore.Tests
             var stored = source.IndexOf("FrostSessionStorage.MarkDkgStage(session, FrostSessionStorage.DkgStage.Round2);", StringComparison.Ordinal);
             Assert.True(stored > 0);
             Assert.InRange(source.IndexOf("round2Reserved?.Dispose();", stored, StringComparison.Ordinal) - stored, 1, 200);
-            var started = source.IndexOf("FrostSessionStorage.MakeRoomForDkgState(session, 0, dkgNow, out var startTaken)", StringComparison.Ordinal);
+            var started = source.IndexOf("FrostSessionStorage.MakeRoomForDkgState(session, 0, dkgNow, out var startTaken, starting: true)", StringComparison.Ordinal);
             Assert.True(started > 0); // a start counts what it keeps before the session is kept
             Assert.True(source.IndexOf("FrostSessionStorage.DKGSessions.TryAdd(request.SessionId, session)", started, StringComparison.Ordinal) > started);
             var kept = source.IndexOf("var round1Kept = session.Round1Commitments.TryAdd", StringComparison.Ordinal);
