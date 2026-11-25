@@ -41,5 +41,29 @@ namespace VerifiedXCore.Utilities
                 throw new FormatException($"The Base58 text is longer than {maxBytes} bytes of data.");
             return Encoders.Base58.DecodeData(text);
         }
+
+        /// <summary>
+        /// Hex data of at most <paramref name="maxBytes"/> bytes, refusing with <see cref="FormatException"/> a text longer
+        /// than such data is, without decoding it.
+        /// </summary>
+        public static byte[] Hex(string text, int maxBytes)
+        {
+            if (text == null) throw new FormatException("The hex text is missing.");
+            if (text.Length > 2L * maxBytes)
+                throw new FormatException($"The hex text is longer than {maxBytes} bytes of data.");
+            return Convert.FromHexString(text);
+        }
+
+        /// <summary>
+        /// Base64 data of at most <paramref name="maxBytes"/> bytes, refusing with <see cref="FormatException"/> a text
+        /// longer than such data is, without decoding it.
+        /// </summary>
+        public static byte[] Base64(string text, int maxBytes)
+        {
+            if (text == null) throw new FormatException("The Base64 text is missing.");
+            if (text.Length > 4L * ((maxBytes + 2L) / 3))
+                throw new FormatException($"The Base64 text is longer than {maxBytes} bytes of data.");
+            return Convert.FromBase64String(text);
+        }
     }
 }

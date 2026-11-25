@@ -67,5 +67,16 @@ namespace VerifiedXCore.Tests
 
         private static string RepoRoot([System.Runtime.CompilerServices.CallerFilePath] string thisFile = "") =>
             Path.GetDirectoryName(Path.GetDirectoryName(thisFile))!;
+        [Fact]
+        public void Hex_and_base64_longer_than_their_data_are_refused_before_decoding()
+        {
+            Assert.Equal(new byte[] { 0xab, 0xcd }, BoundedDecode.Hex("abcd", 2));
+            Assert.Throws<FormatException>(() => BoundedDecode.Hex(new string('a', 6), 2));
+            Assert.Throws<FormatException>(() => BoundedDecode.Hex(null!, 2));
+            Assert.Equal(new byte[] { 1, 2, 3 }, BoundedDecode.Base64(Convert.ToBase64String(new byte[] { 1, 2, 3 }), 3));
+            Assert.Equal(new byte[] { 1, 2, 3, 4 }, BoundedDecode.Base64(Convert.ToBase64String(new byte[] { 1, 2, 3, 4 }), 4));
+            Assert.Throws<FormatException>(() => BoundedDecode.Base64(Convert.ToBase64String(new byte[7]), 4));
+            Assert.Throws<FormatException>(() => BoundedDecode.Base64(new string('A', 10_000_000), 32));
+        }
     }
 }
