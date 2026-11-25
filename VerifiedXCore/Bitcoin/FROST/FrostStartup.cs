@@ -41,6 +41,8 @@ namespace VerifiedXCore.Bitcoin.FROST
         {
             app.Use(FrostConnectionLimits.TrackRequest);
             app.Use(FrostRequestBodyLimits.Bound);
+            // What a body holds is judged before any route parses it (each route reads it itself).
+            app.Use(VerifiedXCore.Utilities.BoundedJsonBodies.ForPaths(FrostRequestBodyLimits.ShapeFor));
             app.UseRouting();
             app.UseEndpoints(endpoints =>
             {
@@ -860,7 +862,7 @@ namespace VerifiedXCore.Bitcoin.FROST
 
                             // The leader is known now: a start it already used, its own places, and its network's. A re-key's
                             // leader is an active vBTC validator (re-keys have places of their own, which nobody else may take).
-                            var dkgLeaderRefusal = (string.IsNullOrEmpty(request.RekeyOf) ? null : FrostSessionStorage.RekeyLeaderRefusal(request.LeaderAddress))
+                            var dkgLeaderRefusal = (string.IsNullOrEmpty(request.RekeyOf) ? FrostSessionStorage.LeaderBalanceRefusal(request.LeaderAddress) : FrostSessionStorage.RekeyLeaderRefusal(request.LeaderAddress))
                                 ?? FrostSessionStorage.DkgStartRefusal(FrostSessionStorage.DKGSessions.Values, dkgNow, request.SessionId, request.Timestamp, request.LeaderAddress, dkgSource, request.RekeyOf);
                             if (dkgLeaderRefusal != null)
                             {
@@ -1130,8 +1132,19 @@ namespace VerifiedXCore.Bitcoin.FROST
                                 return;
                             }
 
+                            // A commitment kept is counted with every other ceremony's state here.
+                            if (FrostSessionStorage.MakeRoomForDkgState(session, 2L * (commitment.CommitmentData?.Length ?? 0), TimeUtil.GetTime(), out var round1Taken) is { } round1Room)
+                            {
+                                context.Response.StatusCode = StatusCodes.Status503ServiceUnavailable;
+                                await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = round1Room }));
+                                return;
+                            }
+                            using var round1Reserved = round1Taken; // held until the commitment is kept
+
                             // FIND-016 Fix: Prevent overwrite - each participant can only submit once per round
-                            if (!session.Round1Commitments.TryAdd(commitment.ValidatorAddress, commitment.CommitmentData))
+                            var round1Kept = session.Round1Commitments.TryAdd(commitment.ValidatorAddress, commitment.CommitmentData);
+                            round1Reserved?.Dispose(); // kept or not, the room taken for it is given back: it is counted as kept now
+                            if (!round1Kept)
                             {
                                 context.Response.StatusCode = StatusCodes.Status409Conflict;
                                 await context.Response.WriteAsync(JsonConvert.SerializeObject(new
@@ -1335,6 +1348,24 @@ namespace VerifiedXCore.Bitcoin.FROST
                             // Each commitment is a serialized round1::Package containing its own FROST Identifier.
                             // We parse each as a JSON object, extract the identifier, and use it as the map key.
                             var addressCommitments = JsonConvert.DeserializeObject<Dictionary<string, string>>(body);
+                            if (FrostRequestBodyLimits.CommitmentSetRefusal(addressCommitments) is { } setRefusal)
+                            {
+                                context.Response.StatusCode = StatusCodes.Status400BadRequest;
+                                await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = setRefusal }));
+                                return;
+                            }
+                            // Room for what this Round 2 keeps (the participants' commitments, and the shares made from
+                            // them) before any of the work: every ceremony here together holds a bounded amount.
+                            var round2Bytes = 2L * (addressCommitments ?? new Dictionary<string, string>())
+                                .Where(kvp => session.ParticipantAddresses.Contains(kvp.Key)).Sum(kvp => (long)(kvp.Value?.Length ?? 0))
+                                + 2048L * session.ParticipantAddresses.Count;
+                            if (FrostSessionStorage.MakeRoomForDkgState(session, round2Bytes, TimeUtil.GetTime(), out var round2Taken) is { } roomRefusal)
+                            {
+                                context.Response.StatusCode = StatusCodes.Status503ServiceUnavailable;
+                                await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = roomRefusal }));
+                                return;
+                            }
+                            using var round2Reserved = round2Taken; // held until this Round 2's state is kept
                             var myAddress = Globals.ValidatorAddress;
 
                             // DEBUG: Log actual commitment data format to understand FROST serialization
@@ -1443,6 +1474,7 @@ namespace VerifiedXCore.Bitcoin.FROST
                             session.GeneratedSharesJson = sealedShares;
                             foreach (var (identifier, ephemeral) in sealEphemerals) session.SealEphemerals[identifier] = ephemeral;
                             FrostSessionStorage.MarkDkgStage(session, FrostSessionStorage.DkgStage.Round2);
+                            round2Reserved?.Dispose(); // stored: it is counted as kept, not also as taken room
                             round2Hold.Dispose(); // stored: the answer is written without the lock (round 14)
 
                             LogUtility.Log($"[FROST] DKG Round 2 shares generated via native library for session {sessionId}", "FrostStartup.DKGRound2");
@@ -1823,7 +1855,8 @@ namespace VerifiedXCore.Bitcoin.FROST
                                 {
                                     // The generated shares JSON from FROST native is a BTreeMap<Identifier, round2::Package>
                                     // Keys are FROST Identifier hex strings, not simple participant IDs
-                                    var senderShares = Newtonsoft.Json.Linq.JObject.Parse(senderSharesStr);
+                                    var senderShares = VerifiedXCore.Utilities.BoundedJson.Parse(senderSharesStr, FrostRequestBodyLimits.PackageMapShape) as Newtonsoft.Json.Linq.JObject
+                                        ?? throw new Newtonsoft.Json.JsonReaderException("A dealer's shares are not an object.");
                                     
                                     // Look up using our FROST Identifier
                                     // NEW-19: the package must be sealed to this validator; plaintext packages are refused.
@@ -3599,11 +3632,12 @@ namespace VerifiedXCore.Bitcoin.FROST
                                 return;
                             }
 
-                            // Size limit: 16 KB for encrypted blob
-                            if (encryptedBlob.Length > 16 * 1024)
+                            // Each field is held to what the owner's node writes, before anything is looked up: what is
+                            // stored, logged and later sent back is then a few KB a backup, whoever sent it.
+                            if (FrostPeerKeyBackup.FieldRefusal(ownerAddress, smartContractUID, encryptedBlob, plaintextHash, request["GroupPublicKey"]?.ToString()) is { } fieldRefusal)
                             {
                                 context.Response.StatusCode = StatusCodes.Status400BadRequest;
-                                await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = "EncryptedBlob exceeds 16 KB limit" }));
+                                await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = fieldRefusal }));
                                 return;
                             }
 
@@ -3760,25 +3794,29 @@ namespace VerifiedXCore.Bitcoin.FROST
                             }
 
                             // Retrieve all stored backups for this owner
-                            var backups = FrostPeerKeyBackup.GetBackupsForOwner(requesterAddress);
-
-                            var backupItems = backups.Select(b => new
+                            // Room for the answer is taken before anything is read for it. The answer is read and written a
+                            // batch at a time, so it holds one batch however many backups the owner has.
+                            using var answerPlace = FrostPeerKeyBackup.AnswersInProgress.Hold(
+                                VerifiedXCore.Utilities.RemoteIp.Group(context.Connection.RemoteIpAddress) ?? "", FrostPeerKeyBackup.AnswerBatchBytes, null);
+                            if (!answerPlace.Granted)
                             {
-                                b.SmartContractUID,
-                                b.EncryptedBlob,
-                                b.PlaintextHash,
-                                b.Version
-                            }).ToList();
-
-                            LogUtility.Log($"[FROST Backup] Recovery: returning {backupItems.Count} backup(s) to {requesterAddress}",
-                                "FrostStartup.BackupRecover");
+                                context.Response.StatusCode = StatusCodes.Status503ServiceUnavailable;
+                                await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = "Busy with other requests; ask again." }));
+                                return;
+                            }
 
                             context.Response.StatusCode = StatusCodes.Status200OK;
-                            await context.Response.WriteAsync(JsonConvert.SerializeObject(new
+                            context.Response.ContentType = "application/json";
+                            int sent;
+                            try { sent = await FrostPeerKeyBackup.WriteRecoveryAnswerAsync(context.Response.Body, requesterAddress); }
+                            catch (Exception ex) when (context.Response.HasStarted)
                             {
-                                Success = true,
-                                Backups = backupItems
-                            }));
+                                // Part of the answer is sent: it cannot be turned into an error, so the connection is closed.
+                                ErrorLogUtility.LogError($"Backup recover answer to {requesterAddress} ended early: {ex.Message}", "FrostStartup.BackupRecover");
+                                context.Abort();
+                                return;
+                            }
+                            LogUtility.Log($"[FROST Backup] Recovery: returned {sent} backup(s) to {requesterAddress}", "FrostStartup.BackupRecover");
                         }
                     }
                     catch (Exception ex)
@@ -4212,7 +4250,7 @@ namespace VerifiedXCore.Bitcoin.FROST
                     if (kvp.Key == myAddr2) continue; // Exclude self
                     try
                     {
-                        var pkg = Newtonsoft.Json.Linq.JToken.Parse(kvp.Value);
+                        var pkg = VerifiedXCore.Utilities.BoundedJson.Parse(kvp.Value, FrostRequestBodyLimits.PackageShape);
                         if (addrToIdMap.TryGetValue(kvp.Key, out var frostId))
                             round1BTreeMap[frostId] = pkg;
                     }
@@ -4227,7 +4265,7 @@ namespace VerifiedXCore.Bitcoin.FROST
                 {
                     try
                     {
-                        var pkg = Newtonsoft.Json.Linq.JToken.Parse(kvp.Value);
+                        var pkg = VerifiedXCore.Utilities.BoundedJson.Parse(kvp.Value, FrostRequestBodyLimits.PackageShape);
                         if (addrToIdMap.TryGetValue(kvp.Key, out var frostId))
                             sharesBTreeMap[frostId] = pkg;
                     }

@@ -39,9 +39,9 @@ namespace VerifiedXCore.Bitcoin.Services
             /// <summary>ADD or REMOVE (validators), CASTERS, or CANCEL (a pending removal that names a live member).</summary>
             public string Action { get; set; } = "";
             /// <summary>The batch, in the order it is sent (for CASTERS, the casters added).</summary>
-            public string[] TargetAddresses { get; set; } = Array.Empty<string>();
+            [VerifiedXCore.Utilities.JsonBound(VerifiedXCore.Utilities.ListSize.Validators)] public string[] TargetAddresses { get; set; } = Array.Empty<string>();
             /// <summary>For CASTERS, the casters removed, in the order they are sent.</summary>
-            public string[] RemoveAddresses { get; set; } = Array.Empty<string>();
+            [VerifiedXCore.Utilities.JsonBound(VerifiedXCore.Utilities.ListSize.Validators)] public string[] RemoveAddresses { get; set; } = Array.Empty<string>();
             /// <summary>The epoch boundary the change is computed at.</summary>
             public long VfxBlockHeight { get; set; }
             /// <summary>The contract's admin nonce the signature is for.</summary>

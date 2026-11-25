@@ -34,7 +34,11 @@ namespace VerifiedXCore.Tests
             var (host, port) = await CutOffRequestBodyTests.StartValidatorApi(new CutOffRequestBodyTests.Capture());
             try
             {
-                var body = JsonConvert.SerializeObject(new { LockId = new string('A', 4 * 1024 * 1024), EvmDestination = "0x1", AmountSats = 1, Nonce = 1, ChainId = 8453, ContractAddress = "0x1" });
+                // A field longer than a request's text takes is refused before the route.
+                var huge = JsonConvert.SerializeObject(new { LockId = new string('A', 4 * 1024 * 1024), EvmDestination = "0x1", AmountSats = 1, Nonce = 1, ChainId = 8453, ContractAddress = "0x1" });
+                Assert.StartsWith("HTTP/1.1 400", await CutOffRequestBodyTests.Post(port, huge.Length, huge, stopSending: false, route: "SignMintAttestation"));
+                // One just under that reaches the route, which logs it in short lines.
+                var body = JsonConvert.SerializeObject(new { LockId = new string('A', 60 * 1024), EvmDestination = "0x1", AmountSats = 1, Nonce = 1, ChainId = 8453, ContractAddress = "0x1" });
                 for (var i = 0; i < 20; i++)
                     await CutOffRequestBodyTests.Post(port, body.Length, body, stopSending: false, route: "SignMintAttestation");
                 await host.StopAsync();

@@ -34,6 +34,7 @@ namespace VerifiedXCore.Models
 		[Newtonsoft.Json.JsonProperty(NullValueHandling = Newtonsoft.Json.NullValueHandling.Ignore)]
 		public CasterMembershipRecord? MembershipRecord { get; set; }
 
+		[VerifiedXCore.Utilities.JsonBound(VerifiedXCore.Utilities.ListSize.BlockTransactions)]
 		public IList<Transaction> Transactions { get; set; }
 		//Methods
 		public void Build()

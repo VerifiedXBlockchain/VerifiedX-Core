@@ -254,7 +254,9 @@ namespace VerifiedXCore.Tests
             Assert.Equal(2, BtcReportSignatures.For(hash, 0).Count);
 
             Assert.Equal(HttpStatusCode.BadRequest, (await Post("not json")).Code);
-            Assert.Equal(HttpStatusCode.RequestEntityTooLarge, (await Post(new string('x', 5000))).Code);
+            // Longer than the route takes: JSON, so it reaches the route; not JSON, it is refused before it.
+            Assert.Equal(HttpStatusCode.RequestEntityTooLarge, (await Post("{\"a\":\"" + new string('x', 5000) + "\"}")).Code);
+            Assert.Equal(HttpStatusCode.BadRequest, (await Post(new string('x', 5000))).Code);
 
             // The status route is for the operator at the machine.
             var status = await client.GetAsync("/frost/btcreport/status");

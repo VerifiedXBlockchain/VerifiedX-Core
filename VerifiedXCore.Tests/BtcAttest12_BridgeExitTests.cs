@@ -2690,10 +2690,11 @@ namespace VerifiedXCore.Tests
                 {
                     var ts = TimeUtil.GetTime();
                     var blob = "blob-" + uid;
-                    var message = FrostKeyBackupService.BuildStoreSignMessage(owner.Address, uid, ts, 1, "", "ph", blob);
+                    var hash = new string('a', 64); // a SHA-256 in hex, as an owner's node writes it
+                    var message = FrostKeyBackupService.BuildStoreSignMessage(owner.Address, uid, ts, 1, "", hash, blob);
                     var body = JsonConvert.SerializeObject(new
                     {
-                        OwnerAddress = owner.Address, SmartContractUID = uid, EncryptedBlob = blob, PlaintextHash = "ph", Version = 1, Timestamp = ts,
+                        OwnerAddress = owner.Address, SmartContractUID = uid, EncryptedBlob = blob, PlaintextHash = hash, Version = 1, Timestamp = ts,
                         GroupPublicKey = "", Signature = VerifiedXCore.Services.SignatureService.CreateSignature(message, owner.Key, owner.Pub),
                     });
                     return (await client.PostAsync("/frost/backup/store", new System.Net.Http.StringContent(body, System.Text.Encoding.UTF8, "application/json"))).StatusCode;

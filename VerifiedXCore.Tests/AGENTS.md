@@ -57,6 +57,9 @@ Test both sides of the height: a block or transaction below the activation heigh
 
 ## Gates and known failures
 
+- Full suite, faster: `python scripts/test-sharded.py` builds once and runs the test classes in 6 processes at once
+  (about 4 minutes instead of 17 to 20). Static state is per process, so this needs no change to any test. Logs are
+  in `TestResults/sharded/`, and the next run balances its groups by them.
 - Ship gate, run before every PR: `dotnet test --filter "FullyQualifiedName~SecretPreservation|FullyQualifiedName~StateSnapshot"` (16 tests).
 - On macOS exactly 5 `FrostKeyBackupTests` (`AesGcm_*`, `BlobFormat_*`) fail because .NET 6 has no `AesGcm` on Apple platforms. CI on Ubuntu and Windows is the judge.
 - Proof tests for findings in the private tracker stay in that tracker. Never copy them here; write Core's own regression test for the fixed behaviour instead.

@@ -43,7 +43,7 @@ namespace VerifiedXCore.Models
         // HAL-11 Security enhancements
         public long AdvertisementTimestamp { get; set; }
         public string AdvertisementNonce { get; set; }
-        public HashSet<string> ConfirmingSources { get; set; } = new HashSet<string>();
+        [VerifiedXCore.Utilities.JsonBound(VerifiedXCore.Utilities.ListSize.Validators)] public HashSet<string> ConfirmingSources { get; set; } = new HashSet<string>();
         public long FirstAdvertised { get; set; }
         public bool IsFullyTrusted { get; set; } = false;
         public string OriginalAdvertiser { get; set; }

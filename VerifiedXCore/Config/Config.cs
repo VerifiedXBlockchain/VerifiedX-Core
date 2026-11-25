@@ -33,6 +33,7 @@ namespace VerifiedXCore.Config
 		public string? ValidatorAddress { get; set; }
 		public string ValidatorName { get; set; }
 		public int NFTTimeout { get; set; }
+		public bool BoundRequestBodies { get; set; } = true;
 		public int PasswordClearTime { get; set; }
         public bool AutoDownloadNFTAsset { get; set; }
         public bool IgnoreIncomingNFTs { get; set; }
@@ -128,6 +129,7 @@ namespace VerifiedXCore.Config
 				config.APIPort = dict.ContainsKey("APIPort") ? Convert.ToInt32(dict["APIPort"]) : 7292;
 				config.TestNet = dict.ContainsKey("TestNet") ? Convert.ToBoolean(dict["TestNet"]) : false;
 				config.NFTTimeout = dict.ContainsKey("NFTTimeout") ? Convert.ToInt32(dict["NFTTimeout"]) : 15;
+				config.BoundRequestBodies = dict.ContainsKey("BoundRequestBodies") ? Convert.ToBoolean(dict["BoundRequestBodies"]) : true;
 				config.WalletPassword = dict.ContainsKey("WalletPassword") ? dict["WalletPassword"] : null;
 				config.AlwaysRequireWalletPassword = dict.ContainsKey("AlwaysRequireWalletPassword") ? Convert.ToBoolean(dict["AlwaysRequireWalletPassword"]) : false;
 				config.APIPassword = dict.ContainsKey("APIPassword") ? dict["APIPassword"] : null;
@@ -280,6 +282,7 @@ namespace VerifiedXCore.Config
             Globals.APICallURL = config.APICallURL;
 			Globals.APICallURLLogging = config.APICallURLLogging;
 			Globals.NFTTimeout = config.NFTTimeout;
+			Globals.BoundRequestBodies = config.BoundRequestBodies;
 			Globals.PasswordClearTime = config.PasswordClearTime;
 			if (config.RejectAssetExtensionTypes != null)
 				foreach (var type in config.RejectAssetExtensionTypes)

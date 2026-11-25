@@ -7,6 +7,16 @@ namespace VerifiedXCore.Arbiter
 {
     public class ArbiterServer
     {
+        /// <summary>The largest request the Arbiter takes: one Bitcoin transaction and the coins it spends.</summary>
+        public const int MaxRequestBodyBytes = 1024 * 1024;
+
+        /// <summary>The Arbiter's listener. A body over <see cref="MaxRequestBodyBytes"/> is refused before it is read.</summary>
+        internal static void ConfigureKestrel(Microsoft.AspNetCore.Server.Kestrel.Core.KestrelServerOptions options, int port)
+        {
+            options.ListenAnyIP(port);
+            options.Limits.MaxRequestBodySize = MaxRequestBodyBytes;
+        }
+
         public static async Task Start()
         {
             try
@@ -16,10 +26,7 @@ namespace VerifiedXCore.Arbiter
                     var builder = Host.CreateDefaultBuilder()
                     .ConfigureWebHostDefaults(webBuilder =>
                     {
-                        webBuilder.UseKestrel(options =>
-                        {
-                            options.ListenAnyIP(Globals.ArbiterPort);
-                        })
+                        webBuilder.UseKestrel(options => ConfigureKestrel(options, Globals.ArbiterPort))
                         .UseStartup<ArbiterStartup>()
                         .ConfigureLogging(loggingBuilder => loggingBuilder.ClearProviders());
                     });
