@@ -4100,6 +4100,13 @@ namespace VerifiedXCore.Services
                 if (string.IsNullOrWhiteSpace(txRequest.Data))
                     return (txResult, "Transaction data cannot be null for vBTC V2 bridge lock.");
 
+                // Mempool policy, never a block rule (every block path passes its height): a sender has at most
+                // MaxPendingBridgeLocksPerSender locks waiting. Admission refuses one more, and a producer drops a pooled
+                // one that has that many of its sender's ahead of it, so a backlog kept from before a restart goes too.
+                if (!blockVerify && !blockDownloads && blockHeight == null
+                    && TransactionData.BridgeLocksAhead(txRequest) >= MaxPendingBridgeLocksPerSender)
+                    return (txResult, $"This address already has {MaxPendingBridgeLocksPerSender} bridge locks waiting to be mined. Send more once they are in a block.");
+
                 try
                 {
                     var jobj = JObject.Parse(txRequest.Data);
@@ -4764,6 +4771,12 @@ namespace VerifiedXCore.Services
             catch { return null; }
         }
         internal const string BridgeLockDestinationIsAdminTagReason = "A bridge lock's EvmDestination cannot begin with a Base admin message tag.";
+
+        /// <summary>
+        /// Bridge locks one sender may have waiting in the mempool (policy, not a block rule). Each lock costs every node a
+        /// full check at admission and again in its block, and a backlog of them is worked through one at a time.
+        /// </summary>
+        internal const int MaxPendingBridgeLocksPerSender = 8;
         internal const string VotingEndDateNeedsOffsetReason = "A topic's voting end date must carry a UTC offset.";
 
         internal const string TopicOwnerHasActiveTopicReason = "Only one active topic per address is allowed.";

@@ -347,6 +347,25 @@ namespace VerifiedXCore.Data
         }
 
         /// <summary>
+        /// Bridge locks from <paramref name="tx"/>'s sender waiting in the mempool ahead of it: every other one for a
+        /// transaction not in the pool, and for one that is, those that arrived before it (by row id, which this node
+        /// assigns on insert; an id the transaction carries in is not used).
+        /// </summary>
+        internal static int BridgeLocksAhead(Transaction tx)
+        {
+            if (string.IsNullOrEmpty(tx.FromAddress)) return 0;
+            var pool = GetPool();
+            if (pool == null) return 0;
+            var locks = pool.Find(x => x.FromAddress == tx.FromAddress)
+                .Where(x => x.TransactionType == TransactionType.VBTC_V2_BRIDGE_LOCK && x.FromAddress == tx.FromAddress)
+                .ToList();
+            var own = locks.FirstOrDefault(x => x.Hash == tx.Hash && x.Signature == tx.Signature);
+            return own == null
+                ? locks.Count(x => x.Hash != tx.Hash)
+                : locks.Count(x => x.Hash != tx.Hash && x.Id.CompareTo(own.Id) < 0);
+        }
+
+        /// <summary>
         /// Whether <paramref name="transaction"/> conflicts with a transaction already in the mempool: an EXIT_TO_BTC on the
         /// same Base burn or lock, or a second POOL_UNLOCK for one burn. Every route that inserts a submitted transaction
         /// asks this first.
