@@ -1,5 +1,4 @@
 using System;
-using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Threading.Tasks;
@@ -19,8 +18,9 @@ namespace VerifiedXCore.Tests
     /// <summary>
     /// Checking a bridge lock reads its vault's state document once in the lock's own rules (it read it four times): the
     /// document holds the vault's whole ledger, so each read costs as much as the ledger is long. The rules every contract
-    /// call passes read it twice more, so a check costs about three reads; measured against one read of the same document,
-    /// on a vault whose ledger names many holders.
+    /// call passes read it twice more, so a check costs about three reads. Measured as bytes allocated on the test's thread
+    /// against one read of the same document, on a vault whose ledger names many holders: the count of bytes does not move
+    /// with machine load or collections the way elapsed time does.
     /// </summary>
     [Collection("DbContextSequential")]
     public class BridgeLockReadOnceTests : IDisposable
@@ -99,17 +99,12 @@ namespace VerifiedXCore.Tests
             return tx;
         }
 
-        private static double Median(Func<int, Task> run, int times)
+        /// <summary>Bytes the call allocates on this thread: a read of the vault's document allocates its whole ledger.</summary>
+        private static long Allocated(Action run)
         {
-            var ms = new double[times];
-            for (var i = 0; i < times; i++)
-            {
-                var watch = Stopwatch.StartNew();
-                run(i).GetAwaiter().GetResult();
-                ms[i] = watch.Elapsed.TotalMilliseconds;
-            }
-            Array.Sort(ms);
-            return ms[times / 2];
+            var before = GC.GetAllocatedBytesForCurrentThread();
+            run();
+            return GC.GetAllocatedBytesForCurrentThread() - before;
         }
 
         [Fact]
@@ -119,13 +114,18 @@ namespace VerifiedXCore.Tests
             Assert.True(ok, message);
             SmartContractStateTrei.GetSmartContractState(Contract);
 
-            // Built and signed before the clock starts: only the check is timed.
-            var locks = Enumerable.Range(0, 7).Select(_ => Lock()).ToList();
-            var read = Median(_ => { SmartContractStateTrei.GetSmartContractState(Contract); return Task.CompletedTask; }, 7);
-            var check = Median(async i => await TransactionValidatorService.VerifyTX(locks[i]), 7);
-            _output.WriteLine($"one read {read:F1} ms, one lock check {check:F1} ms, ratio {check / read:F2}");
-            Assert.True(check < 4.5 * read, // about 3 now; 6 or more before the read-once change
-                $"a lock check took {check:F1} ms, {check / read:F2} reads of its vault's document ({read:F1} ms each)");
+            // Built and signed before counting: only the check is counted. The check runs to completion on this thread.
+            var tx = Lock();
+            var read = Allocated(() => SmartContractStateTrei.GetSmartContractState(Contract));
+            var check = Allocated(() =>
+            {
+                var (valid, why) = TransactionValidatorService.VerifyTX(tx).GetAwaiter().GetResult();
+                Assert.True(valid, why);
+            });
+            var reads = (double)check / read;
+            _output.WriteLine($"one read {read:N0} bytes, one lock check {check:N0} bytes, {reads:F2} reads");
+            Assert.True(reads < 4.5, // about 3 now; 6 or more before the read-once change
+                $"a lock check allocated {check:N0} bytes, {reads:F2} reads of its vault's document ({read:N0} bytes each)");
         }
     }
 }
