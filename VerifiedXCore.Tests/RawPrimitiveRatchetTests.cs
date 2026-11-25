@@ -79,6 +79,13 @@ namespace VerifiedXCore.Tests
             }
         }
 
+        private static readonly string[] Net6Symbols =
+            { "NET", "NET6_0", "NET6_0_OR_GREATER", "NET5_0_OR_GREATER", "NETCOREAPP", "NETCOREAPP3_1_OR_GREATER", "NETCOREAPP3_0_OR_GREATER",
+              "NETCOREAPP2_1_OR_GREATER", "NETCOREAPP2_0_OR_GREATER", "NETCOREAPP1_0_OR_GREATER", "TRACE" };
+
+        /// <summary>The preprocessor symbols of each build of the node.</summary>
+        private static readonly string[][] BuildSymbols = { Net6Symbols.Append("DEBUG").ToArray(), Net6Symbols.Append("RELEASE").ToArray() };
+
         /// <summary>Uses of each primitive in each production file, keyed "path|primitive", homes left out.</summary>
         internal static SortedDictionary<string, int> Count()
         {
@@ -89,12 +96,14 @@ namespace VerifiedXCore.Tests
             {
                 if (file.Contains(sep + "bin" + sep) || file.Contains(sep + "obj" + sep)) continue;
                 var relative = Path.GetRelativePath(root, file).Replace('\\', '/');
-                var tree = CSharpSyntaxTree.ParseText(File.ReadAllText(file));
-                var names = tree.GetRoot().DescendantNodes().SelectMany(Names).ToList();
+                var text = File.ReadAllText(file);
+                // As the node is built (net6.0, Debug and Release): code under #if counts as it is compiled.
+                var builds = BuildSymbols.Select(symbols => CSharpSyntaxTree.ParseText(text, new CSharpParseOptions(preprocessorSymbols: symbols))
+                    .GetRoot().DescendantNodes().SelectMany(Names).ToList()).ToList();
                 foreach (var p in Primitives)
                 {
                     if (p.Homes.Contains(relative)) continue;
-                    var n = names.Count(name => p.Calls.Contains(name));
+                    var n = builds.Max(names => names.Count(name => p.Calls.Contains(name)));
                     if (n > 0) counts[$"{relative}|{p.Name}"] = n;
                 }
             }
@@ -154,6 +163,14 @@ namespace VerifiedXCore.Tests
             Assert.Contains("async void", names);
             Assert.DoesNotContain("JObject.Parse", names);
             Assert.DoesNotContain("JToken.Parse", names);
+        }
+
+        [Fact]
+        public void A_use_under_the_builds_symbols_counts()
+        {
+            var counts = Count();
+            Assert.True(counts.TryGetValue("SecretSharing/Cryptography/FinitePoint`1.cs|hex", out var n) && n > 0,
+                "a call under #if NET6_0_OR_GREATER is compiled into the node and counted");
         }
 
         [Fact]

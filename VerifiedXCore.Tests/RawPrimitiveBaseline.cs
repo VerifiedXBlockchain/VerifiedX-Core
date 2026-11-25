@@ -149,7 +149,7 @@ namespace VerifiedXCore.Tests
             ["Privacy/VbtcPrivateTransactionBuilder.cs|base64"] = 2,
             ["Privacy/VfxPrivateTransactionBuilder.cs|base64"] = 1,
             ["Program.cs|async-void"] = 4,
-            ["SecretSharing/Cryptography/Secret`1.cs|base64"] = 1,
+            ["SecretSharing/Cryptography/FinitePoint`1.cs|hex"] = 1,
             ["Services/APICallURLService.cs|async-void"] = 1,
             ["Services/ArbiterService.cs|json-parse"] = 2,
             ["Services/AuditReplayScanService.cs|json-parse"] = 6,
