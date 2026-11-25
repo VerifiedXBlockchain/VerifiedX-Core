@@ -43,6 +43,8 @@ namespace VerifiedXCore.Utilities
                 Transactions = block.Transactions,
                 Validator = block.Validator,
                 ChainRefId = block.ChainRefId,
+                VrfProof = block.VrfProof,
+                VrfMix = block.VrfMix,
             };
 
             newBlock.Rebuild(block);
