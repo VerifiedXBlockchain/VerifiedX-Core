@@ -168,14 +168,7 @@ namespace VerifiedXCore.Tests
         [Fact]
         public void A_use_under_the_builds_symbols_counts()
         {
-            var code = "class C { void A() {
-#if NET6_0_OR_GREATER
- var b = Convert.FromHexString(t);
-#endif
-#if RELEASE
- var j = JObject.Parse(t);
-#endif
- } }";
+            var code = "class C { void A() {\n#if NET6_0_OR_GREATER\n var b = Convert.FromHexString(t);\n#endif\n#if RELEASE\n var j = JObject.Parse(t);\n#endif\n } }";
             var seen = BuildSymbols.SelectMany(symbols => CSharpSyntaxTree.ParseText(code, new CSharpParseOptions(preprocessorSymbols: symbols))
                 .GetRoot().DescendantNodes().SelectMany(Names)).ToList();
             Assert.Contains("Convert.FromHexString", seen); // compiled into every build of the node
