@@ -483,6 +483,14 @@ namespace VerifiedXCore
         public const long ContractRunLimitsTestnetHeight = long.MaxValue;
 
         /// <summary>
+        /// From this height a block carrying a vBTC V2 bridge lock below VBTCService.MinBridgeLockSats (the smallest
+        /// withdrawal) is refused. Admission refuses one at every height. A tightening rule. Unset (long.MaxValue) on both
+        /// networks until the release that activates it. Testnet value in GlobalsNetworkHeights.
+        /// </summary>
+        public static long BridgeLockMinimumHeight = long.MaxValue;
+        public const long BridgeLockMinimumTestnetHeight = long.MaxValue;
+
+        /// <summary>
         /// From this height a reserve's Recover() reads each pending NFT_TX row's call as the dispatchers read it. Below it
         /// a row whose Data was not an array of objects made the recovery throw part-way, so every later row, the balance
         /// sweep, the contract re-own and the vBTC sweep never ran, and the reserve stayed under its vault key. Active from LedgerRulesBatchHeight.
