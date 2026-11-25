@@ -9,7 +9,6 @@ namespace VerifiedXCore.Tests
         /// <summary>"host METHOD route flag", as the test prints them.</summary>
         public static readonly HashSet<string> KnownFailures = new(StringComparer.Ordinal)
         {
-            "arbiter GET /depositaddress/x/x unhandled-error",
         };
 
         /// <summary>"HubType.Method" for every SignalR hub method. The test does not probe these yet.</summary>
