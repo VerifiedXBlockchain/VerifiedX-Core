@@ -451,44 +451,51 @@ namespace VerifiedXCore
         public const long VaultMinimumPositionTestnetHeight = 205_615L;
 
         /// <summary>
+        /// The testnet height from which the input, contract-run, bridge-lock-minimum and VRF-mix rules apply together:
+        /// RawDataVerbatim, ContractBodyKeySpelling, ContractRunLimits, BridgeLockMinimum, VrfMix, CanonicalInput and
+        /// StrictDataReader. Set 25 Nov 2026 at testnet tip 229,833, about three hours ahead at the 12 s block time.
+        /// </summary>
+        public const long ReleaseRulesTestnetHeight = 230_750L;
+
+        /// <summary>
         /// From this height (the next block's, as the API sees the tip) the raw-transaction routes keep a Data sent as a
         /// JSON object or array exactly as it appears in the request body: the same text is hashed and stored, with no
         /// re-serialization. Below it the node writes such a Data back in its own form (numbers through double, whitespace
         /// removed, escapes decoded, date-like strings in the node's time zone), which clients that check the node's hash
-        /// mirror today. Not a block rule: the stored Data is what was hashed either way. Unset (long.MaxValue) on both
-        /// networks until the release that activates it. Testnet value in GlobalsNetworkHeights.
+        /// mirror today. Not a block rule: the stored Data is what was hashed either way. Unset (long.MaxValue) on mainnet until
+        /// the release that activates it; testnet from ReleaseRulesTestnetHeight. Testnet value in GlobalsNetworkHeights.
         /// </summary>
         public static long RawDataVerbatimHeight = long.MaxValue;
-        public const long RawDataVerbatimTestnetHeight = long.MaxValue;
+        public const long RawDataVerbatimTestnetHeight = ReleaseRulesTestnetHeight;
 
         /// <summary>
         /// From this height a block's contract bodies are found as the code that runs them reads Data: a body under the
         /// key written as <c>"\u0044ata"</c>, <c>'Data'</c>, a bare <c>Data</c> or in another letter case is judged by
         /// the contract-body rules, where below it the rules looked only for the exact text <c>"Data"</c> and passed such a
         /// body unread while the node still ran it. Mempool admission finds them so at every height. A tightening rule: a
-        /// node without it accepts every block a node with it does. Unset (long.MaxValue) on both networks until the
-        /// release that activates it. Testnet value in GlobalsNetworkHeights.
+        /// node without it accepts every block a node with it does. Unset (long.MaxValue) on mainnet until the
+        /// release that activates it; testnet from ReleaseRulesTestnetHeight. Testnet value in GlobalsNetworkHeights.
         /// </summary>
         public static long ContractBodyKeySpellingHeight = long.MaxValue;
-        public const long ContractBodyKeySpellingTestnetHeight = long.MaxValue;
+        public const long ContractBodyKeySpellingTestnetHeight = ReleaseRulesTestnetHeight;
 
         /// <summary>
         /// From this height a block's contract code runs within ContractRunLimits.Contract (steps, the length of any one
         /// string, the text it works through), and a block carrying a body whose run a limit stops is refused. Below it a
         /// block's code runs as before the limits. Admission and every reader outside a block use the limits at every
-        /// height. A tightening rule: no mined body on mainnet comes near the limits. Unset (long.MaxValue) on both
-        /// networks until the release that activates it. Testnet value in GlobalsNetworkHeights.
+        /// height. A tightening rule: no mined body on mainnet comes near the limits. Unset (long.MaxValue) on mainnet until
+        /// the release that activates it; testnet from ReleaseRulesTestnetHeight. Testnet value in GlobalsNetworkHeights.
         /// </summary>
         public static long ContractRunLimitsHeight = long.MaxValue;
-        public const long ContractRunLimitsTestnetHeight = long.MaxValue;
+        public const long ContractRunLimitsTestnetHeight = ReleaseRulesTestnetHeight;
 
         /// <summary>
         /// From this height a block carrying a vBTC V2 bridge lock below VBTCService.MinBridgeLockSats (the smallest
-        /// withdrawal) is refused. Admission refuses one at every height. A tightening rule. Unset (long.MaxValue) on both
-        /// networks until the release that activates it. Testnet value in GlobalsNetworkHeights.
+        /// withdrawal) is refused. Admission refuses one at every height. A tightening rule. Unset (long.MaxValue) on mainnet until
+        /// the release that activates it; testnet from ReleaseRulesTestnetHeight. Testnet value in GlobalsNetworkHeights.
         /// </summary>
         public static long BridgeLockMinimumHeight = long.MaxValue;
-        public const long BridgeLockMinimumTestnetHeight = long.MaxValue;
+        public const long BridgeLockMinimumTestnetHeight = ReleaseRulesTestnetHeight;
 
         /// <summary>
         /// From this height a reserve's Recover() reads each pending NFT_TX row's call as the dispatchers read it. Below it
@@ -544,11 +551,11 @@ namespace VerifiedXCore
         /// of those outputs, both in the block's hash. An epoch whose anchor is at or above it is seeded from the anchor's
         /// mix, not the anchor's hash: the hash's producer could try block after block until the next epoch's draw, the
         /// emergency committee election and the Base signer order favoured it, where a VRF output is the one its key gives
-        /// for the seed, so a producer can only publish its block or withhold it. Unset (long.MaxValue) on both networks
-        /// until the release that activates it. Testnet value in GlobalsNetworkHeights.
+        /// for the seed, so a producer can only publish its block or withhold it. Unset (long.MaxValue) on mainnet
+        /// until the release that activates it; testnet from ReleaseRulesTestnetHeight. Testnet value in GlobalsNetworkHeights.
         /// </summary>
         public static long VrfMixHeight = long.MaxValue;
-        public const long VrfMixTestnetHeight = long.MaxValue;
+        public const long VrfMixTestnetHeight = ReleaseRulesTestnetHeight;
 
         /// <summary>
         /// From this height the recent-transaction-hash replay guard holds every block within the transaction time window
@@ -759,11 +766,11 @@ namespace VerifiedXCore
         /// re-spelling of a whole or zero Amount (TransactionValidatorService.StandardHashMatches). The hash covers how
         /// the two are written, so one transaction then has one spelling and one hash. Wallets send the canonical
         /// spelling before the height: it is accepted at every height.
-        /// Unset (long.MaxValue) on both networks until the release that activates it.
+        /// Unset (long.MaxValue) on mainnet until the release that activates it; testnet from ReleaseRulesTestnetHeight.
         /// </summary>
         public static long CanonicalInputHeight = long.MaxValue;
         /// <summary>The same height on testnet (GlobalsNetworkHeights).</summary>
-        public const long CanonicalInputTestnetHeight = long.MaxValue;
+        public const long CanonicalInputTestnetHeight = ReleaseRulesTestnetHeight;
 
         /// <summary>
         /// Item 6: a vBTC withdrawal REQUEST may not reuse a (requester, UniqueId, contract) key under which a request was
@@ -834,11 +841,11 @@ namespace VerifiedXCore
         /// non-private transaction whose Data is a JSON object or array the reader refuses is refused on admission and in
         /// a block, and the dispatchers and the rules that read a contract call, a token call or a vBTC transfer read it
         /// with that reader, in validation and in state application alike. Below the height Data is read as before.
-        /// Unset (long.MaxValue) on both networks until the release that activates it.
+        /// Unset (long.MaxValue) on mainnet until the release that activates it; testnet from ReleaseRulesTestnetHeight.
         /// </summary>
         public static long StrictDataReaderHeight = long.MaxValue;
         /// <summary>The same height on testnet (GlobalsNetworkHeights).</summary>
-        public const long StrictDataReaderTestnetHeight = long.MaxValue;
+        public const long StrictDataReaderTestnetHeight = ReleaseRulesTestnetHeight;
 
         public static Dictionary<string, decimal> ForgedVfxBurns = new(StringComparer.Ordinal)
         {
@@ -1022,8 +1029,8 @@ namespace VerifiedXCore
         public static int ValAPIPort = 7294;
         public static int APIPortSSL = 7777;
         public static int MajorVer = 9;
-        public static int MinorVer = 1;
-        public static int RevisionVer = 2;
+        public static int MinorVer = 2;
+        public static int RevisionVer = 0;
         public static int BuildVer = 0;
         public static int SCVersion = 1;
         public static int ValidatorIssueCount = 0;

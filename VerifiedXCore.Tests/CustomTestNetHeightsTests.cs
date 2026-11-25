@@ -112,7 +112,7 @@ namespace VerifiedXCore.Tests
         }
 
         [Fact]
-        public void RawDataVerbatim_IsUnsetOnMainnetAndTheLiveTestnet()
+        public void ReleaseRules_AreUnsetOnMainnetAndSetTogetherOnTheLiveTestnet()
         {
             Globals.IsTestNet = false;
             Globals.IsCustomTestNet = false;
@@ -120,7 +120,14 @@ namespace VerifiedXCore.Tests
             Assert.Equal(long.MaxValue, Globals.RawDataVerbatimHeight);
 
             StartTestnetNode(new Config.Config { TestNet = true });
-            Assert.Equal(long.MaxValue, Globals.RawDataVerbatimHeight);
+            Assert.Equal(230_750L, Globals.ReleaseRulesTestnetHeight);
+            Assert.Equal(Globals.ReleaseRulesTestnetHeight, Globals.RawDataVerbatimHeight);
+            Assert.Equal(Globals.ReleaseRulesTestnetHeight, Globals.ContractBodyKeySpellingHeight);
+            Assert.Equal(Globals.ReleaseRulesTestnetHeight, Globals.ContractRunLimitsHeight);
+            Assert.Equal(Globals.ReleaseRulesTestnetHeight, Globals.BridgeLockMinimumHeight);
+            Assert.Equal(Globals.ReleaseRulesTestnetHeight, Globals.VrfMixHeight);
+            Assert.Equal(Globals.ReleaseRulesTestnetHeight, Globals.CanonicalInputHeight);
+            Assert.Equal(Globals.ReleaseRulesTestnetHeight, Globals.StrictDataReaderHeight);
         }
 
         [Fact]
@@ -135,7 +142,7 @@ namespace VerifiedXCore.Tests
             Assert.Equal(Globals.ContractBodyLimitsTestnetHeight, Globals.ContractBodyLimitsHeight);
             Assert.Equal(Globals.PlonkCurrentRulesTestnetHeight, Globals.PlonkCurrentRulesHeight);
             Assert.Equal(rule3, Globals.TXHeightRule3);
-            Assert.Equal(long.MaxValue, Globals.CanonicalInputHeight);
+            Assert.Equal(Globals.ReleaseRulesTestnetHeight, Globals.CanonicalInputHeight);
         }
 
         [Fact]

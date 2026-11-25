@@ -294,9 +294,9 @@ namespace VerifiedXCore.Tests
             Assert.Null(ConsensusData.Refusal(Tx("{\"Memo\":\"a\",\"Memo\":\"b\"}", TransactionType.VFX_PRIVATE_TRANSFER), Height));
         }
 
-        /// <summary>Unset on testnet until a release sets it (a custom testnet's 401 is checked with every other height in CustomTestNetHeightsTests).</summary>
+        /// <summary>Set on testnet with the release's other rules (a custom testnet's height is checked with every other height in CustomTestNetHeightsTests).</summary>
         [Fact]
-        public void TheTestnetHeight_IsUnset() => Assert.Equal(long.MaxValue, Globals.StrictDataReaderTestnetHeight);
+        public void TheTestnetHeight_IsTheReleaseHeight() => Assert.Equal(Globals.ReleaseRulesTestnetHeight, Globals.StrictDataReaderTestnetHeight);
     }
 
     /// <summary>
