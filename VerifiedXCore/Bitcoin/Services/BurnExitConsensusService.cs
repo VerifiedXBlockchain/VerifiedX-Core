@@ -381,6 +381,20 @@ namespace VerifiedXCore.Bitcoin.Services
             return wait;
         }
 
+        /// <summary>
+        /// When this node's own mempool would not take the exit transaction (it holds one on the same locks): nothing was
+        /// sent, so the burn goes back to wait a short while and is planned again from the locks as they are then. Marked
+        /// failed instead, as any send failure was, this caster gave the burn up. True when that is the case.
+        /// </summary>
+        internal static bool NotSentIsRetried(ProcessedBurnRecord record, string? reason, string what)
+        {
+            if (!TransactionData.IsMempoolRefusal(reason)) return false;
+            var wait = NoteShortRound(record, TimeUtil.GetTime());
+            LogUtility.Log($"[BurnExitConsensus] {what} for burn {record.BaseBurnTxHash} not sent ({reason}); planned again in {wait} s.",
+                "BurnExitConsensusService");
+            return true;
+        }
+
         /// <summary>The burns the sweep takes now: pending, and past their retry time.</summary>
         internal static List<ProcessedBurnRecord> DueForARound(IEnumerable<ProcessedBurnRecord> records, long now) =>
             records.Where(r => r.Status == BurnExitStatus.Pending && r.NextAttemptAt <= now).ToList();
@@ -907,7 +921,7 @@ namespace VerifiedXCore.Bitcoin.Services
                 LogUtility.Log($"[BurnExitConsensus] VFX pool unlock TX: {result.TxHashOrError} for burn {record.BaseBurnTxHash}",
                     "BurnExitConsensusService.ExecuteVfxPoolUnlock()");
             }
-            else
+            else if (!NotSentIsRetried(record, result.TxHashOrError, "VFX pool unlock"))
             {
                 record.Status = BurnExitStatus.Failed;
                 ErrorLogUtility.LogError($"[BurnExitConsensus] VFX pool unlock failed: {result.TxHashOrError}",
@@ -1087,6 +1101,9 @@ namespace VerifiedXCore.Bitcoin.Services
                             "BurnExitConsensusService.ExecuteBtcExit()");
                         return;
                     }
+
+                    if (NotSentIsRetried(record, err, "EXIT_TO_BTC"))
+                        return;
 
                     record.Status = BurnExitStatus.Failed;
                     ErrorLogUtility.LogError($"[BurnExitConsensus] VFX EXIT_TO_BTC broadcast failed: {err}. No BTC was sent. Stuck exit will retry.",

@@ -3339,14 +3339,11 @@ namespace VerifiedXCore.Bitcoin.Services
                 {
                     // Into the mempool first: a lock it does not take (its sender has the most locks waiting it allows) is
                     // not recorded in the wallet, charged or sent, and the caller is told.
-                    if (!await TransactionData.AddToPool(lockTx))
+                    if (await TransactionData.SubmitOwnTransaction(lockTx, ownerAddress, lockTx.Fee + lockTx.Amount) is { } notSent)
                     {
-                        SCLogUtility.Log($"vBTC V2 Bridge Lock TX not admitted to the mempool: {scUID}", "VBTCService.CreateBridgeLockTx()");
-                        return (false, MempoolEvictionUtility.SenderLimitRefusal(lockTx) ?? "The mempool did not take the bridge lock.", string.Empty);
+                        SCLogUtility.Log($"vBTC V2 Bridge Lock TX not admitted to the mempool: {scUID}: {notSent}", "VBTCService.CreateBridgeLockTx()");
+                        return (false, notSent, string.Empty);
                     }
-                    await TransactionData.AddTxToWallet(lockTx, true);
-                    await AccountData.UpdateLocalBalance(ownerAddress, lockTx.Fee + lockTx.Amount);
-                    await P2PClient.SendTXMempool(lockTx);
                     SCLogUtility.Log($"vBTC V2 Bridge Lock TX Success. SCUID: {scUID}, TxHash: {lockTx.Hash}, LockId: {lockId}", "VBTCService.CreateBridgeLockTx()");
                     return (true, lockTx.Hash, lockId);
                 }
@@ -3546,10 +3543,8 @@ namespace VerifiedXCore.Bitcoin.Services
                 if (!result.Item1)
                     return (false, $"TX Verify Failed: {result.Item2}");
 
-                await TransactionData.AddTxToWallet(tx, true);
-                await AccountData.UpdateLocalBalance(ownerAddress, tx.Fee + tx.Amount);
-                await TransactionData.AddToPool(tx);
-                await P2PClient.SendTXMempool(tx);
+                if (await TransactionData.SubmitOwnTransaction(tx, ownerAddress, tx.Fee + tx.Amount) is { } notSent)
+                    return (false, notSent);
                 return (true, tx.Hash);
             }
             catch (Exception ex)

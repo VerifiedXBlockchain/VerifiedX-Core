@@ -346,10 +346,11 @@ namespace VerifiedXCore.Bitcoin.Services
                 var result = await TransactionValidatorService.VerifyTX(poolUnlockTx);
                 if (result.Item1)
                 {
-                    await TransactionData.AddTxToWallet(poolUnlockTx, true);
-                    await AccountData.UpdateLocalBalance(signerAddress, poolUnlockTx.Fee + poolUnlockTx.Amount);
-                    await TransactionData.AddToPool(poolUnlockTx);
-                    await P2PClient.SendTXMempool(poolUnlockTx);
+                    if (await TransactionData.SubmitOwnTransaction(poolUnlockTx, signerAddress, poolUnlockTx.Fee + poolUnlockTx.Amount) is { } notSent)
+                    {
+                        SCLogUtility.Log($"vBTC V2 Bridge Pool Unlock TX not sent: {notSent}", "BridgePoolUnlockService.CreateBridgePoolUnlockTx()");
+                        return (false, notSent);
+                    }
 
                     SCLogUtility.Log(
                         $"vBTC V2 Bridge Pool Unlock TX Success. TxHash: {poolUnlockTx.Hash}, Dest: {vfxDestinationAddress}, " +
