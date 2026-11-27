@@ -498,6 +498,17 @@ namespace VerifiedXCore
         public const long BridgeLockMinimumTestnetHeight = ReleaseRulesTestnetHeight;
 
         /// <summary>
+        /// From this height a contract's vBTC ledger is kept as one entry per (contract, holder) in a collection of its own,
+        /// not as a list of rows inside the contract's state document: every ledger in state moves there at the start of the
+        /// block at this height (Bitcoin.Attestation.VaultLedgerStore.MoveAll). A balance is then one read, a write touches
+        /// only the entries it changes, and no ledger can outgrow what one document holds. The holder limit counts entries
+        /// that hold a balance (or are claimed by an open withdrawal or lock). Unset (long.MaxValue) on mainnet and testnet
+        /// until the release that activates it. Testnet value in GlobalsNetworkHeights.
+        /// </summary>
+        public static long VaultLedgerHeight = long.MaxValue;
+        public const long VaultLedgerTestnetHeight = long.MaxValue;
+
+        /// <summary>
         /// From this height a vBTC V2 bridge pool unlock credits its VfxCreditAddress, a VFX address, and a block refuses one
         /// whose VfxCreditAddress is missing, is not a VFX address, or is not the address its VfxDestinationAddress (the
         /// destination burned on Base, an address or a registered name) names. Below it the unlock credits

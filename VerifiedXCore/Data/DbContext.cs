@@ -293,6 +293,11 @@ namespace VerifiedXCore.Data
             // UID twice; lookups take the oldest (lowest Id), as the scan did.
             scTrei.EnsureIndexSafe(x => x.SmartContractUID, false);
             DB_SmartContractStateTrei.GetCollection<RetiredContractUid>(RetiredContractUid.CollectionName).EnsureIndexSafe(x => x.SmartContractUID, false);
+            // A moved ledger's entries: by contract (a vault's holders; matched exactly in code, as the index compares text
+            // by the database's collation) and by height for the snapshot's diff copy. The id is a hash, so no key is long.
+            var vaultLedger = DB_SmartContractStateTrei.GetCollection<VaultLedgerEntry>(VerifiedXCore.Bitcoin.Attestation.VaultLedgerStore.CollectionName);
+            vaultLedger.EnsureIndexSafe(x => x.ContractUid, false);
+            vaultLedger.EnsureIndexSafe(x => x.LastModifiedHeight, false);
             // Not indexed by owner or token owner: an owner change writes the text a transaction names (TokenContractOwnerChange
             // takes any string), LiteDB refuses an index key over 1,023 bytes and the write was lost on a node with the
             // index and kept on one without it (round 33 added them, round 34 drops them where a node built them).

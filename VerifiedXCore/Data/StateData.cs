@@ -238,6 +238,8 @@ namespace VerifiedXCore.Data
                 PrivacyDbContext.PRIV_COMMITMENTS, PrivacyDbContext.PRIV_NULLIFIERS, PrivacyDbContext.PRIV_POOL_STATE, PrivacyDbContext.PRIV_MERKLE_NODES,
                 // Bridge lock and exit state and consumed burns.
                 Bitcoin.Models.VBTCBridgeLockState.CollectionName, Bitcoin.Models.VBTCBridgeBtcExitState.CollectionName, Bitcoin.Models.VBTCBridgeConsumedBurn.CollectionName,
+                // Contracts' ledgers once they have moved (Globals.VaultLedgerHeight).
+                Bitcoin.Attestation.VaultLedgerStore.CollectionName,
             };
             // Bitcoin attestation and validator bonds.
             names.UnionWith(Bitcoin.Attestation.BtcAttestStore.AllCollections);
@@ -336,6 +338,24 @@ namespace VerifiedXCore.Data
             // fails on this node is counted like a transaction that failed to apply: the block's state is reported as
             // incomplete, so the node is flagged, not left quietly holding other state than its peers.
             var blockStartFailed = false;
+            if (block.Height >= Globals.VaultLedgerHeight)
+            {
+                // The contracts' ledgers move into their own collection at the height (or at the first block after it on a
+                // state that crossed it unmoved). A move cut short is finished at the next block: each contract moves in one
+                // write, and the marker is set once all have.
+                try
+                {
+                    var moved = VerifiedXCore.Bitcoin.Attestation.VaultLedgerStore.MoveAll(block.Height);
+                    if (moved > 0)
+                        LogUtility.Log($"Block {block.Height}: the ledgers of {moved} contract(s) moved into their own collection.", "StateData.UpdateTreis() - block start");
+                }
+                catch (Exception ex)
+                {
+                    if (IsNodeLocalFault(ex)) blockStartFailed = true;
+                    NoteApplyStepFailed(block.Height, ex);
+                    ErrorLogUtility.LogError($"Block {block.Height}: moving the contracts' ledgers failed (finished at the next block): {ex}", "StateData.UpdateTreis() - block start");
+                }
+            }
             if (block.Height == Globals.BridgeFailKeepsLocksHeight)
             {
                 try { VBTCBridgeLockState.GiveBackFailBlacklisted(); } // locks blacklisted by failed exits before it
