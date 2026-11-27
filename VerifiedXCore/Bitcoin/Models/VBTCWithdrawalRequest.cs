@@ -142,6 +142,38 @@ namespace VerifiedXCore.Bitcoin.Models
                 .ToList();
         }
 
+        /// <summary>
+        /// The index on a request's requester, UniqueId and contract together ("requester|UniqueId|contract"), kept while
+        /// the three are at most 320 characters long; a longer row is indexed under its requester alone (LiteDB refuses a
+        /// key over 1,023 bytes).
+        /// </summary>
+        internal const string RequestKeyIndexExpression = "IIF(LENGTH($.RequestorAddress) + LENGTH($.OriginalUniqueId) + LENGTH($.SmartContractUID) <= 320, $.RequestorAddress + '|' + $.OriginalUniqueId + '|' + $.SmartContractUID, $.RequestorAddress)";
+        internal const string RequestKeyIndexName = "RequesterUniqueIdContract";
+
+        /// <summary>
+        /// The rows whose requester, UniqueId and contract each equal the given one as the database compares it, by Id.
+        /// Read through <see cref="RequestKeyIndexExpression"/>, so the requester's other rows are not loaded: the rows
+        /// indexed under the three together, and the requester's rows indexed under the requester alone (long ones), each
+        /// checked field by field.
+        /// </summary>
+        public static List<VBTCWithdrawalRequest> RowsUnderKey(LiteDB.ILiteCollection<VBTCWithdrawalRequest> col, string? address, string? uniqueId, string? scUID)
+        {
+            if (string.IsNullOrEmpty(address) || string.IsNullOrEmpty(uniqueId) || string.IsNullOrEmpty(scUID))
+                return col.Query().Where(x => x.RequestorAddress == address && x.OriginalUniqueId == uniqueId && x.SmartContractUID == scUID)
+                    .ToList().OrderBy(x => x.Id).ToList();
+            var collation = DbContext.DB_VBTCWithdrawalRequests.Collation;
+            // A row without one of the three is stored without the field, and never equalled a value asked for.
+            return col.Find(LiteDB.Query.EQ(RequestKeyIndexExpression, address + "|" + uniqueId + "|" + scUID))
+                .Concat(col.Find(LiteDB.Query.EQ(RequestKeyIndexExpression, address)))
+                .Where(x => !string.IsNullOrEmpty(x.RequestorAddress) && !string.IsNullOrEmpty(x.OriginalUniqueId) && !string.IsNullOrEmpty(x.SmartContractUID)
+                    && collation.Compare(x.RequestorAddress, address) == 0
+                    && collation.Compare(x.OriginalUniqueId, uniqueId) == 0
+                    && collation.Compare(x.SmartContractUID, scUID) == 0)
+                .GroupBy(x => x.Id).Select(g => g.First())
+                .OrderBy(x => x.Id)
+                .ToList();
+        }
+
         #region Get DB
         public static LiteDB.ILiteCollection<VBTCWithdrawalRequest>? GetVBTCWithdrawalRequestDb()
         {
@@ -172,13 +204,8 @@ namespace VerifiedXCore.Bitcoin.Models
                 return null;
             }
 
-            var request = vwrDb.Query()
-                .Where(x => x.RequestorAddress == address && 
-                            x.OriginalUniqueId == uniqueId &&
-                            x.SmartContractUID == scUID)
-                .ToList()
-                .OrderBy(x => x.Id) // the order the rows were read in before they were indexed (round 33)
-                .FirstOrDefault();
+            // By Id: the order the rows were read in before they were indexed (round 33).
+            var request = RowsUnderKey(vwrDb, address, uniqueId, scUID).FirstOrDefault();
 
             return request;
         }
@@ -198,10 +225,7 @@ namespace VerifiedXCore.Bitcoin.Models
             var vwrDb = GetVBTCWithdrawalRequestDb();
             if (vwrDb == null)
                 return null;
-            var mined = vwrDb.Query()
-                .Where(x => x.RequestorAddress == address && x.OriginalUniqueId == uniqueId && x.SmartContractUID == scUID)
-                .ToList()
-                .OrderBy(x => x.Id)
+            var mined = RowsUnderKey(vwrDb, address, uniqueId, scUID)
                 .FirstOrDefault(x => !string.IsNullOrEmpty(x.TransactionHash) && !string.Equals(x.TransactionHash, requestTxHash, StringComparison.Ordinal));
             return mined == null
                 ? null
@@ -527,11 +551,7 @@ namespace VerifiedXCore.Bitcoin.Models
         {
             var vwrDb = GetVBTCWithdrawalRequestDb();
             if (vwrDb == null || string.IsNullOrEmpty(request.OriginalUniqueId) || string.IsNullOrEmpty(request.TransactionHash)) return null;
-            return vwrDb.Query().Where(x =>
-                    x.RequestorAddress == request.RequestorAddress &&
-                    x.OriginalUniqueId == request.OriginalUniqueId &&
-                    x.SmartContractUID == request.SmartContractUID)
-                .ToList().OrderBy(x => x.Id)
+            return RowsUnderKey(vwrDb, request.RequestorAddress, request.OriginalUniqueId, request.SmartContractUID)
                 .FirstOrDefault(x => !string.IsNullOrEmpty(x.TransactionHash) && !string.Equals(x.TransactionHash, request.TransactionHash, StringComparison.Ordinal));
         }
 
@@ -602,11 +622,7 @@ namespace VerifiedXCore.Bitcoin.Models
             // FIND-005: If not found by TxHash, try composite key (for raw withdrawal flow)
             if (existingRequest == null && !string.IsNullOrEmpty(request.OriginalUniqueId))
             {
-                existingRequest = vwrDb.Query().Where(x =>
-                    x.RequestorAddress == request.RequestorAddress &&
-                    x.OriginalUniqueId == request.OriginalUniqueId &&
-                    x.SmartContractUID == request.SmartContractUID)
-                    .ToList().OrderBy(x => x.Id).FirstOrDefault();
+                existingRequest = RowsUnderKey(vwrDb, request.RequestorAddress, request.OriginalUniqueId, request.SmartContractUID).FirstOrDefault();
 
                 // Fund-loss audit item 6: a composite-key match upgrades only this node's local pre-registration row
                 // (no TransactionHash yet) or the same mined request. A row of a DIFFERENT mined request is that

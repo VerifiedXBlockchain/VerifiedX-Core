@@ -264,6 +264,9 @@ namespace VerifiedXCore.Data
             // The owner's add-back reads a vault's Completed rows; its requested and cancelled rows are never deleted.
             try { vbtcWithdrawalRequests.EnsureIndex(VerifiedXCore.Bitcoin.Models.VBTCWithdrawalRequest.CompletedShortUidIndexName, VerifiedXCore.Bitcoin.Models.VBTCWithdrawalRequest.CompletedShortUidIndexExpression); }
             catch (Exception ex) { ErrorLogUtility.LogError($"Withdrawal request completed index: {ex.Message}", "DbContext.Initialize()"); }
+            // A request's UniqueId is looked up under its requester and contract; a requester's other rows are never deleted.
+            try { vbtcWithdrawalRequests.EnsureIndex(VerifiedXCore.Bitcoin.Models.VBTCWithdrawalRequest.RequestKeyIndexName, VerifiedXCore.Bitcoin.Models.VBTCWithdrawalRequest.RequestKeyIndexExpression); }
+            catch (Exception ex) { ErrorLogUtility.LogError($"Withdrawal request key index: {ex.Message}", "DbContext.Initialize()"); }
             // Token votes likewise: each vote cast read every vote ever cast in validation and again in apply, and a vote
             // costs one fee (round 33). Only fields whose every value is bounded are indexed: LiteDB refuses an index key
             // over 1,023 bytes and the write is lost, so a node with the index dropped a row a node without it kept (a
