@@ -1250,6 +1250,86 @@ namespace VerifiedXCore.Tests
         }
 
         /// <summary>
+        /// A caster signs a block only once its own validation takes the block at its tip. Signing claims the height for
+        /// good (only an operator releases it), so a caster that signed a block validation then refused could sign no other
+        /// block at that height, and with every caster held to it the height could never be certified: the chain stopped.
+        /// Here one block at the height is refused for its contents (an unsigned transaction) and is not signed, and the
+        /// next producer's block at the same height is.
+        /// </summary>
+        [Fact]
+        public async Task ACasterSignsNoBlockItsValidationRefuses_AndSignsTheNextBlockAtThatHeight()
+        {
+            var priorEncrypted = Globals.IsWalletEncrypted;
+            var priorPassword = Globals.EncryptPassword;
+            AttestationGuard.ResetForTests();
+            try
+            {
+                // This node is a caster with its own key in its wallet; VREE is not active, so it does not stand down.
+                Globals.IsWalletEncrypted = false;
+                Globals.EncryptPassword = new System.Security.SecureString();
+                var me = AccountData.CreateNewAccount(skipSave: true)!;
+                me.IsValidating = true;
+                AccountData.GetAccounts().Insert(me);
+                Globals.ValidatorAddress = me.Address;
+                Globals.IsBlockCaster = true;
+                Globals.BlockCasters = new System.Collections.Concurrent.ConcurrentBag<Peers> { new Peers { ValidatorAddress = me.Address } };
+                Globals.VreeActivationHeight = long.MaxValue;
+
+                var record = Ratified(0);
+                Block Resigned(Block b, Member by)
+                {
+                    b.Hash = b.GetBlockHash();
+                    b.ValidatorSignature = SignatureService.CreateSignature(b.Hash, by.Key, by.Pub);
+                    return b;
+                }
+
+                var height = Globals.LastBlock.Height + 1;
+                var reward = new Transaction
+                {
+                    FromAddress = "Coinbase_BlkRwd", ToAddress = _electors[11].Address, TransactionType = TransactionType.TX, Timestamp = TimeUtil.GetTime(),
+                    Amount = BlockVersionUtility.GetBlockVersion(height) < 4 ? BlockchainData.GetBlockReward() : 0.0M,
+                };
+                reward.Build();
+                var unsigned = new Transaction
+                {
+                    FromAddress = _electors[11].Address, ToAddress = _electors[10].Address, TransactionType = TransactionType.TX, Timestamp = TimeUtil.GetTime(), Amount = 1M, Fee = 0.00001M,
+                };
+                unsigned.Build();
+                var refused = ProducedBlock(_electors[11], Members(record).Take(3), record, transactions: new List<Transaction> { reward, unsigned });
+                refused.ConsensusCertificate = null;
+                Assert.True(ConsensusCertificateRules.SupportsConsensusCertificate(refused.Version));
+                Assert.False(await ConsensusCertificateHelper.TryAttachCertificateAsync(refused, maxPollRounds: 0));
+                Assert.Null(AttestationGuard.SignedAt(refused.Height));                     // not signed: the height is not claimed
+                Assert.True(BlockValidatorService.WasRefusedForItsContents(refused.Height, refused.Hash)); // its producer can be left out
+
+                var nextReward = new Transaction
+                {
+                    FromAddress = "Coinbase_BlkRwd", ToAddress = _electors[10].Address, TransactionType = TransactionType.TX, Timestamp = TimeUtil.GetTime(),
+                    Amount = BlockVersionUtility.GetBlockVersion(height) < 4 ? BlockchainData.GetBlockReward() : 0.0M,
+                };
+                nextReward.Build();
+                var next = ProducedBlock(_electors[10], Members(record).Take(3), record, transactions: new List<Transaction> { nextReward });
+                next.ConsensusCertificate = null;
+                Assert.Equal(refused.Height, next.Height);
+                await ConsensusCertificateHelper.TryAttachCertificateAsync(next, maxPollRounds: 0); // no peers here, so no quorum
+                Assert.Equal(next.Hash, AttestationGuard.SignedAt(next.Height));             // signed: the next block can be certified
+
+                // A block not on this node's tip is not signed either: this node cannot judge it.
+                var elsewhere = ProducedBlock(_electors[9], Members(record).Take(3), record);
+                elsewhere.PrevHash = "another-predecessor";
+                Resigned(elsewhere, _electors[9]);
+                elsewhere.ConsensusCertificate = null;
+                Assert.NotNull(await ConsensusCertificateHelper.WhyNotSign(elsewhere));
+            }
+            finally
+            {
+                AttestationGuard.ResetForTests();
+                Globals.IsWalletEncrypted = priorEncrypted;
+                Globals.EncryptPassword = priorPassword;
+            }
+        }
+
+        /// <summary>
         /// A content check that runs before the previous hash is compared (here the block's version) counts against the
         /// producer only for a block on this node's tip: judged against another predecessor, the refusal says nothing about it.
         /// </summary>
