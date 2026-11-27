@@ -4482,6 +4482,13 @@ namespace VerifiedXCore.Services
                         && (jobj["TotalAmount"]?.ToObject<decimal?>() == null || jobj["TotalAmountSats"]?.ToObject<long?>() == null))
                         return (txResult, "A bridge exit to BTC that carries allocations carries TotalAmount and TotalAmountSats.");
 
+                    // Its allocations are a JSON array of at least one: the typed reader also took an object holding the list
+                    // under "$values", which the allocation check below and the block's lock guard did not read as allocations.
+                    // At admission at once; in a block from Globals.BridgeAllocationsArrayHeight.
+                    if (((blockHeight == null && !blockVerify && !blockDownloads) || exitGateHeight >= Globals.BridgeAllocationsArrayHeight)
+                        && jobj["Allocations"] is not JArray { HasValues: true })
+                        return (txResult, "A bridge exit to BTC carries its Allocations as a JSON array of at least one allocation.");
+
                     if (exitStrict)
                     {
                         // Submitter tightening (gated by BridgeIntraBlockGuardHeight): only the handler caster.
