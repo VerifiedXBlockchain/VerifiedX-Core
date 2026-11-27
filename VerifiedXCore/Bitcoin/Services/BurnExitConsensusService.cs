@@ -1479,8 +1479,6 @@ namespace VerifiedXCore.Bitcoin.Services
         private static async Task BroadcastToAllCasters<T>(string endpoint, T payload)
         {
             var casters = Globals.BlockCasters.ToList();
-            using var httpClient = Globals.HttpClientFactory.CreateClient();
-            httpClient.Timeout = TimeSpan.FromSeconds(10);
             var json = JsonConvert.SerializeObject(payload);
 
             var tasks = casters
@@ -1490,7 +1488,7 @@ namespace VerifiedXCore.Bitcoin.Services
                     try
                     {
                         var url = $"http://{c.PeerIP}:{Globals.ValAPIPort}/valapi/Validator/{endpoint}";
-                        await httpClient.PostAsync(url, new StringContent(json, Encoding.UTF8, "application/json"));
+                        await VerifiedXCore.Utilities.NodeHttp.PostWithoutReadingAsync(url, json); // the answer is not used: none of it is read
                     }
                     catch (Exception broadcastEx)
                     {
