@@ -129,8 +129,8 @@ namespace VerifiedXCore.Bitcoin.Attestation
         /// <summary>The addresses the vault's ledger names (any balance, zero included).</summary>
         public static int LedgerAddresses(SmartContractStateTrei? contract)
         {
-            var rows = contract?.SCStateTreiTokenizationTXes;
-            if (rows == null || rows.Count == 0) return 0;
+            var rows = VaultLedgerStore.Rows(contract);
+            if (rows.Count == 0) return 0;
             var named = new HashSet<string>(StringComparer.Ordinal);
             foreach (var row in rows)
             {
@@ -140,8 +140,7 @@ namespace VerifiedXCore.Bitcoin.Attestation
             return named.Count;
         }
 
-        private static bool Names(SmartContractStateTrei contract, string address) =>
-            contract.SCStateTreiTokenizationTXes?.Any(x => x.FromAddress == address || x.ToAddress == address) ?? false;
+        private static bool Names(SmartContractStateTrei contract, string address) => VaultLedgerStore.Names(contract, address);
 
         /// <summary>
         /// Why a credit to <paramref name="recipient"/> on this vault is refused for its holder limit: the vault is

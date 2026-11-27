@@ -121,10 +121,7 @@ namespace VerifiedXCore.Models
             // Then, load all contracts and filter in memory for transaction matches
             // This is less efficient but works around LiteDB limitations
             var allContracts = scs.Query().ToEnumerable();
-            var txContracts = allContracts.Where(contract =>
-                contract.SCStateTreiTokenizationTXes != null &&
-                contract.SCStateTreiTokenizationTXes.Any(tx =>
-                    tx.ToAddress == address || tx.FromAddress == address));
+            var txContracts = allContracts.Where(contract => VerifiedXCore.Bitcoin.Attestation.VaultLedgerStore.Names(contract, address));
 
             // Combine and return results
             var result = ownerContracts.Union(txContracts).Distinct();

@@ -1046,14 +1046,10 @@ namespace VerifiedXCore.Data
                                             if (scState != null)
                                             {
                                                 bool isOwner = tx.FromAddress == scState.OwnerAddress;
-                                                if (!isOwner && scState.SCStateTreiTokenizationTXes != null)
+                                                if (!isOwner && VerifiedXCore.Bitcoin.Attestation.VaultLedgerStore.HasLedger(scState))
                                                 {
-                                                    var tokenTxs = scState.SCStateTreiTokenizationTXes
-                                                        .Where(x => x.FromAddress == tx.FromAddress || x.ToAddress == tx.FromAddress)
-                                                        .ToList();
-                                                    var received = tokenTxs.Where(x => x.ToAddress == tx.FromAddress).Sum(x => x.Amount);
-                                                    var sent = tokenTxs.Where(x => x.FromAddress == tx.FromAddress).Sum(x => x.Amount);
-                                                    decimal vbtcBalance = received + sent;
+                                                    var receivedPlusSent = VerifiedXCore.Bitcoin.Attestation.VaultLedgerStore.ReceivedPlusSent(scState, tx.FromAddress);
+                                                    decimal vbtcBalance = receivedPlusSent;
 
                                                     if (pendingTotal > vbtcBalance)
                                                         reject = true; // Overspend detected
@@ -1628,16 +1624,13 @@ namespace VerifiedXCore.Data
                             if (scState != null)
                             {
                                 bool isOwner = tx.FromAddress == scState.OwnerAddress;
-                                if (!isOwner && scState.SCStateTreiTokenizationTXes != null)
+                                if (!isOwner && VerifiedXCore.Bitcoin.Attestation.VaultLedgerStore.HasLedger(scState))
                                 {
-                                    var tokenTxs = scState.SCStateTreiTokenizationTXes
-                                        .Where(x => x.FromAddress == tx.FromAddress || x.ToAddress == tx.FromAddress).ToList();
-                                    var received = tokenTxs.Where(x => x.ToAddress == tx.FromAddress).Sum(x => x.Amount);
-                                    var sent = tokenTxs.Where(x => x.FromAddress == tx.FromAddress).Sum(x => x.Amount);
+                                    var receivedPlusSent = VerifiedXCore.Bitcoin.Attestation.VaultLedgerStore.ReceivedPlusSent(scState, tx.FromAddress);
                                     // Debit rows carry NEGATIVE amounts, so balance = received + sent.
                                     // (The old "received - sent" ADDED historical outflows back in,
                                     // inflating the balance and disabling this guard.)
-                                    if (pendingTotal > (received + sent))
+                                    if (pendingTotal > receivedPlusSent)
                                         return true; // vBTC overspend detected
                                 }
                             }

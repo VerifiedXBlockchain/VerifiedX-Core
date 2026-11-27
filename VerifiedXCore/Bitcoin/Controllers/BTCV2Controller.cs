@@ -881,9 +881,9 @@ namespace VerifiedXCore.Bitcoin.Controllers
 
                 if (!isOwner)
                 {
-                    if (scState.SCStateTreiTokenizationTXes != null)
+                    if (VerifiedXCore.Bitcoin.Attestation.VaultLedgerStore.HasLedger(scState))
                     {
-                        var balances = scState.SCStateTreiTokenizationTXes.Where(x => x.FromAddress == address || x.ToAddress == address).ToList();
+                        var balances = VerifiedXCore.Bitcoin.Attestation.VaultLedgerStore.Rows(scState).Where(x => x.FromAddress == address || x.ToAddress == address).ToList();
 
                         if (balances.Any() && !isOwner)
                         {
@@ -935,9 +935,9 @@ namespace VerifiedXCore.Bitcoin.Controllers
 
                     var btcConfirmedBalance = btcChainBalance.Confirmed / 100_000_000M;
 
-                    if (scState.SCStateTreiTokenizationTXes != null)
+                    if (VerifiedXCore.Bitcoin.Attestation.VaultLedgerStore.HasLedger(scState))
                     {
-                        var balances = scState.SCStateTreiTokenizationTXes.Where(x => x.FromAddress == address || x.ToAddress == address).ToList();
+                        var balances = VerifiedXCore.Bitcoin.Attestation.VaultLedgerStore.Rows(scState).Where(x => x.FromAddress == address || x.ToAddress == address).ToList();
 
                         if (balances.Any())
                         {
@@ -999,9 +999,9 @@ namespace VerifiedXCore.Bitcoin.Controllers
                     decimal balance = 0.0M;
 
                     // Calculate balance from transactions
-                    if (scState.SCStateTreiTokenizationTXes != null)
+                    if (VerifiedXCore.Bitcoin.Attestation.VaultLedgerStore.HasLedger(scState))
                     {
-                        var transactions = scState.SCStateTreiTokenizationTXes
+                        var transactions = VerifiedXCore.Bitcoin.Attestation.VaultLedgerStore.Rows(scState)
                             .Where(x => x.FromAddress == address || x.ToAddress == address)
                             .ToList();
 
