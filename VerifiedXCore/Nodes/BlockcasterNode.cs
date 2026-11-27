@@ -1552,7 +1552,8 @@ namespace VerifiedXCore.Nodes
                             {
                                 var nextblock = Globals.LastBlock.Height + 1;
                                 Stopwatch sw = Stopwatch.StartNew();
-                                var verificationResultTuple = await ProofUtility.VerifyWinnerAvailability(winningCasterProof, nextblock);
+                                var verificationResultTuple = await ProofUtility.VerifyWinnerAvailability(winningCasterProof, nextblock,
+                                    (int)Math.Max(1, WINNER_VERIFY_TIMEOUT_MS - verifySw.ElapsedMilliseconds)); // never past the verify window
                                 sw.Stop();
                                 await Task.Delay(100);
                                 verificationResult = verificationResultTuple.Item1;
@@ -1919,7 +1920,10 @@ namespace VerifiedXCore.Nodes
                                                 CasterLogUtility.Log($"Direct validator fetch: calling {terminalWinner} at {winnerIP}", "BLOCKFETCH");
                                                 try
                                                 {
-                                                    var verifyResult = await ProofUtility.VerifyValAvailability(winnerIP, terminalWinner, finalizedWinner.BlockHeight);
+                                                    // The block the winner served when this caster checked it this round, else fetched now.
+                                                    var verifyResult = ProofUtility.VerifiedDraftOf(terminalWinner, finalizedWinner.BlockHeight) is { } served
+                                                        ? (true, served)
+                                                        : await ProofUtility.VerifyValAvailability(winnerIP, terminalWinner, finalizedWinner.BlockHeight);
                                                     if (verifyResult.Item1 && verifyResult.Item2 != null)
                                                     {
                                                         block = verifyResult.Item2;

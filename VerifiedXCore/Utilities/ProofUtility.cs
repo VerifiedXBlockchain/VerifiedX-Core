@@ -912,7 +912,45 @@ namespace VerifiedXCore.Utilities
             return true;
         }
 
-        public static async Task<(bool, Block?)> VerifyWinnerAvailability(Proof winningProof, long nextBlock)
+        /// <summary>The block a candidate served when it was checked this round: its producer and the block.</summary>
+        private static (string Producer, Block Block)? _verifiedDraft;
+
+        /// <summary>
+        /// Whether the candidate can produce the next block, and the block it serves. The check ends with the same request,
+        /// timeouts and checks the block fetch uses (<see cref="VerifyValAvailability"/>): a candidate that answered the
+        /// check but served no block, or a block that is not its own hash or not its whole copy, passed the check, was
+        /// elected, and was waited on for the whole fetch. The block is kept for the round, so the fetch takes it from here.
+        /// With <paramref name="budgetMs"/> the check takes no longer than that.
+        /// </summary>
+        public static async Task<(bool, Block?)> VerifyWinnerAvailability(Proof winningProof, long nextBlock, int budgetMs = 0)
+        {
+            var check = VerifyWinnerAvailabilityAtProducer(winningProof, nextBlock);
+            (bool, Block?) result;
+            try { result = budgetMs > 0 ? await check.WaitAsync(TimeSpan.FromMilliseconds(budgetMs)) : await check; }
+            catch (TimeoutException)
+            {
+                CasterLogUtility.Log($"VERIFY: candidate {winningProof.Address} did not serve a block for {nextBlock} within {budgetMs}ms — candidate skipped.", "VERIFY");
+                result = (false, null);
+            }
+            if (result.Item1 && result.Item2 != null)
+                _verifiedDraft = (winningProof.Address, result.Item2);
+            else if (_verifiedDraft is { } kept && kept.Producer == winningProof.Address)
+                _verifiedDraft = null;
+            return result;
+        }
+
+        /// <summary>
+        /// The block <paramref name="producer"/> served when it was checked for <paramref name="height"/>, while that height
+        /// is still the next one on this node's tip; otherwise null.
+        /// </summary>
+        public static Block? VerifiedDraftOf(string? producer, long height)
+        {
+            var tip = Globals.LastBlock;
+            return _verifiedDraft is { } kept && kept.Producer == producer && kept.Block.Height == height
+                && tip != null && tip.Height + 1 == height && kept.Block.PrevHash == tip.Hash ? kept.Block : null;
+        }
+
+        private static async Task<(bool, Block?)> VerifyWinnerAvailabilityAtProducer(Proof winningProof, long nextBlock)
         {
             using (var client = Globals.HttpClientFactory.CreateClient())
             {
@@ -1055,24 +1093,9 @@ namespace VerifiedXCore.Utilities
                     }
                     catch { /* unreachable/legacy — fall through to the block-fetch check */ }
 
-                    var uri = $"http://{cleanIP}:{Globals.ValAPIPort}/valapi/validator/VerifyBlock/{nextBlock}/{winningProof.ProofHash}";
-                    var response = await client.GetAsync(uri).WaitAsync(new TimeSpan(0, 0, 3));
-
-                    if (response != null)
-                    {
-                        if (response.IsSuccessStatusCode)
-                        {
-                            return (true, null);
-                        }
-                        // VERIFY-REASON (Sep 2026): a candidate that fails VerifyBlock is silently skipped and the
-                        // next candidate becomes our vote. Record the status so a split vote (2 casters skip a
-                        // winner, 3 accept it) is explainable from the caster log.
-                        CasterLogUtility.Log($"VerifyBlock REJECT: candidate {winningProof.Address} at {cleanIP} returned HTTP {(int)response.StatusCode} for height {nextBlock} — candidate skipped.", "VERIFY");
-                    }
-                    else
-                    {
-                        CasterLogUtility.Log($"VerifyBlock NO-RESPONSE: candidate {winningProof.Address} at {cleanIP} for height {nextBlock} — candidate skipped.", "VERIFY");
-                    }
+                    // The block itself, fetched as the block fetch fetches it: a candidate passes only by serving it.
+                    // Every refusal is logged there (BlockFetch reason), so a split vote stays explainable from the log.
+                    return await VerifyValAvailability(cleanIP, winningProof.Address, nextBlock);
                 }
                 catch (Exception ex)
                 {
