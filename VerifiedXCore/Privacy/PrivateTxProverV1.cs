@@ -125,7 +125,7 @@ namespace VerifiedXCore.Privacy
                 return false;
             }
             var circuit = PlonkCircuitHelper.GetPrimaryCircuit(tx.TransactionType);
-            var result = PlonkProofVerifier.VerifyRaw(circuit, proof, pi, currentRules: true); // what this library's prover makes
+            var result = PlonkProofVerifier.VerifyRaw(circuit, proof, pi, PlonkProverV1.Rules); // what this wallet's prover makes now
             if (result != PlonkVerifyResult.Valid)
             {
                 error = $"The proof this wallet produced does not verify against the transaction's public inputs ({result}); not broadcasting.";

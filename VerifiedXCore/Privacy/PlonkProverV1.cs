@@ -10,6 +10,14 @@ namespace VerifiedXCore.Privacy
         /// <summary>Whether real-circuit proving is available.</summary>
         public static bool IsAvailable => PLONKSetup.IsV1ProvingAvailable;
 
+        /// <summary>
+        /// The rules this wallet proves under: those of the next block (key-bound from Globals.PlonkKeyBoundRulesHeight),
+        /// else the current ones, the only others its library makes. <see cref="PrivateTxProverV1.TryAttachAndVerify"/>
+        /// checks a proof under the same.
+        /// </summary>
+        public static PlonkRules Rules =>
+            PlonkProofVerifier.RulesAt((Globals.LastBlock?.Height ?? 0) + 1) == PlonkRules.KeyBound ? PlonkRules.KeyBound : PlonkRules.Current;
+
         // ─── Shield (T→Z) ─────────────────────────────────────────────
 
         /// <summary>
@@ -30,9 +38,11 @@ namespace VerifiedXCore.Privacy
             if (!IsAvailable)
                 return PlonkNative.ErrNotImplemented;
 
+            var keyBound = Rules == PlonkRules.KeyBound;
             return CallProveWithRetry(
-                (byte[] pBuf, ref nuint pLen, byte[] piBuf, ref nuint piLen) =>
-                    PlonkNative.plonk_prove_shield(amountScaled, randomness32, ownerPk32, pBuf, ref pLen, piBuf, ref piLen),
+                (byte[] pBuf, ref nuint pLen, byte[] piBuf, ref nuint piLen) => keyBound
+                    ? PlonkNative.plonk_prove_shield3(amountScaled, randomness32, ownerPk32, pBuf, ref pLen, piBuf, ref piLen)
+                    : PlonkNative.plonk_prove_shield(amountScaled, randomness32, ownerPk32, pBuf, ref pLen, piBuf, ref piLen),
                 out proof, out publicInputs);
         }
 
@@ -69,9 +79,11 @@ namespace VerifiedXCore.Privacy
             WriteU64LE(witness, offset, feeScaled); offset += 8;
             Buffer.BlockCopy(merkleRoot32, 0, witness, offset, PlonkNative.ScalarSize);
 
+            var keyBound = Rules == PlonkRules.KeyBound;
             return CallProveWithRetry(
-                (byte[] pBuf, ref nuint pLen, byte[] piBuf, ref nuint piLen) =>
-                    PlonkNative.plonk_prove_transfer(witness, (nuint)witness.Length, pBuf, ref pLen, piBuf, ref piLen),
+                (byte[] pBuf, ref nuint pLen, byte[] piBuf, ref nuint piLen) => keyBound
+                    ? PlonkNative.plonk_prove_transfer3(witness, (nuint)witness.Length, pBuf, ref pLen, piBuf, ref piLen)
+                    : PlonkNative.plonk_prove_transfer(witness, (nuint)witness.Length, pBuf, ref pLen, piBuf, ref piLen),
                 out proof, out publicInputs);
         }
 
@@ -118,9 +130,11 @@ namespace VerifiedXCore.Privacy
             Buffer.BlockCopy(merkleRoot32, 0, witness, offset, PlonkNative.ScalarSize); offset += PlonkNative.ScalarSize;
             Buffer.BlockCopy(recipientTag32, 0, witness, offset, PlonkNative.ScalarSize);
 
+            var keyBound = Rules == PlonkRules.KeyBound;
             return CallProveWithRetry(
-                (byte[] pBuf, ref nuint pLen, byte[] piBuf, ref nuint piLen) =>
-                    PlonkNative.plonk_prove_unshield(witness, (nuint)witness.Length, pBuf, ref pLen, piBuf, ref piLen),
+                (byte[] pBuf, ref nuint pLen, byte[] piBuf, ref nuint piLen) => keyBound
+                    ? PlonkNative.plonk_prove_unshield3(witness, (nuint)witness.Length, pBuf, ref pLen, piBuf, ref piLen)
+                    : PlonkNative.plonk_prove_unshield(witness, (nuint)witness.Length, pBuf, ref pLen, piBuf, ref piLen),
                 out proof, out publicInputs);
         }
 
@@ -161,9 +175,11 @@ namespace VerifiedXCore.Privacy
             WriteU64LE(witness, offset, feeScaled); offset += 8;
             Buffer.BlockCopy(merkleRoot32, 0, witness, offset, PlonkNative.ScalarSize);
 
+            var keyBound = Rules == PlonkRules.KeyBound;
             return CallProveWithRetry(
-                (byte[] pBuf, ref nuint pLen, byte[] piBuf, ref nuint piLen) =>
-                    PlonkNative.plonk_prove_fee(witness, (nuint)witness.Length, pBuf, ref pLen, piBuf, ref piLen),
+                (byte[] pBuf, ref nuint pLen, byte[] piBuf, ref nuint piLen) => keyBound
+                    ? PlonkNative.plonk_prove_fee3(witness, (nuint)witness.Length, pBuf, ref pLen, piBuf, ref piLen)
+                    : PlonkNative.plonk_prove_fee(witness, (nuint)witness.Length, pBuf, ref pLen, piBuf, ref piLen),
                 out proof, out publicInputs);
         }
 

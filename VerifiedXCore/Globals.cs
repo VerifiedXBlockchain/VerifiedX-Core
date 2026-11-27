@@ -866,6 +866,16 @@ namespace VerifiedXCore
         public const long PlonkCurrentRulesTestnetHeight = 205_615L;
 
         /// <summary>
+        /// From this height a private transaction's proofs are judged under the PLONK library's key-bound rules
+        /// (<c>plonk_verify3</c>): every Fiat-Shamir challenge depends on the whole verifier key the proof is checked
+        /// against, lookup selector and tables included. Below it under the rules of <see cref="PlonkCurrentRulesHeight"/>.
+        /// The wallet proves under the rules of the block it would mine into. Set to the tip at release. Testnet value in
+        /// GlobalsNetworkHeights.
+        /// </summary>
+        public static long PlonkKeyBoundRulesHeight = long.MaxValue;
+        public const long PlonkKeyBoundRulesTestnetHeight = long.MaxValue;
+
+        /// <summary>
         /// From this height a transaction's Data is read by one strict reader, Utilities.ConsensusData: a name used twice
         /// or in two spellings, a comment, trailing content, a number a decimal cannot hold exactly and any syntax outside
         /// RFC 8259 are refused, decimals are never read through double and strings are never read as dates. A
@@ -1334,7 +1344,7 @@ namespace VerifiedXCore
         public static bool ProofVerifierReady =>
             !Privacy.PrivacyEpoch.ProofRulesActive((LastBlock?.Height ?? 0) + 1)
             || Privacy.PlonkProofVerifier.VerifierAvailable()
-                && (!Privacy.PlonkProofVerifier.UsesCurrentRules((LastBlock?.Height ?? 0) + 1) || Privacy.PlonkProofVerifier.CurrentRulesAvailable());
+                && Privacy.PlonkProofVerifier.RulesAvailable(Privacy.PlonkProofVerifier.RulesAt((LastBlock?.Height ?? 0) + 1));
 
         /// <summary>Legacy proofs, GET block fallback, optional cert skip, and seed peer injection apply only for seed casters when the tip looks stopped. Other nodes always use normal snapshot/signed paths and discovery.
         /// Phase E: additionally requires a signed ≥2-of-3 seed agreement (<see cref="Services.BootstrapCoordinationService.AgreementActive"/>) — bootstrap is never entered unilaterally.</summary>
