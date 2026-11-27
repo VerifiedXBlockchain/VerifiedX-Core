@@ -643,7 +643,7 @@ namespace VerifiedXCore.Utilities
             return true;
         }
 
-        /// <summary>Producers whose block at a height was refused for a transaction in it: address → that height.</summary>
+        /// <summary>Producers whose block at a height was refused for a fault in its own contents: address → that height.</summary>
         private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, long> _refusedBlockProducers = new(StringComparer.Ordinal);
         private static int _refusedBlockProducersLoaded;
 

@@ -4503,18 +4503,19 @@ namespace VerifiedXCore.Nodes
         }
 
         /// <summary>
-        /// After an agreed block was validated at our tip and refused for a transaction in it, its producer gets no proof at
-        /// that height: elected again, it served the same block every round and the chain stayed at the height. Every caster
-        /// that tried the block at the same tip refuses it for the same transaction, so they leave out the same producer and
-        /// the next round elects the next one. A refusal for any other reason (a certificate, our own tip) leaves the
-        /// producer in; the exclusion ends with the height.
+        /// After an agreed block was validated at our tip and refused for a fault in its own contents (a transaction, its
+        /// merkle root, its reward, its VRF proof, a cap), its producer gets no proof at that height: elected again, it served
+        /// the same block every round and the chain stayed at the height. Every caster that tried the block at the same tip
+        /// refuses it for the same fault, so they leave out the same producer and the next round elects the next one. A
+        /// refusal that depends on the caster (a certificate, a membership record, its own tip or clock) leaves the producer
+        /// in; the exclusion ends with the height.
         /// </summary>
         internal static bool ExcludeProducerOfRefusedBlock(long height, string? hash, string? producer, bool triedAtTip)
         {
-            if (!triedAtTip || string.IsNullOrEmpty(producer) || !BlockValidatorService.WasRefusedForATransaction(height, hash))
+            if (!triedAtTip || string.IsNullOrEmpty(producer) || !BlockValidatorService.WasRefusedForItsContents(height, hash))
                 return false;
             ProofUtility.ExcludeProducerAtHeight(producer, height);
-            CasterLogUtility.Log($"COMMIT-FAILED: h={height} producer {producer} left out of this height's election: its block was refused for a transaction in it.", "ROUND");
+            CasterLogUtility.Log($"COMMIT-FAILED: h={height} producer {producer} left out of this height's election: its block was refused for a fault in its own contents.", "ROUND");
             return true;
         }
 
