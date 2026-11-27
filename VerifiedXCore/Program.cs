@@ -1006,6 +1006,7 @@ namespace VerifiedXCore
 
             _ = MemoryService.Run();
             _ = MemoryService.RunGlobals();
+            _ = MemoryLogService.Run();
 
             _ = ArbiterService.GetArbiterSigningAddress();
             

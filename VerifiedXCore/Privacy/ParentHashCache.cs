@@ -19,6 +19,9 @@ namespace VerifiedXCore.Privacy
         private static readonly ConcurrentDictionary<Pair, byte[]> _pairs = new();
         [ThreadStatic] private static long _computedOnThisThread;
 
+        /// <summary>Pairs remembered now (the memory log).</summary>
+        internal static int Count => _pairs.Count;
+
         /// <summary>Parent hashes this thread computed rather than remembered (tests).</summary>
         internal static long ComputedOnThisThread => _computedOnThisThread;
 
