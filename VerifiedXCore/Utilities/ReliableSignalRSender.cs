@@ -26,8 +26,7 @@ namespace VerifiedXCore.Utilities
         public static void SendToCallerReliable<T>(this IClientProxy caller, string method, T data, 
             string context, string targetInfo = "", int timeoutMs = 2000, bool enableRetry = false)
         {
-            using var cts = new CancellationTokenSource(timeoutMs);
-            var task = caller.SendAsync(method, data, cts.Token);
+            var task = SendWithin(token => caller.SendAsync(method, data, token), timeoutMs);
             TrackSendWithContinuation(task, context, $"Caller({targetInfo})", method, new object[] { data }, targetInfo, enableRetry);
         }
 
@@ -37,8 +36,7 @@ namespace VerifiedXCore.Utilities
         public static void SendToAllReliable<T>(this IHubCallerClients clients, string method, T data, 
             string context, int timeoutMs = 6000, bool enableRetry = false)
         {
-            using var cts = new CancellationTokenSource(timeoutMs);
-            var task = clients.All.SendAsync(method, data, cts.Token);
+            var task = SendWithin(token => clients.All.SendAsync(method, data, token), timeoutMs);
             TrackSendWithContinuation(task, context, "All", method, new object[] { data }, null, enableRetry);
         }
 
@@ -48,8 +46,7 @@ namespace VerifiedXCore.Utilities
         public static void SendToCallerReliable(this IClientProxy caller, string method, object[] args, 
             string context, string targetInfo = "", int timeoutMs = 2000, bool enableRetry = false)
         {
-            using var cts = new CancellationTokenSource(timeoutMs);
-            var task = caller.SendAsync(method, args, cts.Token);
+            var task = SendWithin(token => caller.SendAsync(method, args, token), timeoutMs);
             TrackSendWithContinuation(task, context, $"Caller({targetInfo})", method, args, targetInfo, enableRetry);
         }
 
@@ -59,9 +56,23 @@ namespace VerifiedXCore.Utilities
         public static void SendToAllReliable(this IHubCallerClients clients, string method, object[] args, 
             string context, int timeoutMs = 6000, bool enableRetry = false)
         {
-            using var cts = new CancellationTokenSource(timeoutMs);
-            var task = clients.All.SendAsync(method, args, cts.Token);
+            var task = SendWithin(token => clients.All.SendAsync(method, args, token), timeoutMs);
             TrackSendWithContinuation(task, context, "All", method, args, null, enableRetry);
+        }
+
+        /// <summary>
+        /// Starts a send that is cancelled after <paramref name="timeoutMs"/>. The timeout's source lives until the send
+        /// ends: disposed when the send had only started (as it was), its timer stopped and the send to a peer that never
+        /// reads waited for good.
+        /// </summary>
+        internal static Task SendWithin(Func<CancellationToken, Task> send, int timeoutMs)
+        {
+            var cts = new CancellationTokenSource(timeoutMs);
+            Task task;
+            try { task = send(cts.Token); }
+            catch { cts.Dispose(); throw; }
+            _ = task.ContinueWith(_ => cts.Dispose(), TaskContinuationOptions.ExecuteSynchronously);
+            return task;
         }
 
         /// <summary>
