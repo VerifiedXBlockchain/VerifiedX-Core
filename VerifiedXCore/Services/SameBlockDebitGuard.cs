@@ -299,7 +299,7 @@ namespace VerifiedXCore.Services
                 return key;
             if (cache == null || !cache.TryGetValue(key.ContractUid, out var uid))
             {
-                uid = SmartContractStateTrei.GetSmartContractState(key.ContractUid)?.SmartContractUID ?? key.ContractUid;
+                uid = SmartContractStateTrei.GetSmartContractHeader(key.ContractUid)?.SmartContractUID ?? key.ContractUid;
                 if (cache != null) cache[key.ContractUid] = uid;
             }
             return key with { ContractUid = uid };

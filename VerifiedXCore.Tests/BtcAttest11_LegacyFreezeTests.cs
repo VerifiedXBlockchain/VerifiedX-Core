@@ -277,12 +277,47 @@ namespace VerifiedXCore.Tests
 
             Assert.False(BtcLegacyFreeze.IsLegacyVault(watched.Uid)); // warm
             Assert.Null(BtcLegacyFreeze.Refusal(unlock, H2));         // a watched vault is not frozen
-            var read = Allocated(() => BtcLegacyFreeze.IsLegacyVault(watched.Uid));
+            var read = Allocated(() => SmartContractStateTrei.GetSmartContractState(watched.Uid)); // one read of the whole document
             string? refusal = "unset";
             var check = Allocated(() => refusal = BtcLegacyFreeze.Refusal(unlock, H2));
             Assert.Null(refusal);
             var reads = (double)check / read;
             Assert.True(reads < 4, $"the freeze allocated {check:N0} bytes, {reads:F1} reads of the vault's document ({read:N0} bytes each), for {allocations.Length} allocations");
+        }
+
+        /// <summary>
+        /// A withdrawal request on a vault with many holders read the vault's whole state document (its ledger, one row a
+        /// holder) nine times to be checked: the shared rules that need only the contract's owner, its code or the stored
+        /// spelling of its UID each built every row. They read the contract's header now; the request still reads the
+        /// ledger where it needs the requester's balance. Counted as bytes allocated against one read of the document.
+        /// </summary>
+        [Fact]
+        public async Task AWithdrawalRequestOnAVaultWithManyHolders_ReadsItsLedgerOnlyWhereItNeedsABalance()
+        {
+            var legacy = await CreateVault(H1 - 50);
+            await Start();
+            await Apply(Tip + 1, Transfer(legacy.Uid, 0.01M, Minter, _holder));
+            var state = SmartContractStateTrei.GetSmartContractState(legacy.Uid)!;
+            state.SCStateTreiTokenizationTXes!.AddRange(Enumerable.Range(0, 20_000)
+                .Select(i => new SmartContractStateTreiTokenizationTX { FromAddress = "+", ToAddress = $"xHolder{i:D27}", Amount = 0.00001M }));
+            SmartContractStateTrei.UpdateSmartContract(state);
+
+            var request = Request(legacy.Uid, 0.005M, _holder);
+            Assert.True((await Verify(request, H2 - 1)).Ok);                  // warm, and the request is valid
+            var read = Allocated(() => SmartContractStateTrei.GetSmartContractState(legacy.Uid));
+            (bool Ok, string Why) verdict = default;
+            var check = Allocated(() => verdict = Verify(request, H2 - 1).GetAwaiter().GetResult());
+            Assert.True(verdict.Ok, verdict.Why);
+            var reads = (double)check / read;
+            Assert.True(reads < 3, $"checking the request allocated {check:N0} bytes, {reads:F1} reads of the vault's document ({read:N0} bytes each)");
+
+            // The header is the same contract the full read gives, without its ledger.
+            var header = SmartContractStateTrei.GetSmartContractHeader(legacy.Uid)!;
+            Assert.Equal(state.SmartContractUID, header.SmartContractUID);
+            Assert.Equal(state.OwnerAddress, header.OwnerAddress);
+            Assert.Equal(state.ContractData, header.ContractData);
+            Assert.True(Allocated(() => SmartContractStateTrei.GetSmartContractHeader(legacy.Uid)) * 20 < read);
+            Assert.Null(SmartContractStateTrei.GetSmartContractHeader("no-such-contract"));
         }
     }
 }

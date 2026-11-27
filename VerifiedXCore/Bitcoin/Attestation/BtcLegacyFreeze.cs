@@ -31,8 +31,8 @@ namespace VerifiedXCore.Bitcoin.Attestation
         public static bool IsLegacyVault(string? scUID)
         {
             if (string.IsNullOrEmpty(scUID)) return false;
-            var state = SmartContractStateTrei.GetSmartContractState(scUID);
-            return state != null && VBTCService.IsVbtcV2Contract(state) && !BtcAttestBalance.IsAttestedVault(state.SmartContractUID);
+            var state = SmartContractStateTrei.GetSmartContractHeader(scUID);
+            return state != null && VBTCService.IsVbtcV2ContractHeader(state) && !BtcAttestBalance.IsAttestedVault(state.SmartContractUID);
         }
 
         /// <summary>
