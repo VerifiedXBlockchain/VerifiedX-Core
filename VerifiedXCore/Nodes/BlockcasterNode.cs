@@ -4549,6 +4549,7 @@ namespace VerifiedXCore.Nodes
         /// </summary>
         /// <summary>Pins this gate registered for a gossiped block (height → hash), so a refused staging can withdraw them.</summary>
         private static readonly ConcurrentDictionary<long, string> _gossipPins = new();
+        internal static int GossipPinCount => _gossipPins.Count;
 
         /// <summary>
         /// Stages an admitted gossip block (pre-checks, then the capped staging). When staging refuses it and no copy of it
@@ -4561,6 +4562,9 @@ namespace VerifiedXCore.Nodes
         {
             RegisterPendingCasterBlockHash(height, hash);
             _gossipPins[height] = hash;
+            // A pin is taken back only for its own height, so one whose block was committed stayed for good.
+            foreach (var behind in _gossipPins.Keys.Where(h => h < height - RequestBlockCache.KeptBehindTip).ToList())
+                _gossipPins.TryRemove(behind, out _);
         }
 
         internal static bool StageGossipOrWithdrawPin(Block block, string sourceIp)
