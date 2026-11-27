@@ -33,6 +33,11 @@ namespace VerifiedXCore.Bitcoin.Services
         public const int MaxUnverifiedAlertsPerCaster = 32;
         /// <summary>Minutes an alerted burn that has not been found on Base is kept before it is dropped.</summary>
         public const int UNVERIFIED_ALERT_TTL_MINUTES = 60;
+        /// <summary>
+        /// The most burns of one Base transaction that alerts may hold here before this node has found them on Base. A
+        /// transaction with more burns than this has the rest taken from this node's own watch of Base.
+        /// </summary>
+        public const int MaxUnverifiedAlertsPerTransaction = 8;
         private const int CONSENSUS_CHECK_INTERVAL_MS = 15_000;
         private const int PROPOSAL_WAIT_MS = 8_000;
         private const int CONFIRMATION_WAIT_MS = 8_000;
@@ -308,9 +313,33 @@ namespace VerifiedXCore.Bitcoin.Services
                 LogUtility.Log($"[BurnExitConsensus] {unpayable.BaseBurnTxHash}: a Bitcoin exit of {unpayable.Amount} BTC is below the {BtcWithdrawalsMinExitPartSats} sats a vault's part of an exit must be; not put to a round.", "BurnExitConsensusService");
             }
             // Fair and first come: see SweepOrder. RunRounds starts rounds in this order.
-            var pendingBurns = SweepOrder(DueForARound(_processedBurns.Values, now));
+            var pendingBurns = WithoutRedeemed(SweepOrder(DueForARound(_processedBurns.Values, now)));
 
             await RunRounds(pendingBurns.Select(b => b.BaseBurnTxHash).ToList(), RunConsensusRound, MaxConcurrentRounds);
+        }
+
+        /// <summary>
+        /// The burns of a sweep that still need a round. A pending burn this node has sent nothing for, and that the chain
+        /// has since redeemed or holds an exit for, was paid through another caster's round: it is dropped, not put to
+        /// rounds nobody else joins.
+        /// </summary>
+        internal static List<ProcessedBurnRecord> WithoutRedeemed(List<ProcessedBurnRecord> sweep, Func<string, bool>? chainHasTheBurn = null)
+        {
+            var kept = new List<ProcessedBurnRecord>();
+            foreach (var record in sweep)
+            {
+                if (record.Status == BurnExitStatus.Pending && record.CompletionVfxTxHash.Length == 0 && record.BtcTxHash.Length == 0
+                    && (chainHasTheBurn ?? ChainHasTheBurn)(record.BaseBurnTxHash))
+                {
+                    if (_processedBurns.TryRemove(record.BaseBurnTxHash, out _))
+                        LogUtility.Log($"[BurnExitConsensus] {record.BaseBurnTxHash} is redeemed on chain; its pending record is dropped.", "BurnExitConsensusService");
+                    _proposals.TryRemove(record.BaseBurnTxHash, out _);
+                    _confirmations.TryRemove(record.BaseBurnTxHash, out _);
+                    continue;
+                }
+                kept.Add(record);
+            }
+            return kept;
         }
 
         /// <summary>
@@ -503,10 +532,15 @@ namespace VerifiedXCore.Bitcoin.Services
         /// <summary>Handle BurnAlert from another caster via HTTP.</summary>
         public static async Task HandleBurnAlert(BurnAlert alert)
         {
-            if (alert == null || string.IsNullOrEmpty(alert.BaseBurnTxHash) || _processedBurns.ContainsKey(alert.BaseBurnTxHash))
+            if (alert == null || string.IsNullOrEmpty(alert.BaseBurnTxHash))
                 return;
             // Every text field is kept with the record, signed or not: none is longer than a real one can be.
             if (AlertFieldTooLong(alert))
+                return;
+            // A burn is tracked under one spelling of its id, the one this node's watch of Base gives it: the look-up on
+            // Base reads other spellings as the same burn, and each kept under its own would be another record of it.
+            var burnId = BaseBridgeService.CanonicalBurnId(alert.BaseBurnTxHash);
+            if (burnId == null || _processedBurns.ContainsKey(burnId))
                 return;
             // Only a defined exit type: the signature names the type in words, and any other number read as one of them
             // would be kept as a type no round and no payout knows.
@@ -529,7 +563,7 @@ namespace VerifiedXCore.Bitcoin.Services
             }
             // Looked up once the alert is a committee caster's: before, any unsigned alert on the open route cost two full
             // collection reads (round 25).
-            if (ChainHasTheBurn(alert.BaseBurnTxHash))
+            if (ChainHasTheBurn(burnId))
                 return;
             // A caster's alerts hold a bounded number of burns this node has not found on Base. Past it the alert is
             // dropped: a real burn still arrives from this node's own watch of Base and from the other casters.
@@ -540,10 +574,17 @@ namespace VerifiedXCore.Bitcoin.Services
                     LogUtility.Log($"[BurnExitConsensus] Dropped BurnAlert from {alert.SenderCasterAddress}: it already holds {MaxUnverifiedAlertsPerCaster} burns not found on Base.", "BurnExitConsensusService");
                     return;
                 }
-
-                _processedBurns.TryAdd(alert.BaseBurnTxHash, new ProcessedBurnRecord
+                // Likewise per Base transaction, whoever alerted: its positions name different burns only if it holds several.
+                var transaction = BaseBridgeService.SplitBurnId(burnId).TxHash;
+                if (_processedBurns.Values.Count(r => r.IsUnverifiedAlert && BaseBridgeService.SplitBurnId(r.BaseBurnTxHash).TxHash == transaction) >= MaxUnverifiedAlertsPerTransaction)
                 {
-                    BaseBurnTxHash = alert.BaseBurnTxHash,
+                    LogUtility.Log($"[BurnExitConsensus] Dropped BurnAlert from {alert.SenderCasterAddress}: {MaxUnverifiedAlertsPerTransaction} burns of {transaction} are already held and not found on Base.", "BurnExitConsensusService");
+                    return;
+                }
+
+                _processedBurns.TryAdd(burnId, new ProcessedBurnRecord
+                {
+                    BaseBurnTxHash = burnId,
                     ExitType = alert.ExitType,
                     VfxLockId = alert.VfxLockId ?? "",
                     BtcDestination = alert.BtcDestination ?? "",
@@ -556,7 +597,7 @@ namespace VerifiedXCore.Bitcoin.Services
                 });
             }
 
-            LogUtility.Log($"[BurnExitConsensus] Received BurnAlert from {alert.SenderCasterAddress}: {alert.BaseBurnTxHash}", "BurnExitConsensusService");
+            LogUtility.Log($"[BurnExitConsensus] Received BurnAlert from {alert.SenderCasterAddress}: {burnId}", "BurnExitConsensusService");
             await Task.CompletedTask;
         }
 
