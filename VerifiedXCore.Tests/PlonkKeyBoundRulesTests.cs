@@ -230,6 +230,15 @@ namespace VerifiedXCore.Tests
             Assert.Equal(1, PlonkNative.plonk_verify3(1, p3, (nuint)p3.Length, pi3, (nuint)pi3.Length));
             Assert.Equal(0, PlonkNative.plonk_verify2(1, p3, (nuint)p3.Length, pi3, (nuint)pi3.Length));
             Assert.Equal(0, PlonkNative.plonk_verify(1, p3, (nuint)p3.Length, pi3, (nuint)pi3.Length));
+
+            // A library without the key-bound rules: from the block before the height the wallet's prover reports itself
+            // unavailable rather than calling exports that library does not have.
+            PlonkProofVerifier.KeyBoundRulesAvailable = () => false;
+            Globals.LastBlock = new Block { Height = KeyBoundGate - 1 };
+            Assert.Equal(PlonkNative.ErrNotImplemented, PlonkProverV1.TryProveShield(500_000_000UL, PrivacyField.FromUInt64(7), PrivacyField.FromUInt64(11), out var none, out _));
+            Assert.Null(none);
+            Globals.LastBlock = new Block { Height = KeyBoundGate - 2 };
+            Assert.Equal(PlonkNative.Success, PlonkProverV1.TryProveShield(500_000_000UL, PrivacyField.FromUInt64(7), PrivacyField.FromUInt64(11), out _, out _));
         }
     }
 }

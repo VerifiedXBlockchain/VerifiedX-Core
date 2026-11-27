@@ -18,6 +18,17 @@ namespace VerifiedXCore.Privacy
         public static PlonkRules Rules =>
             PlonkProofVerifier.RulesAt((Globals.LastBlock?.Height ?? 0) + 1) == PlonkRules.KeyBound ? PlonkRules.KeyBound : PlonkRules.Current;
 
+        /// <summary>
+        /// Whether this library makes proofs under <see cref="Rules"/>, and whether those are the key-bound ones. A library
+        /// without them (no <see cref="PlonkNative.CapVerify3"/>) lacks the <c>plonk_prove_*3</c> exports; the prover then
+        /// reports itself unavailable instead of calling them.
+        /// </summary>
+        private static bool RulesReady(out bool keyBound)
+        {
+            keyBound = Rules == PlonkRules.KeyBound;
+            return !keyBound || PlonkProofVerifier.RulesAvailable(PlonkRules.KeyBound);
+        }
+
         // ─── Shield (T→Z) ─────────────────────────────────────────────
 
         /// <summary>
@@ -38,7 +49,8 @@ namespace VerifiedXCore.Privacy
             if (!IsAvailable)
                 return PlonkNative.ErrNotImplemented;
 
-            var keyBound = Rules == PlonkRules.KeyBound;
+            if (!RulesReady(out var keyBound))
+                return PlonkNative.ErrNotImplemented;
             return CallProveWithRetry(
                 (byte[] pBuf, ref nuint pLen, byte[] piBuf, ref nuint piLen) => keyBound
                     ? PlonkNative.plonk_prove_shield3(amountScaled, randomness32, ownerPk32, pBuf, ref pLen, piBuf, ref piLen)
@@ -79,7 +91,8 @@ namespace VerifiedXCore.Privacy
             WriteU64LE(witness, offset, feeScaled); offset += 8;
             Buffer.BlockCopy(merkleRoot32, 0, witness, offset, PlonkNative.ScalarSize);
 
-            var keyBound = Rules == PlonkRules.KeyBound;
+            if (!RulesReady(out var keyBound))
+                return PlonkNative.ErrNotImplemented;
             return CallProveWithRetry(
                 (byte[] pBuf, ref nuint pLen, byte[] piBuf, ref nuint piLen) => keyBound
                     ? PlonkNative.plonk_prove_transfer3(witness, (nuint)witness.Length, pBuf, ref pLen, piBuf, ref piLen)
@@ -130,7 +143,8 @@ namespace VerifiedXCore.Privacy
             Buffer.BlockCopy(merkleRoot32, 0, witness, offset, PlonkNative.ScalarSize); offset += PlonkNative.ScalarSize;
             Buffer.BlockCopy(recipientTag32, 0, witness, offset, PlonkNative.ScalarSize);
 
-            var keyBound = Rules == PlonkRules.KeyBound;
+            if (!RulesReady(out var keyBound))
+                return PlonkNative.ErrNotImplemented;
             return CallProveWithRetry(
                 (byte[] pBuf, ref nuint pLen, byte[] piBuf, ref nuint piLen) => keyBound
                     ? PlonkNative.plonk_prove_unshield3(witness, (nuint)witness.Length, pBuf, ref pLen, piBuf, ref piLen)
@@ -175,7 +189,8 @@ namespace VerifiedXCore.Privacy
             WriteU64LE(witness, offset, feeScaled); offset += 8;
             Buffer.BlockCopy(merkleRoot32, 0, witness, offset, PlonkNative.ScalarSize);
 
-            var keyBound = Rules == PlonkRules.KeyBound;
+            if (!RulesReady(out var keyBound))
+                return PlonkNative.ErrNotImplemented;
             return CallProveWithRetry(
                 (byte[] pBuf, ref nuint pLen, byte[] piBuf, ref nuint piLen) => keyBound
                     ? PlonkNative.plonk_prove_fee3(witness, (nuint)witness.Length, pBuf, ref pLen, piBuf, ref piLen)
