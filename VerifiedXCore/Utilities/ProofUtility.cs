@@ -643,7 +643,7 @@ namespace VerifiedXCore.Utilities
             return true;
         }
 
-        /// <summary>Producers whose block at a height was refused for a transaction in it: address → that height.</summary>
+        /// <summary>Producers whose block at a height was refused for a fault in its own contents: address → that height.</summary>
         private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, long> _refusedBlockProducers = new(StringComparer.Ordinal);
         private static int _refusedBlockProducersLoaded;
 
@@ -1068,6 +1068,59 @@ namespace VerifiedXCore.Utilities
             return (false, null);
         }
 
+        /// <summary>
+        /// Whether a block is the one its producer signed: its hash is what its fields give, and its transactions are the ones
+        /// its merkle root names. The producer signs the hash, which covers the root, not the transactions, so a copy passed on
+        /// with transactions removed or swapped is still its own hash.
+        /// </summary>
+        internal static bool IsWholeCopy(Block? block, out string why)
+        {
+            why = "";
+            if (block == null) { why = "is missing"; return false; }
+            if (block.GetBlockHash() != block.Hash) { why = "is not its own hash"; return false; }
+            if (block.Transactions == null || block.MerkleRootOf() != block.MerkleRoot) { why = "does not carry the transactions its merkle root names"; return false; }
+            return true;
+        }
+
+        /// <summary>
+        /// The copy of each recent block its producer served this node itself (fetched from the producer, or crafted here):
+        /// hash → (height, fingerprint of the copy). Only a refusal of that exact copy is the producer's fault; a copy that came
+        /// through anyone else may have been changed where the producer's signature does not reach.
+        /// </summary>
+        private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, (long Height, string Fingerprint)> _servedByProducer = new(StringComparer.Ordinal);
+        private const long ServedByProducerKeptBlocks = 100;
+
+        /// <summary>
+        /// What a copy carries that makes it the block it is: its hash and root, and for each transaction the fields its own
+        /// hash and signature are made from. Fields a node fills in while it validates (a transaction's height, its rating)
+        /// are left out, so the copy reads the same before and after validation. Amounts are taken as they are spelled
+        /// (0.00001 is not 0.000010): a transaction's hash covers the spelling, so a re-spelled amount is another copy.
+        /// </summary>
+        private static string CopyFingerprint(Block block)
+        {
+            static string Value(decimal amount) => amount.ToString(System.Globalization.CultureInfo.InvariantCulture); // keeps its scale
+            var text = new StringBuilder(JsonConvert.SerializeObject(new[] { block.Hash, block.MerkleRoot }));
+            foreach (var t in block.Transactions ?? new List<Transaction>())
+                text.Append(JsonConvert.SerializeObject(new object?[]
+                {
+                    t.Hash, t.Timestamp, t.FromAddress, t.ToAddress, Value(t.Amount), Value(t.Fee), t.Nonce, (int)t.TransactionType, t.Data, t.UnlockTime, t.Signature,
+                }));
+            return Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(text.ToString())));
+        }
+
+        internal static void NoteServedByProducer(Block? block)
+        {
+            if (block == null || string.IsNullOrEmpty(block.Hash)) return;
+            _servedByProducer[block.Hash] = (block.Height, CopyFingerprint(block));
+            foreach (var stale in _servedByProducer.Where(kv => kv.Value.Height < block.Height - ServedByProducerKeptBlocks).Select(kv => kv.Key).ToList())
+                _servedByProducer.TryRemove(stale, out _);
+        }
+
+        /// <summary>Whether <paramref name="block"/> is, byte for byte in what it carries, the copy its producer served this node.</summary>
+        internal static bool WasServedByItsProducer(Block? block) =>
+            block != null && !string.IsNullOrEmpty(block.Hash) && _servedByProducer.TryGetValue(block.Hash, out var served)
+            && served.Height == block.Height && served.Fingerprint == CopyFingerprint(block);
+
         public static async Task<(bool, Block?)> VerifyValAvailability(string ip, string winningAddress, long nextBlock)
         {
             using (var client = Globals.HttpClientFactory.CreateClient())
@@ -1077,7 +1130,9 @@ namespace VerifiedXCore.Utilities
                     //skip call because current winner is our node (unless it cannot verify private-tx proofs yet).
                     if (winningAddress == Globals.ValidatorAddress)
                     {
-                        return Globals.ProofVerifierReady ? (true, Globals.NextValidatorBlock) : (false, null);
+                        if (!Globals.ProofVerifierReady) return (false, null);
+                        NoteServedByProducer(Globals.NextValidatorBlock);
+                        return (true, Globals.NextValidatorBlock);
                     }
 
                     var cleanIP = ip.Replace("::ffff:", "");
@@ -1128,13 +1183,15 @@ namespace VerifiedXCore.Utilities
                                 CasterLogUtility.Log($"BlockFetch reason: {winningAddress} at {cleanIP} — VerifyBlock {nextBlock} body did not deserialize to a block ({blockJson.Length} chars).", "BLOCKFETCH");
                                 return (false, null);
                             }
-                            // The round registers this draft's hash as the approval: only a block that is exactly that hash.
-                            if (block.GetBlockHash() != block.Hash)
+                            // The round registers this draft's hash as the approval: only a block that is exactly that hash, and whose
+                            // transactions are the ones its merkle root names. A producer that serves anything else has served no block.
+                            if (!IsWholeCopy(block, out var notWhole))
                             {
-                                CasterLogUtility.Log($"BlockFetch reason: {winningAddress} at {cleanIP} — VerifyBlock {nextBlock} served a block that is not its own hash.", "BLOCKFETCH");
+                                CasterLogUtility.Log($"BlockFetch reason: {winningAddress} at {cleanIP} — VerifyBlock {nextBlock} served a block that {notWhole}.", "BLOCKFETCH");
                                 return (false, null);
                             }
 
+                            NoteServedByProducer(block);
                             return (true, block);
                         }
                         CasterLogUtility.Log($"BlockFetch reason: {winningAddress} at {cleanIP} — VerifyBlock {nextBlock} returned HTTP {(int)response.StatusCode}.", "BLOCKFETCH");
