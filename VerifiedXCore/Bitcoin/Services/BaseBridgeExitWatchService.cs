@@ -48,6 +48,10 @@ namespace VerifiedXCore.Bitcoin.Services
 
         /// <summary>An open burn older than this (one day of Base blocks at 200 ms) is no longer read again after a restart.</summary>
         internal const long MaxOpenBurnAgeBlocks = 432_000;
+
+        /// <summary>How often the open burns are checked against the chain while polling (a restart checks them at once).</summary>
+        internal const long OpenBurnPruneSeconds = 600;
+        private static long _openBurnsPrunedAt;
         private static bool _started;
         /// <summary>The cursor when this node last was not handling burns (at start, or when it stopped being a synced caster); null while it handles them.</summary>
         private static long? _cursorWhenNotHandling;
@@ -223,6 +227,7 @@ namespace VerifiedXCore.Bitcoin.Services
             }
             if (_cursorWhenNotHandling is not { } since) return;
             _cursorWhenNotHandling = null;
+            PruneOpenBurns(state, state.LastScannedBlock); // what the chain redeemed since they were saved is not read again
             // The last stretch, and back to the oldest burn this node handed on that the chain has not redeemed: its work
             // was in memory only, and the stretch alone missed it once it was older.
             var oldestOpen = state.OpenBurns.Count > 0 ? state.OpenBurns.Min(b => b.BaseBlock) - 1 : long.MaxValue;
@@ -288,6 +293,7 @@ namespace VerifiedXCore.Bitcoin.Services
             _started = false;
             _cursorWhenNotHandling = null;
             _positionedSeen = null;
+            _openBurnsPrunedAt = 0;
         }
 
         /// <summary>A burn log's place: its transaction and its index (logs of one transaction share a block).</summary>
@@ -350,7 +356,13 @@ namespace VerifiedXCore.Bitcoin.Services
             // caster, and a first poll read the whole stretch then, handed nothing on and moved past it (round 24). The
             // stretch is counted from where the cursor stood when the node last did not handle burns, so burns passed
             // over while it was not a caster (at start, or after losing its place) are read again too.
-            PruneOpenBurns(state, latest);
+            // Each open burn costs a look-up of the exits: pruned every few minutes, not on every range read.
+            var pruneNow = TimeUtil.GetTime();
+            if (pruneNow - _openBurnsPrunedAt >= OpenBurnPruneSeconds)
+            {
+                PruneOpenBurns(state, latest);
+                _openBurnsPrunedAt = pruneNow;
+            }
             ConsumeRewind(state, Globals.IsBlockCaster && Globals.IsChainSynced);
             ConsumeRulesFlip(state);
 

@@ -1552,15 +1552,18 @@ namespace VerifiedXCore.Tests
             Assert.True(VBTCBridgeConsumedBurn.TryMarkConsumed(redeemed, "POOL_UNLOCK", "vfx-tx", Tip));
             BaseBridgeExitWatchService.PruneOpenBurns(state, latest: cursor);    // the chain has redeemed one
             Assert.Equal(new[] { old }, state.OpenBurns.Select(b => b.BurnId));
+            // Saved before the chain redeemed it (the watcher prunes every few minutes): the restart drops it first.
+            state.OpenBurns.Add(new OpenBridgeBurn { BurnId = redeemed, BaseBlock = older - 100 });
             BridgeExitSyncState.Save(state);
 
             // Restart: the process forgets everything but what was saved.
             BaseBridgeExitWatchService.ResetRewindForTests();
             var reloaded = BridgeExitSyncState.GetOrCreate();
-            Assert.Equal(older, Assert.Single(reloaded.OpenBurns).BaseBlock);
+            Assert.Equal(2, reloaded.OpenBurns.Count);
             BaseBridgeExitWatchService.ConsumeRewind(reloaded, handling: false);
             BaseBridgeExitWatchService.ConsumeRewind(reloaded, handling: true);
-            Assert.Equal(older - 1, reloaded.LastScannedBlock);                  // the burn's block is read again
+            Assert.Equal(older - 1, reloaded.LastScannedBlock);                  // the open burn's block is read again, not the redeemed one's
+            Assert.Equal(older, Assert.Single(reloaded.OpenBurns).BaseBlock);
             Assert.Equal(older - 1, BridgeExitSyncState.GetOrCreate().LastScannedBlock);
 
             // With no open burn, the stretch alone: two hours of 200 ms blocks.
