@@ -671,6 +671,25 @@ describe("vBTCb V4", function () {
             }
             expect(await token.totalSupply()).to.equal(20_000n);
         });
+
+        it("on Base mainnet takes mainnet addresses and reserve addresses, and refuses testnet addresses", async function () {
+            const harness = await (await ethers.getContractFactory("VfxAddressHarness")).deploy();
+            const testnet = vfxAddress(0x89);
+            const mainnet = vfxAddress(0x3c);
+            const reserve = "xRBX9Zgi3Dsyufu8xG4Yf1W95gdhXa1ApZ";
+            expect(await harness.isVfxAddress(testnet)).to.equal(true); // on this chain (31337)
+            expect(await harness.isVfxAddress(mainnet)).to.equal(false);
+            await harness.setChainId(8453n);
+            expect(await harness.isVfxAddress(mainnet)).to.equal(true);
+            expect(mainnet[0]).to.equal("R");
+            expect(await harness.isVfxAddress(reserve)).to.equal(true);
+            expect(await harness.isVfxAddress(testnet)).to.equal(false);
+            expect(await harness.isVfxAddress(testnet.replace(/^x/, "xRBX").slice(0, testnet.length))).to.equal(false); // the prefix alone is not enough
+            expect(await harness.isVfxAddress(mainnet.slice(0, -1) + (mainnet.endsWith("2") ? "3" : "2"))).to.equal(false);
+            await harness.setChainId(84532n); // Base Sepolia: testnet and devnet
+            expect(await harness.isVfxAddress(testnet)).to.equal(true);
+            expect(await harness.isVfxAddress(mainnet)).to.equal(false);
+        });
     });
 
     describe("upgrades", function () {

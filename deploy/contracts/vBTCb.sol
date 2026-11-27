@@ -605,7 +605,12 @@ contract vBTCb is ERC20Upgradeable, UUPSUpgradeable {
     /// @dev The VFX address version byte of the VFX network this deployment bridges: 0x3C ('R') for the proxy on Base
     ///      mainnet, 0x89 ('x', testnet and devnet) on every other chain.
     function _vfxAddressVersion() internal view returns (uint256) {
-        return block.chainid == 8453 ? 0x3C : 0x89;
+        return _chainId() == 8453 ? 0x3C : 0x89;
+    }
+
+    /// @dev The chain this deployment runs on; a test harness answers for another chain.
+    function _chainId() internal view virtual returns (uint256) {
+        return block.chainid;
     }
 
     /// @dev A transparent VFX address as VFX nodes accept one (AddressValidateUtility.ValidateRBXAddress, written
