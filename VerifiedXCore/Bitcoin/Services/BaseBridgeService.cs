@@ -237,6 +237,17 @@ namespace VerifiedXCore.Bitcoin.Services
         internal static Func<Task<SignerView?>>? ReadSignerViewForTests;
 
         /// <summary>The contract's <see cref="SignerView"/> from the first RPC that answers; null when none does.</summary>
+        /// <summary>
+        /// Whether a failed contract call is the contract reverting (which is how a contract without the function
+        /// answers) and not the provider failing to answer: a revert the client decoded, or an RPC error that says the
+        /// execution reverted. A rate limit, an internal error or a timeout is not.
+        /// </summary>
+        internal static bool SaysTheContractReverted(Exception ex) =>
+            ex is Nethereum.ABI.FunctionEncoding.SmartContractRevertException
+            || ex.GetType().Name == "SmartContractCustomErrorRevertException" // a revert carrying a custom error or no reason
+            || (ex is Nethereum.JsonRpc.Client.RpcResponseException rpc
+                && ((rpc.RpcError?.Message ?? rpc.Message ?? "").IndexOf("revert", StringComparison.OrdinalIgnoreCase) >= 0 || rpc.RpcError?.Code == 3));
+
         public static async Task<SignerView?> ReadSignerViewAsync()
         {
             if (ReadSignerViewForTests != null) return await ReadSignerViewForTests();
@@ -250,8 +261,10 @@ namespace VerifiedXCore.Bitcoin.Services
                     var required = (int)await c.GetFunction("requiredMintSignatures").CallAsync<BigInteger>();
                     var nonce = await c.GetFunction("adminNonce").CallAsync<BigInteger>();
                     var version = 3;
+                    // V3 has no such function, and says so by reverting. Any other failure of the call is the provider's:
+                    // it is not taken for a V3 contract, and the next provider is asked.
                     try { version = (int)await c.GetFunction("MESSAGE_VERSION").CallAsync<BigInteger>(); }
-                    catch (Exception ex) when (ex is Nethereum.JsonRpc.Client.RpcResponseException or Nethereum.ABI.FunctionEncoding.SmartContractRevertException) { } // V3: no such function
+                    catch (Exception ex) when (SaysTheContractReverted(ex)) { }
                     if (version != VbtcbTypedData.MessageVersion) return new SignerView(validators, version, Math.Max(2, required), nonce);
                     var casters = await c.GetFunction("getCasters").CallAsync<List<string>>();
                     var requiredCasters = (int)await c.GetFunction("requiredCasterSignatures").CallAsync<BigInteger>();
