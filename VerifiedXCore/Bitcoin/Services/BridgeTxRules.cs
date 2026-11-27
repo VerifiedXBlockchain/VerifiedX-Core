@@ -13,6 +13,11 @@ namespace VerifiedXCore.Bitcoin.Services
             && !address.Contains('.') && !address.StartsWith(VerifiedXCore.Privacy.ShieldedAddressConstants.Prefix, StringComparison.Ordinal)
             && AddressValidateUtility.ValidateRBXAddress(address);
 
+        /// <summary>An address Base mints to: "0x" and exactly 40 hex digits, nothing around them, not the zero address.</summary>
+        public static bool IsMintableEvmAddress(string? address) =>
+            address != null && address.Length == 42 && address.StartsWith("0x", StringComparison.Ordinal)
+            && address.Skip(2).All(Uri.IsHexDigit) && address.Skip(2).Any(c => c != '0');
+
         /// <summary>
         /// The VFX address a Base burn's destination names: itself when it is an address, the address a registered name
         /// points to now, or null.
