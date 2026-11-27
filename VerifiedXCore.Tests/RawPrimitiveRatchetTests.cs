@@ -42,6 +42,9 @@ namespace VerifiedXCore.Tests
             new("async-void", new[] { "async void" }, "async Task (an exception in async void ends the process)"),
             new("port-probe", new[] { "PortUtility.IsPortOpen" },
                 "await PortUtility.IsPortOpenAsync (the blocking probe holds a thread for up to a second per call)", "Utilities/PortUtility.cs"),
+            new("mempool-add", new[] { "TransactionData.AddToPool" },
+                "TransactionData.SubmitOwnTransaction for a transaction this node made (it reports a refusal and records nothing until the mempool takes it), or read AddToPool's answer",
+                "Data/TransactionData.cs"),
         };
 
         private static string Root([System.Runtime.CompilerServices.CallerFilePath] string thisFile = "") =>
