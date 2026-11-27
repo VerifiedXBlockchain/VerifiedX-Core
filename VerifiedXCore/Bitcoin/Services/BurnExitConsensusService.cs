@@ -1527,20 +1527,33 @@ namespace VerifiedXCore.Bitcoin.Services
         /// Whether a pool unlock's record is to be made again: null when it is not one waiting to be seen mined (another
         /// kind, not complete, broadcast too recently), false when its burn was consumed, true when it was not.
         /// </summary>
-        internal static bool? UnlockToRemake(ProcessedBurnRecord r, long currentBlock, Func<string, bool>? burnUsed = null)
+        internal static bool? UnlockToRemake(ProcessedBurnRecord r, long currentBlock, Func<string, bool>? burnUsed = null, Func<string, bool>? stillPooled = null)
         {
-            if (r.ExitType != BurnExitType.VfxPoolUnlock || r.Status != BurnExitStatus.Complete || r.CompletionBroadcastAtBlock <= 0
-                || currentBlock - r.CompletionBroadcastAtBlock <= STUCK_EXIT_BLOCK_THRESHOLD)
+            if (r.ExitType != BurnExitType.VfxPoolUnlock || r.Status != BurnExitStatus.Complete || r.CompletionBroadcastAtBlock <= 0)
+                return null;
+            var age = currentBlock - r.CompletionBroadcastAtBlock;
+            if (age <= STUCK_EXIT_BLOCK_THRESHOLD && !(stillPooled != null && age >= DroppedUnlockBlocks && !stillPooled(r.CompletionVfxTxHash)))
                 return null;
             return burnUsed == null ? true : !burnUsed(r.BaseBurnTxHash);
         }
 
+        /// <summary>
+        /// Blocks after its broadcast at which a pool unlock that has left this node's mempool without being mined is made
+        /// again. A producer that finds its plan stale (another unlock drew the lock first) drops it from the mempool, and
+        /// the burn then sat until <see cref="STUCK_EXIT_BLOCK_THRESHOLD"/> blocks had passed.
+        /// </summary>
+        internal const long DroppedUnlockBlocks = 3;
+
+        /// <summary>Whether a transaction is still in this node's mempool.</summary>
+        private static bool InThisMempool(string txHash) =>
+            !string.IsNullOrEmpty(txHash) && TransactionData.GetPool().FindOne(x => x.Hash == txHash) != null;
+
         internal static async Task RetryUnminedPoolUnlocks(long currentBlock)
         {
-            foreach (var record in _processedBurns.Values.Where(r => UnlockToRemake(r, currentBlock) != null).ToList())
+            foreach (var record in _processedBurns.Values.Where(r => UnlockToRemake(r, currentBlock, stillPooled: InThisMempool) != null).ToList())
             {
-                if (UnlockToRemake(record, currentBlock, VBTCBridgeConsumedBurn.IsBurnUsedAnywhere) == false) { record.CompletionBroadcastAtBlock = 0; continue; } // mined
-                LogUtility.Log($"[BurnExitConsensus] Pool unlock {record.CompletionVfxTxHash} for burn {record.BaseBurnTxHash} was not mined in {STUCK_EXIT_BLOCK_THRESHOLD} blocks; made again.", "BurnExitConsensusService.RetryUnminedPoolUnlocks()");
+                if (UnlockToRemake(record, currentBlock, VBTCBridgeConsumedBurn.IsBurnUsedAnywhere, InThisMempool) == false) { record.CompletionBroadcastAtBlock = 0; continue; } // mined
+                LogUtility.Log($"[BurnExitConsensus] Pool unlock {record.CompletionVfxTxHash} for burn {record.BaseBurnTxHash} was not mined ({currentBlock - record.CompletionBroadcastAtBlock} blocks, still in the mempool: {InThisMempool(record.CompletionVfxTxHash)}); made again.", "BurnExitConsensusService.RetryUnminedPoolUnlocks()");
                 record.CompletionBroadcastAtBlock = 0;
                 record.Status = BurnExitStatus.Pending;
                 record.DetectedAtBlock = currentBlock;
