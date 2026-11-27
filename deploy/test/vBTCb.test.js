@@ -139,6 +139,21 @@ async function removeBatch(token, signers, addrs, height = 100n) {
     return token.removeValidatorBatch(addrs, height, sigs);
 }
 
+const BASE58 = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+
+/** A VFX address as VFX nodes write one: Base58Check of a version byte and a 20-byte hash. */
+function vfxAddress(version, hash20 = ethers.randomBytes(20)) {
+    const payload = ethers.concat([Uint8Array.of(version), hash20]);
+    const check = ethers.getBytes(ethers.sha256(ethers.sha256(payload))).slice(0, 4);
+    let n = BigInt(ethers.hexlify(ethers.concat([payload, check])));
+    let out = "";
+    while (n > 0n) {
+        out = BASE58[Number(n % 58n)] + out;
+        n /= 58n;
+    }
+    return out;
+}
+
 async function newImplementation() {
     const V4 = await ethers.getContractFactory("vBTCb");
     const impl = await V4.deploy();
@@ -618,6 +633,46 @@ describe("vBTCb V4", function () {
         });
     });
 
+    describe("burnForVfxExit takes only a VFX address of its network", function () {
+        // A burn cannot be undone and VFX credits nothing but an address, so anything else was burned for nothing.
+        it("burns to a VFX address of this network", async function () {
+            const { token, vals, user } = await loadFixture(deployV4Fixture);
+            await mint(token, vals.slice(0, 2), user.address, 20_000n, "lock-vfx");
+            const testnetAddress = "x8NemQSjMUKXaLqbpVU6YNq4P2d6Jbcrra"; // a funded VFX testnet address
+            await expect(token.connect(user).burnForVfxExit(5_000n, testnetAddress))
+                .to.emit(token, "VfxExitBurned")
+                .withArgs(user.address, 5_000n, testnetAddress, 31337n);
+            const made = vfxAddress(0x89);
+            expect(made[0]).to.equal("x");
+            await token.connect(user).burnForVfxExit(5_000n, made);
+            // A reserve address (xRBX, version 0x89 on every network; this one is a mainnet reserve).
+            await token.connect(user).burnForVfxExit(1_000n, "xRBX9Zgi3Dsyufu8xG4Yf1W95gdhXa1ApZ");
+            expect(await token.totalSupply()).to.equal(9_000n);
+        });
+
+        it("refuses names, padding, other chains' addresses and a wrong checksum", async function () {
+            const { token, vals, user } = await loadFixture(deployV4Fixture);
+            await mint(token, vals.slice(0, 2), user.address, 20_000n, "lock-vfx");
+            const good = vfxAddress(0x89);
+            const wrongChecksum = good.slice(0, -1) + (good.endsWith("2") ? "3" : "2");
+            for (const bad of [
+                "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4", // Bitcoin
+                "alice.vfx", // a name: it may point nowhere when the burn is handled
+                " " + good,
+                good + " ",
+                wrongChecksum,
+                vfxAddress(0x3c), // a mainnet address on a testnet deployment
+                vfxAddress(0x00), // version 0 (a Bitcoin-style address)
+                "1" + good, // a leading zero byte: not how nodes write the address
+                good.replace(/[1-9A-HJ-NP-Za-km-z]$/, "0"), // a character outside Base58
+                "zfx" + good,
+            ]) {
+                await expect(token.connect(user).burnForVfxExit(1_000n, bad), bad).to.be.revertedWith("Not a VFX address");
+            }
+            expect(await token.totalSupply()).to.equal(20_000n);
+        });
+    });
+
     describe("upgrades", function () {
         it("cannot be upgraded directly through upgradeToAndCall", async function () {
             const { token } = await loadFixture(deployV4Fixture);
@@ -823,7 +878,7 @@ describe("vBTCb V4", function () {
             await expect(mint(v4, vals.slice(0, 2), user.address, 1n, "lock-a")).to.be.revertedWith("LockId already used");
             await mint(v4, vals.slice(1, 3), user.address, 5_000n, "lock-c");
             expect(await v4.balanceOf(user.address)).to.equal(95_000n);
-            await v4.connect(user).burnForVfxExit(5_000n, "RVfxDestination");
+            await v4.connect(user).burnForVfxExit(5_000n, vfxAddress(0x89));
             expect(await v4.totalSupply()).to.equal(90_000n);
 
             const c = v3AddCollision(ethers.Wallet.createRandom().address, 1n, chainId, self);

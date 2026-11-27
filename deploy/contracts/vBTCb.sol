@@ -181,12 +181,15 @@ contract vBTCb is ERC20Upgradeable, UUPSUpgradeable {
      * @dev Pool-based unlock: burner specifies a VFX destination address.
      *      The VFX network will select available bridge locks FIFO to fulfill the exit,
      *      crediting vBTC from one or more contracts to the destination address.
+     *      The destination must be a VFX address of this network as VFX nodes take one (see _isVfxAddress): the burn
+     *      cannot be undone, and VFX credits nothing to any other string.
      * @param amount Amount of vBTC.b to burn (8 decimals, in sats)
      * @param vfxDestinationAddress The VFX address to receive the unlocked vBTC
      */
     function burnForVfxExit(uint256 amount, string calldata vfxDestinationAddress) external {
         require(amount > 0, "Amount must be > 0");
         require(bytes(vfxDestinationAddress).length > 0, "VFX destination required");
+        require(_isVfxAddress(vfxDestinationAddress), "Not a VFX address");
         _burn(msg.sender, amount);
         emit VfxExitBurned(msg.sender, amount, vfxDestinationAddress, block.chainid);
     }
@@ -597,6 +600,48 @@ contract vBTCb is ERC20Upgradeable, UUPSUpgradeable {
 
     function _lapsed(uint256 eta) internal view returns (bool) {
         return block.timestamp > eta + PROPOSAL_GRACE_PERIOD;
+    }
+
+    /// @dev The VFX address version byte of the VFX network this deployment bridges: 0x3C ('R') for the proxy on Base
+    ///      mainnet, 0x89 ('x', testnet and devnet) on every other chain.
+    function _vfxAddressVersion() internal view returns (uint256) {
+        return block.chainid == 8453 ? 0x3C : 0x89;
+    }
+
+    /// @dev A transparent VFX address as VFX nodes accept one (AddressValidateUtility.ValidateRBXAddress, written
+    ///      canonically): Base58Check of 25 bytes, a version byte (this network's, or 0x89 for a reserve address, which
+    ///      begins "xRBX" on every network), a 20-byte hash and the first four bytes of the double SHA-256 of the 21
+    ///      before them. No spaces, names, shielded addresses or other chains' addresses: a burn to anything else was
+    ///      never credited on VFX and nothing gives it back.
+    function _isVfxAddress(string calldata addr) internal view returns (bool) {
+        bytes calldata s = bytes(addr);
+        // A leading '1' encodes a zero byte; the version byte is never zero, so a canonical address never starts with one.
+        if (s.length < 26 || s.length > 35 || s[0] == "1") return false;
+        uint256 value = 0;
+        for (uint256 i = 0; i < s.length; i++) {
+            uint256 digit = _base58Digit(s[i]);
+            if (digit >= 58) return false;
+            value = value * 58 + digit; // 58^35 < 2^206: no overflow
+        }
+        if (value >> 200 != 0) return false; // more than 25 bytes
+        uint256 version = value >> 192;
+        bool reserve = version == 0x89 && s[0] == "x" && s[1] == "R" && s[2] == "B" && s[3] == "X";
+        if (version != _vfxAddressVersion() && !reserve) return false;
+        bytes21 payload = bytes21(uint168(value >> 32));
+        bytes32 check = sha256(abi.encodePacked(sha256(abi.encodePacked(payload))));
+        return uint32(value) == uint32(bytes4(check));
+    }
+
+    /// @dev A Base58 character's value (Bitcoin's alphabet, no 0, O, I or l), or 58 for any other byte.
+    function _base58Digit(bytes1 c) internal pure returns (uint256) {
+        uint8 b = uint8(c);
+        if (b >= 0x31 && b <= 0x39) return b - 0x31;      // 1-9  -> 0-8
+        if (b >= 0x41 && b <= 0x48) return b - 0x41 + 9;  // A-H  -> 9-16
+        if (b >= 0x4A && b <= 0x4E) return b - 0x4A + 17; // J-N  -> 17-21
+        if (b >= 0x50 && b <= 0x5A) return b - 0x50 + 22; // P-Z  -> 22-32
+        if (b >= 0x61 && b <= 0x6B) return b - 0x61 + 33; // a-k  -> 33-43
+        if (b >= 0x6D && b <= 0x7A) return b - 0x6D + 44; // m-z  -> 44-57
+        return 58;
     }
 
     function _max(uint256 a, uint256 b) internal pure returns (uint256) {
