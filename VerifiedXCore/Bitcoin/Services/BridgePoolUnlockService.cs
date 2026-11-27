@@ -65,6 +65,9 @@ namespace VerifiedXCore.Bitcoin.Services
             yield return Fitting(ComputeAllocationPlan(exitAmountBtc, excludeContractUIDs, passOverDust: false, largestFirst: true, pool));
         }
 
+        /// <summary>Pairs of vaults one search tries at most before it plans on more vaults (each pair is three plans in memory).</summary>
+        private const int MaxPairsTried = 16;
+
         /// <summary>The locks a plan may draw on, oldest first, read once for every plan one search tries.</summary>
         private static List<VBTCBridgeLockState> Pool() => VBTCBridgeLockState.GetAvailableLocksFIFO() ?? new List<VBTCBridgeLockState>();
 
@@ -82,10 +85,12 @@ namespace VerifiedXCore.Bitcoin.Services
         /// <summary>
         /// Plans on as few vaults as can pay, each set's locks tried as <see cref="PlanCandidates"/> tries the pool: one
         /// vault alone, for each vault whose locks hold the whole amount (and at least its minimum part,
-        /// <paramref name="minOf"/>), vaults in the order of their oldest lock; then the vaults that hold the most, largest
-        /// first, until together they hold the amount (no fewer vaults can). An exit to Bitcoin pays a miner fee for each
-        /// vault it draws on, and an unlock leaves its recipient a position on each: the plan followed the queue across
-        /// vaults when fewer could pay it, and the holder paid a fee a vault.
+        /// <paramref name="minOf"/>), vaults in the order of their oldest lock; then pairs of vaults that hold the amount
+        /// between them and whose minimums fit in it, largest first, at most <see cref="MaxPairsTried"/> (an unlock's
+        /// minimum differs by vault, so the two largest may not both reach theirs while another pair can); then the vaults
+        /// that hold the most, largest first, until together they hold the amount (no fewer vaults can). An exit to
+        /// Bitcoin pays a miner fee for each vault it draws on, and an unlock leaves its recipient a position on each: the
+        /// plan followed the queue across vaults when fewer could pay it, and the holder paid a fee a vault.
         /// </summary>
         private static IEnumerable<List<PoolUnlockAllocation>?> FewVaultCandidates(decimal amountBtc, HashSet<string> leftOut, List<VBTCBridgeLockState> pool, Func<string, decimal> minOf)
         {
@@ -98,15 +103,28 @@ namespace VerifiedXCore.Bitcoin.Services
                 foreach (var candidate in On(new[] { vault }))
                     yield return candidate;
             }
+            var minimum = totals.ToDictionary(t => t.Vault, t => minOf(t.Vault), StringComparer.Ordinal);
+            var byTotal = totals.OrderByDescending(t => t.Total).ToList(); // stable: equal totals keep queue order
+            var pairs = 0;
+            for (var i = 0; i < byTotal.Count && pairs < MaxPairsTried; i++)
+                for (var j = i + 1; j < byTotal.Count && pairs < MaxPairsTried; j++)
+                {
+                    if (byTotal[i].Total + byTotal[j].Total < amountBtc) break; // the rest are smaller still
+                    if (byTotal[i].Total >= amountBtc && amountBtc >= minimum[byTotal[i].Vault]) break; // the vault alone was tried
+                    if (minimum[byTotal[i].Vault] + minimum[byTotal[j].Vault] > amountBtc) continue;
+                    pairs++;
+                    foreach (var candidate in On(new[] { byTotal[i].Vault, byTotal[j].Vault }))
+                        yield return candidate;
+                }
             var fewest = new List<string>();
             decimal held = 0M;
-            foreach (var (vault, total) in totals.OrderByDescending(t => t.Total)) // stable: equal totals keep queue order
+            foreach (var (vault, total) in byTotal)
             {
                 if (held >= amountBtc) break;
                 fewest.Add(vault);
                 held += total;
             }
-            if (fewest.Count > 1 && held >= amountBtc)
+            if (fewest.Count > 2 && held >= amountBtc)
                 foreach (var candidate in On(fewest))
                     yield return candidate;
         }

@@ -2831,6 +2831,48 @@ namespace VerifiedXCore.Tests
             finally { Globals.VaultMinimumPositionHeight = gate; }
         }
 
+        /// <summary>
+        /// An unlock's minimum share differs by vault: none where the recipient already keeps a position, a whole position
+        /// elsewhere. Queue C 6,000 and D 6,000 (the recipient holds on both), then A 15,000 and B 14,000, and an unlock of
+        /// 18,000: A and B, the two largest, cannot both reach 10,000, and the queue gave C 2,000, D 6,000 and A 10,000,
+        /// three positions. A and C pay it as two.
+        /// </summary>
+        [Fact]
+        public async Task APoolUnlock_IsPlannedOnAnotherPair_WhenTheTwoLargestVaultsCannotBothReachTheirMinimum()
+        {
+            var gate = Globals.VaultMinimumPositionHeight;
+            try
+            {
+                Globals.VaultMinimumPositionHeight = H1;
+                await Start();
+                var c = await CreateVault(H1 + 1);
+                var d = await CreateVault(H1 + 2);
+                var a = await CreateVault(H1 + 3);
+                var b = await CreateVault(H1 + 4);
+                foreach (var v in new[] { c, d, a, b }) await Deposit(v.Script, 1_000_000);
+                await Mine(Transfer(c.Uid, 0.0002M));                                          // the recipient keeps a position on C and D
+                await Mine(Transfer(d.Uid, 0.0002M));
+                var c1 = await Lock(c.Uid, 0.00006M);
+                var d1 = await Lock(d.Uid, 0.00006M);
+                var a1 = await Lock(a.Uid, 0.00015M);
+                var b1 = await Lock(b.Uid, 0.00014M);
+                InQueueOrder(c1, d1, a1, b1);
+
+                var plan = BridgePoolUnlockService.ComputeUnlockAllocationPlan(0.00018M, Tip + 1, _holder.Address);
+                Assert.NotNull(plan);
+                Assert.Equal(18_000, new[] { a, b, c, d }.Sum(v => Sats(plan!, v.Uid)));
+                Assert.Equal(2, plan!.Select(x => x.SmartContractUID).Distinct().Count());
+                var unlock = SignedBy(Caster, Caster.Address, TransactionType.VBTC_V2_BRIDGE_POOL_UNLOCK, new
+                {
+                    Function = "VBTCBridgePoolUnlock()", ExitBurnTxHash = NewBurn(), VfxDestinationAddress = _holder.Address,
+                    TotalAmount = 0.00018M, TotalAmountSats = 18_000L, Allocations = plan,
+                }, free: true);
+                var (ok, why) = await Verify(unlock, Tip + 1);
+                Assert.True(ok, why);
+            }
+            finally { Globals.VaultMinimumPositionHeight = gate; }
+        }
+
         // ── Signing ─────────────────────────────────────────────────────────────────────────────────────────
 
         /// <summary>
