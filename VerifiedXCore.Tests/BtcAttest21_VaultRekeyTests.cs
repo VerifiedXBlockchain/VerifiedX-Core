@@ -462,6 +462,71 @@ namespace VerifiedXCore.Tests
             Assert.Equal(ceremony.Script.ToHex(), BtcAttestStore.Coin(BtcAttestStore.OutpointKey(wpin.Txid, 1))!.ScriptHex);
         }
 
+        /// <summary>
+        /// A signing session on a re-keyed vault names the new key's UID, while a cancellation is filed under the vault's.
+        /// Round 2 maps the key to its vault before asking whether a cancellation is being voted on: a holder gives no
+        /// share for a withdrawal whose cancellation is open, and gives it as before when none is.
+        /// </summary>
+        [Fact]
+        public async Task OnAReKeyedVault_AnOpenCancellation_StopsTheRound2Share()
+        {
+            await Start();
+            var vault = await CreateVault(H1 + 1, keyHolders: Signers);
+            await Deposit(vault.Script, 200_000);
+            var stillHere = Signers.Take(3).ToList();
+            await ToNextEpoch(stillHere, leaving: Signers.Skip(3));
+            var ceremony = Ceremony(vault.Uid, stillHere, 2, Signers[0].Address);
+            await Mine(RekeyTx(vault.Uid, ceremony.Proof));
+            var sweep = Assert.Single(BtcAttestStore.WithdrawalsOf(vault.Uid, VaultWithdrawalState.Pinned).Where(w => w.IsSweep));
+            await SignAndConfirm(sweep.Pins[0]);
+            var request = await Mine(Request(vault.Uid, 0.0005M));
+            var paying = BtcTx.Parse(Assert.Single(Row(request, vault.Uid).Pins).TxHex, Network.Main);
+            var leader = stillHere[1];
+
+            using var server = new Microsoft.AspNetCore.TestHost.TestServer(new WebHostBuilder().UseStartup<FrostStartup>());
+            var client = server.CreateClient();
+            async Task<string> Round2()
+            {
+                var start = Announce(ceremony.KeyUid, ceremony.Script, request.Hash, paying, leader.Address);
+                start.SignerAddresses = stillHere.Select(s => s.Address).ToList();
+                start.LeaderSignature = VerifiedXCore.Services.SignatureService.CreateSignature($"{start.SessionId}.{leader.Address}.{start.Timestamp}", leader.Key, leader.Pub);
+                start.ContentSignature = VerifiedXCore.Services.SignatureService.CreateSignature(FrostDkgLeaderAuth.SigningStartMessage(start), leader.Key, leader.Pub);
+                FrostSessionStorage.SigningSessions.TryAdd(start.SessionId, new SigningSession
+                {
+                    SessionId = start.SessionId, LeaderAddress = leader.Address, StartTimestamp = TimeUtil.GetTime(), LeaderStartTimestamp = start.Timestamp,
+                    MessageHash = start.MessageHash, SmartContractUID = ceremony.KeyUid, WithdrawalRequestHash = request.Hash, MyKeyPackage = "kp",
+                    StartContentSignature = start.ContentSignature, StartMessage = FrostDkgLeaderAuth.SigningStartMessage(start),
+                });
+                try
+                {
+                    const string nonces = "{}";
+                    var req = new System.Net.Http.HttpRequestMessage(System.Net.Http.HttpMethod.Post, $"/frost/sign/round2/{start.SessionId}")
+                    { Content = new System.Net.Http.StringContent(nonces, System.Text.Encoding.UTF8, "application/json") };
+                    req.Headers.TryAddWithoutValidation("X-Frost-Leader", leader.Address);
+                    req.Headers.TryAddWithoutValidation("X-Frost-Timestamp", start.Timestamp.ToString());
+                    req.Headers.TryAddWithoutValidation("X-Frost-Signature", start.LeaderSignature);
+                    req.Headers.TryAddWithoutValidation(FrostDkgLeaderAuth.SigningContentHeader,
+                        VerifiedXCore.Services.SignatureService.CreateSignature(FrostDkgLeaderAuth.SigningRound2Message(start.SessionId, nonces), leader.Key, leader.Pub));
+                    var r = await client.SendAsync(req);
+                    var body = await r.Content.ReadAsStringAsync();
+                    Assert.DoesNotContain("Leader auth failed", body);
+                    return body;
+                }
+                finally { FrostSessionStorage.SigningSessions.TryRemove(start.SessionId, out _); }
+            }
+
+            // No cancellation: this gate lets the share through (later checks answer for the made-up nonces).
+            Assert.DoesNotContain("cancellation", await Round2(), StringComparison.OrdinalIgnoreCase);
+
+            // A cancellation mined for this withdrawal, filed (as every cancellation is) under the vault's UID.
+            VBTCWithdrawalCancellation.SaveCancellation(new VBTCWithdrawalCancellation
+            {
+                CancellationUID = VBTCWithdrawalCancellation.OnChainUidPrefix + "rekeyed-476", SmartContractUID = vault.Uid, OwnerAddress = Minter.Address,
+                WithdrawalRequestHash = request.Hash, IsProcessed = false, RequestTime = TimeUtil.GetTime(), RequestBlockHeight = Tip, ValidatorVotes = new(),
+            });
+            Assert.Contains("A cancellation of this withdrawal is being voted on", await Round2());
+        }
+
         [Fact]
         public async Task AWithdrawalFixedBeforeTheReKey_IsPaidUnderItsOldKey_AndWhatComesBackThereIsMovedOn()
         {
