@@ -1330,6 +1330,65 @@ namespace VerifiedXCore.Tests
         }
 
         /// <summary>
+        /// A block carrying a private transaction whose proof fails is refused for its contents, so its producer is left out
+        /// of the height's election: casters sign no such block, and without that its producer kept winning the height and
+        /// serving the same block. A refusal because this node has no verifier loaded is this node's own and counts against
+        /// nobody.
+        /// </summary>
+        [Fact]
+        public async Task ABlockWhosePrivateProofFails_CountsAgainstItsProducer_UnlessThisNodeHasNoVerifier()
+        {
+            var priorRules = Globals.PrivateTxProofRulesHeight;
+            var priorAvailable = VerifiedXCore.Privacy.PlonkProofVerifier.VerifierAvailable;
+            var priorCurrent = VerifiedXCore.Privacy.PlonkProofVerifier.CurrentRulesAvailable;
+            try
+            {
+                Globals.PrivateTxProofRulesHeight = 1;
+                var record = Ratified(0);
+                var height = Globals.LastBlock.Height + 1;
+                Block WithBadProof(Member producer)
+                {
+                    var reward = new Transaction
+                    {
+                        FromAddress = "Coinbase_BlkRwd", ToAddress = producer.Address, TransactionType = TransactionType.TX, Timestamp = TimeUtil.GetTime(),
+                        Amount = BlockVersionUtility.GetBlockVersion(height) < 4 ? BlockchainData.GetBlockReward() : 0.0M,
+                    };
+                    reward.Build();
+                    var payload = new VerifiedXCore.Models.Privacy.PrivateTxPayload { Version = 1, Kind = "unshield", Asset = "VFX", ProofB64 = "not base64!" };
+                    var unshield = new Transaction
+                    {
+                        FromAddress = VerifiedXCore.Privacy.PrivacyConstants.ShieldedPoolAddress, ToAddress = _electors[1].Address, Amount = 1M, Fee = 0M, Nonce = 0,
+                        Timestamp = TimeUtil.GetTime(), TransactionType = TransactionType.VFX_UNSHIELD,
+                        Data = VerifiedXCore.Privacy.PrivateTxPayloadCodec.SerializeToJson(payload), Signature = VerifiedXCore.Privacy.PrivacyConstants.PlonkSignatureSentinel,
+                    };
+                    unshield.BuildPrivate();
+                    return ProducedBlock(producer, Members(record).Take(3), record, transactions: new List<Transaction> { reward, unshield });
+                }
+
+                VerifiedXCore.Privacy.PlonkProofVerifier.VerifierAvailable = () => true;
+                VerifiedXCore.Privacy.PlonkProofVerifier.CurrentRulesAvailable = () => true;
+                var badProof = WithBadProof(_electors[11]);
+                var since = DateTime.UtcNow;
+                Assert.False(await BlockValidatorService.ValidateBlock(badProof, false, false, validateOnly: true));
+                Assert.Equal("BlockValidatorService.ValidateBlock()-privatePlonkBatch", StepsSince(since).LastOrDefault());
+                Assert.True(BlockValidatorService.WasRefusedForItsContents(badProof.Height, badProof.Hash));
+
+                VerifiedXCore.Privacy.PlonkProofVerifier.VerifierAvailable = () => false; // this node cannot verify proofs
+                var unjudged = WithBadProof(_electors[10]);
+                since = DateTime.UtcNow;
+                Assert.False(await BlockValidatorService.ValidateBlock(unjudged, false, false, validateOnly: true));
+                Assert.Equal("BlockValidatorService.ValidateBlock()-privatePlonkBatch", StepsSince(since).LastOrDefault());
+                Assert.False(BlockValidatorService.WasRefusedForItsContents(unjudged.Height, unjudged.Hash));
+            }
+            finally
+            {
+                Globals.PrivateTxProofRulesHeight = priorRules;
+                VerifiedXCore.Privacy.PlonkProofVerifier.VerifierAvailable = priorAvailable;
+                VerifiedXCore.Privacy.PlonkProofVerifier.CurrentRulesAvailable = priorCurrent;
+            }
+        }
+
+        /// <summary>
         /// A content check that runs before the previous hash is compared (here the block's version) counts against the
         /// producer only for a block on this node's tip: judged against another predecessor, the refusal says nothing about it.
         /// </summary>
