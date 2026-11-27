@@ -509,6 +509,15 @@ namespace VerifiedXCore
         public const long PoolUnlockCreditsAddressTestnetHeight = long.MaxValue;
 
         /// <summary>
+        /// From this height a block refuses a vBTC V2 bridge lock whose EvmDestination is not "0x" and 40 hex digits, or is
+        /// the zero address: Base mints to neither, and the lock debited vBTC that could never be minted. Admission refuses
+        /// one at every height. A tightening rule. Unset (long.MaxValue) on mainnet and testnet until the release that
+        /// activates it. Testnet value in GlobalsNetworkHeights.
+        /// </summary>
+        public static long BridgeLockEvmAddressHeight = long.MaxValue;
+        public const long BridgeLockEvmAddressTestnetHeight = long.MaxValue;
+
+        /// <summary>
         /// From this height a bridge exit to Bitcoin carries its Allocations as a JSON array of at least one allocation, and
         /// apply reads a bridge exit's or pool unlock's Allocations only as an array. Within a block each allocation's lock is
         /// claimed once under its trimmed, lower-cased id (the lock look-up ignores case), whatever the exit's outer LockId says.
