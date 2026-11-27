@@ -583,8 +583,9 @@ namespace VerifiedXCore.Services
         }
 
         /// <summary>
-        /// Blocks this node refused for a fault in their own contents (a transaction, the merkle root, the reward, the VRF
-        /// proof, a cap): hash → height. Recent heights only.
+        /// Blocks this node refused for a fault in their own contents (a transaction, the reward, the VRF proof, the version,
+        /// a cap): hash → height. Recent heights only. A copy whose transactions do not match the merkle root it carries is
+        /// not one: the producer signs the root, not the transactions, so anyone passing the block on can make such a copy.
         /// </summary>
         private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, long> _refusedForItsContents = new(StringComparer.Ordinal);
         private const long RefusedForItsContentsKeptBlocks = 100;
@@ -1137,14 +1138,12 @@ namespace VerifiedXCore.Services
                 //This will also check that the prev hash matches too
                 if (!newBlock.Hash.Equals(block.Hash))
                 {
-                    NoteRefusedForItsContents(block);
                     DbContext.Rollback("BlockValidatorService.ValidateBlock()-10", $"Current Hash: {block.Hash} - Newly Block Hash: {newBlock.Hash}");
                     return result;//block rejected
                 }
 
                 if (!newBlock.MerkleRoot.Equals(block.MerkleRoot))
                 {
-                    NoteRefusedForItsContents(block);
                     DbContext.Rollback("BlockValidatorService.ValidateBlock()-11");
                     return result;//block rejected
                 }

@@ -4504,15 +4504,19 @@ namespace VerifiedXCore.Nodes
 
         /// <summary>
         /// After an agreed block was validated at our tip and refused for a fault in its own contents (a transaction, its
-        /// merkle root, its reward, its VRF proof, a cap), its producer gets no proof at that height: elected again, it served
+        /// reward, its version, its VRF proof, a cap), its producer gets no proof at that height: elected again, it served
         /// the same block every round and the chain stayed at the height. Every caster that tried the block at the same tip
         /// refuses it for the same fault, so they leave out the same producer and the next round elects the next one. A
         /// refusal that depends on the caster (a certificate, a membership record, its own tip or clock) leaves the producer
-        /// in; the exclusion ends with the height.
+        /// in, and so does a refusal of a copy that did not come from the producer itself; the exclusion ends with the height.
         /// </summary>
-        internal static bool ExcludeProducerOfRefusedBlock(long height, string? hash, string? producer, bool triedAtTip)
+        internal static bool ExcludeProducerOfRefusedBlock(Block block, bool triedAtTip)
         {
-            if (!triedAtTip || string.IsNullOrEmpty(producer) || !BlockValidatorService.WasRefusedForItsContents(height, hash))
+            var (height, hash, producer) = (block.Height, block.Hash, block.Validator);
+            // Only the copy the producer served this node: what it signs does not cover the transactions themselves, so a
+            // copy that came through a peer may carry a fault the producer never made.
+            if (!triedAtTip || string.IsNullOrEmpty(producer) || !BlockValidatorService.WasRefusedForItsContents(height, hash)
+                || !ProofUtility.WasServedByItsProducer(block))
                 return false;
             ProofUtility.ExcludeProducerAtHeight(producer, height);
             CasterLogUtility.Log($"COMMIT-FAILED: h={height} producer {producer} left out of this height's election: its block was refused for a fault in its own contents.", "ROUND");
@@ -4722,7 +4726,7 @@ namespace VerifiedXCore.Nodes
                     "ROUND");
                 ProofUtility.TrackRoundFailure(currentHeight);
                 ReleaseRefusedCommitPin(currentHeight, block.Hash, triedAtTip: nextHeight == currentHeight);
-                ExcludeProducerOfRefusedBlock(currentHeight, block.Hash, block.Validator, triedAtTip: nextHeight == currentHeight);
+                ExcludeProducerOfRefusedBlock(block, triedAtTip: nextHeight == currentHeight);
                 return;
             }
 
