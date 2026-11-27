@@ -508,6 +508,13 @@ namespace VerifiedXCore.Bitcoin.Services
             // Every text field is kept with the record, signed or not: none is longer than a real one can be.
             if (AlertFieldTooLong(alert))
                 return;
+            // Only a defined exit type: the signature names the type in words, and any other number read as one of them
+            // would be kept as a type no round and no payout knows.
+            if (!Enum.IsDefined(alert.ExitType))
+            {
+                LogUtility.Log($"[BurnExitConsensus] REJECTED BurnAlert for {alert.BaseBurnTxHash} from {alert.SenderCasterAddress}: exit type {(int)alert.ExitType} is not one.", "BurnExitConsensusService");
+                return;
+            }
 
             // SECURITY: only a committee caster's signed, fresh alert enters the consensus queue.
             var alertDest = alert.ExitType == BurnExitType.VfxPoolUnlock ? alert.VfxDestinationAddress : alert.BtcDestination;
