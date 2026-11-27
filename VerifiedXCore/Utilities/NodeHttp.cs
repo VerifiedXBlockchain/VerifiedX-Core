@@ -39,6 +39,50 @@ namespace VerifiedXCore.Utilities
             return services;
         }
 
+        /// <summary>The longest a request to another node for a short answer takes, body included.</summary>
+        public static readonly TimeSpan PeerReplyTimeout = TimeSpan.FromSeconds(10);
+
+        /// <summary>The most bytes of another node's short answer (a signature, a refusal with its reason) that are read.</summary>
+        public const int MaxPeerReplyBytes = 16 * 1024;
+
+        /// <summary>Tests only: the handler requests to other nodes go through.</summary>
+        internal static HttpMessageHandler? PeerHandlerForTests;
+
+        private static HttpClient PeerClient() =>
+            PeerHandlerForTests != null ? new HttpClient(PeerHandlerForTests, disposeHandler: false)
+            : Globals.HttpClientFactory?.CreateClient() ?? NewClient();
+
+        /// <summary>
+        /// Posts JSON to another node and returns its answer when that is a short, successful one; null when the node
+        /// answers with another status or with more than <paramref name="maxBytes"/>. The status is looked at before any
+        /// of the body is read, no more than the limit and one byte is read, and one deadline covers the whole exchange,
+        /// body included: a node that does not answer, or sends its headers and then stalls, ends the wait with an
+        /// <see cref="OperationCanceledException"/>.
+        /// </summary>
+        public static async Task<string?> PostForShortReplyAsync(string url, string json, CancellationToken cancel = default, TimeSpan? timeout = null, int maxBytes = MaxPeerReplyBytes)
+        {
+            using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancel);
+            deadline.CancelAfter(timeout ?? PeerReplyTimeout);
+            using var content = new StringContent(json, Encoding.UTF8, "application/json");
+            using var request = new HttpRequestMessage(HttpMethod.Post, url) { Content = content };
+            using var response = await PeerClient().SendAsync(request, HttpCompletionOption.ResponseHeadersRead, deadline.Token);
+            if (!response.IsSuccessStatusCode) return null;
+            return await Bitcoin.Attestation.Net.BtcValidatorSource.ReadBoundedAsync(response.Content, maxBytes, deadline.Token);
+        }
+
+        /// <summary>
+        /// Posts JSON to another node whose answer is not used: none of its body is read. Within
+        /// <see cref="PeerReplyTimeout"/>, as <see cref="PostForShortReplyAsync"/>.
+        /// </summary>
+        public static async Task PostWithoutReadingAsync(string url, string json, CancellationToken cancel = default, TimeSpan? timeout = null)
+        {
+            using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancel);
+            deadline.CancelAfter(timeout ?? PeerReplyTimeout);
+            using var content = new StringContent(json, Encoding.UTF8, "application/json");
+            using var request = new HttpRequestMessage(HttpMethod.Post, url) { Content = content };
+            using var response = await PeerClient().SendAsync(request, HttpCompletionOption.ResponseHeadersRead, deadline.Token);
+        }
+
         /// <summary>A handler that leaves redirects unfollowed.</summary>
         public static HttpClientHandler NewHandler() => new() { AllowAutoRedirect = false };
 

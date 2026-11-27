@@ -49,7 +49,6 @@ namespace VerifiedXCore.Tests
             ["Bitcoin/Models/VBTCContractV2.cs|json-parse"] = 1,
             ["Bitcoin/Services/BaseAdminSigningService.cs|hex"] = 2,
             ["Bitcoin/Services/BaseBridgeAttestationService.cs|hex"] = 3,
-            ["Bitcoin/Services/BaseBridgeAttestationService.cs|json-parse"] = 1,
             ["Bitcoin/Services/BaseBridgeMintSubmissionService.cs|hex"] = 1,
             ["Bitcoin/Services/BaseSignerSetPolicy.cs|hex"] = 1,
             ["Bitcoin/Services/BaseValidatorSyncService.cs|hex"] = 3,
