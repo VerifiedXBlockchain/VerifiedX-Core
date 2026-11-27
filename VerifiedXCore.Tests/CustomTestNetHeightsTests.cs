@@ -107,12 +107,13 @@ namespace VerifiedXCore.Tests
             Assert.Equal(Globals.CustomTestNetInputRulesHeight, Globals.ContractBodyKeySpellingHeight);
             Assert.Equal(Globals.CustomTestNetInputRulesHeight, Globals.ContractRunLimitsHeight);
             Assert.Equal(Globals.CustomTestNetInputRulesHeight, Globals.VrfMixHeight);
-            Assert.Equal(Globals.CustomTestNetInputRulesHeight, Globals.BridgeLockMinimumHeight);
-            Assert.Equal(Globals.CustomTestNetInputRulesHeight, Globals.BridgeAllocationsArrayHeight);
-            Assert.Equal(Globals.CustomTestNetInputRulesHeight, Globals.PoolUnlockCreditsAddressHeight);
-            Assert.Equal(Globals.CustomTestNetInputRulesHeight, Globals.BridgeLockEvmAddressHeight);
-            Assert.Equal(Globals.CustomTestNetInputRulesHeight, Globals.WithdrawalOwnScriptAttributionHeight);
+            Assert.Equal(Globals.CustomTestNetLateRulesHeight, Globals.BridgeLockMinimumHeight);
+            Assert.Equal(Globals.CustomTestNetLateRulesHeight, Globals.BridgeAllocationsArrayHeight);
+            Assert.Equal(Globals.CustomTestNetLateRulesHeight, Globals.PoolUnlockCreditsAddressHeight);
+            Assert.Equal(Globals.CustomTestNetLateRulesHeight, Globals.BridgeLockEvmAddressHeight);
+            Assert.Equal(Globals.CustomTestNetLateRulesHeight, Globals.WithdrawalOwnScriptAttributionHeight);
             Assert.True(Globals.CustomTestNetInputRulesHeight > Globals.CustomTestNetRulesHeight, "rules added while Marigold runs start after its tip, not at 401");
+            Assert.True(Globals.CustomTestNetLateRulesHeight > Globals.CustomTestNetInputRulesHeight, "rules added after Marigold passed 8,500 start after its tip then");
         }
 
         [Fact]
