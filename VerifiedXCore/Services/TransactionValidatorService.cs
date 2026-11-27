@@ -4183,6 +4183,11 @@ namespace VerifiedXCore.Services
                     if ((blockHeight == null || blockHeight.Value >= Globals.BridgeLockMinimumHeight)
                         && amountSats.Value < Bitcoin.Services.VBTCService.MinBridgeLockSats)
                         return (txResult, $"A bridge lock is at least {Bitcoin.Services.VBTCService.MinBridgeLockSats} sats ({Bitcoin.Services.VBTCService.MinBridgeLockSats / 100_000_000M:0.########} vBTC), the smallest withdrawal.");
+                    // ... and from BridgeLockPartMinimumHeight (in admission, the block it would enter) at least the smallest
+                    // part a vault pays in an exit to Bitcoin, so a fresh lock can pay one by itself.
+                    if ((blockHeight ?? Bitcoin.Services.VBTCService.NextBlockHeight) >= Globals.BridgeLockPartMinimumHeight
+                        && amountSats.Value < Bitcoin.Services.VBTCService.MinBridgeLockPartSats)
+                        return (txResult, $"A bridge lock is at least {Bitcoin.Services.VBTCService.MinBridgeLockPartSats} sats ({Bitcoin.Services.VBTCService.MinBridgeLockPartSats / 100_000_000M:0.########} vBTC), the smallest part of an exit to Bitcoin.");
 
                     if (string.IsNullOrEmpty(evmDestination) || !evmDestination.StartsWith("0x") || evmDestination.Length != 42)
                         return (txResult, "Invalid EvmDestination for bridge lock.");

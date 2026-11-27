@@ -80,7 +80,7 @@ namespace VerifiedXCore.Tests
             Assert.Equal(401, Globals.CustomTestNetRulesHeight);
             // Rules added after Marigold was already running start at CustomTestNetInputRulesHeight instead (a past
             // height would judge blocks produced under the old rules); every other rule is active by 401.
-            var addedWhileRunning = new[] { nameof(Globals.CanonicalInputHeight), nameof(Globals.RawDataVerbatimHeight), nameof(Globals.StrictDataReaderHeight), nameof(Globals.ContractBodyKeySpellingHeight), nameof(Globals.ContractRunLimitsHeight), nameof(Globals.VrfMixHeight), nameof(Globals.BridgeLockMinimumHeight), nameof(Globals.BridgeAllocationsArrayHeight), nameof(Globals.PoolUnlockCreditsAddressHeight) };
+            var addedWhileRunning = new[] { nameof(Globals.CanonicalInputHeight), nameof(Globals.RawDataVerbatimHeight), nameof(Globals.StrictDataReaderHeight), nameof(Globals.ContractBodyKeySpellingHeight), nameof(Globals.ContractRunLimitsHeight), nameof(Globals.VrfMixHeight), nameof(Globals.BridgeLockMinimumHeight), nameof(Globals.BridgeAllocationsArrayHeight), nameof(Globals.PoolUnlockCreditsAddressHeight), nameof(Globals.BridgeLockPartMinimumHeight) };
             var late = RuleHeights()
                 .Where(f => !addedWhileRunning.Contains(f.Name))
                 .Select(f => (f.Name, Value: (long)f.GetValue(null)!))
@@ -110,6 +110,7 @@ namespace VerifiedXCore.Tests
             Assert.Equal(Globals.CustomTestNetInputRulesHeight, Globals.BridgeLockMinimumHeight);
             Assert.Equal(Globals.CustomTestNetInputRulesHeight, Globals.BridgeAllocationsArrayHeight);
             Assert.Equal(Globals.CustomTestNetInputRulesHeight, Globals.PoolUnlockCreditsAddressHeight);
+            Assert.Equal(Globals.CustomTestNetInputRulesHeight, Globals.BridgeLockPartMinimumHeight);
             Assert.True(Globals.CustomTestNetInputRulesHeight > Globals.CustomTestNetRulesHeight, "rules added while Marigold runs start after its tip, not at 401");
         }
 
@@ -122,6 +123,7 @@ namespace VerifiedXCore.Tests
             Assert.Equal(long.MaxValue, Globals.RawDataVerbatimHeight);
             Assert.Equal(long.MaxValue, Globals.BridgeAllocationsArrayHeight);
             Assert.Equal(long.MaxValue, Globals.PoolUnlockCreditsAddressHeight);
+            Assert.Equal(long.MaxValue, Globals.BridgeLockPartMinimumHeight);
 
             StartTestnetNode(new Config.Config { TestNet = true });
             Assert.Equal(230_750L, Globals.ReleaseRulesTestnetHeight);
@@ -134,6 +136,7 @@ namespace VerifiedXCore.Tests
             Assert.Equal(Globals.ReleaseRulesTestnetHeight, Globals.StrictDataReaderHeight);
             Assert.Equal(long.MaxValue, Globals.BridgeAllocationsArrayHeight); // not in that release
             Assert.Equal(long.MaxValue, Globals.PoolUnlockCreditsAddressHeight); // not in that release
+            Assert.Equal(long.MaxValue, Globals.BridgeLockPartMinimumHeight); // not in that release
         }
 
         [Fact]
