@@ -1090,9 +1090,22 @@ namespace VerifiedXCore.Utilities
         private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, (long Height, string Fingerprint)> _servedByProducer = new(StringComparer.Ordinal);
         private const long ServedByProducerKeptBlocks = 100;
 
-        private static string CopyFingerprint(Block block) =>
-            Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(
-                JsonConvert.SerializeObject(new { block.Hash, block.MerkleRoot, block.Transactions }))));
+        /// <summary>
+        /// What a copy carries that makes it the block it is: its hash and root, and for each transaction the fields its own
+        /// hash and signature are made from. Fields a node fills in while it validates (a transaction's height, its rating)
+        /// are left out, so the copy reads the same before and after validation; amounts are read by value, not spelling.
+        /// </summary>
+        private static string CopyFingerprint(Block block)
+        {
+            static string Value(decimal amount) => amount.ToString("G29", System.Globalization.CultureInfo.InvariantCulture);
+            var text = new StringBuilder(JsonConvert.SerializeObject(new[] { block.Hash, block.MerkleRoot }));
+            foreach (var t in block.Transactions ?? new List<Transaction>())
+                text.Append(JsonConvert.SerializeObject(new object?[]
+                {
+                    t.Hash, t.Timestamp, t.FromAddress, t.ToAddress, Value(t.Amount), Value(t.Fee), t.Nonce, (int)t.TransactionType, t.Data, t.UnlockTime, t.Signature,
+                }));
+            return Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(text.ToString())));
+        }
 
         internal static void NoteServedByProducer(Block? block)
         {

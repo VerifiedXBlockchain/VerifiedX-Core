@@ -1875,6 +1875,8 @@ namespace VerifiedXCore.Nodes
                                                 }
                                             }
                                             
+                                            NoteOwnCraftedBlock(Height);
+
                                             // Store the single crafted block in CasterRoundDict so all casters share the same version
                                             if (blockFound && block != null)
                                             {
@@ -4739,6 +4741,16 @@ namespace VerifiedXCore.Nodes
             ResetRoundTiming(block.Height);
 
             Interlocked.Exchange(ref _casterConsensusHalted, 0);
+        }
+
+        /// <summary>
+        /// When this node is the round's winner: the block it crafted for the height is the copy its producer (this node)
+        /// served, so a refusal of that copy counts against it here as it does on the casters that fetched it from it.
+        /// </summary>
+        internal static void NoteOwnCraftedBlock(long height)
+        {
+            if (Globals.NextValidatorBlock is { } crafted && crafted.Height == height)
+                ProofUtility.NoteServedByProducer(crafted);
         }
 
         /// <summary>A block-hash vote counts for this round only when the block was produced by the round's agreed winner.</summary>

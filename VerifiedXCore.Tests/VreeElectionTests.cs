@@ -1229,6 +1229,27 @@ namespace VerifiedXCore.Tests
         }
 
         /// <summary>
+        /// The round's winner takes its own crafted block without fetching it: that copy is noted as served by its producer
+        /// too, so the winner's own caster leaves it out when the other casters do. A block crafted for another height is not.
+        /// </summary>
+        [Fact]
+        public void TheWinnersOwnCraftedBlock_IsACopyItsProducerServed()
+        {
+            var record = Ratified(0);
+            var prior = Globals.NextValidatorBlock;
+            try
+            {
+                var crafted = ProducedBlock(_electors[11], Members(record).Take(3), record);
+                Globals.NextValidatorBlock = crafted;
+                VerifiedXCore.Nodes.BlockcasterNode.NoteOwnCraftedBlock(crafted.Height + 1);
+                Assert.False(ProofUtility.WasServedByItsProducer(crafted));
+                VerifiedXCore.Nodes.BlockcasterNode.NoteOwnCraftedBlock(crafted.Height);
+                Assert.True(ProofUtility.WasServedByItsProducer(crafted));
+            }
+            finally { Globals.NextValidatorBlock = prior; }
+        }
+
+        /// <summary>
         /// A content check that runs before the previous hash is compared (here the block's version) counts against the
         /// producer only for a block on this node's tip: judged against another predecessor, the refusal says nothing about it.
         /// </summary>
@@ -1284,9 +1305,15 @@ namespace VerifiedXCore.Tests
             };
             unsigned.Build();
             var block = ProducedBlock(producer, Members(record).Take(3), record, transactions: new List<Transaction> { reward, unsigned });
+            var passedOn = JsonConvert.DeserializeObject<Block>(JsonConvert.SerializeObject(block))!; // a peer's copy
+            // Fetched from its producer, before it is validated: validation fills in each transaction's height, and the
+            // copy is still the one the producer served.
+            Assert.All(block.Transactions, t => Assert.Equal(0, t.Height));
+            ProofUtility.NoteServedByProducer(block);
             var since = DateTime.UtcNow;
 
             Assert.False(await BlockValidatorService.ValidateBlock(block, false));
+            Assert.Contains(block.Transactions, t => t.Height != 0);
             Assert.Equal("BlockValidatorService.ValidateBlock()-13", StepsSince(since).LastOrDefault());
             Assert.True(BlockValidatorService.WasRefusedForItsContents(block.Height, block.Hash));
 
@@ -1294,9 +1321,6 @@ namespace VerifiedXCore.Tests
             Assert.False(VerifiedXCore.Nodes.BlockcasterNode.ExcludeProducerOfRefusedBlock(block, triedAtTip: false));
             // A copy that came through anyone but the producer counts against nobody: a peer can change a transaction and
             // keep the hash it carries, and the root and the producer's signature cover only that hash.
-            var passedOn = JsonConvert.DeserializeObject<Block>(JsonConvert.SerializeObject(block))!;
-            Assert.False(VerifiedXCore.Nodes.BlockcasterNode.ExcludeProducerOfRefusedBlock(block, triedAtTip: true)); // not served to this node
-            ProofUtility.NoteServedByProducer(block);
             passedOn.Transactions[1].Amount = 2M;
             Assert.True(ProofUtility.IsWholeCopy(passedOn, out _));
             Assert.False(VerifiedXCore.Nodes.BlockcasterNode.ExcludeProducerOfRefusedBlock(passedOn, triedAtTip: true));
@@ -1332,6 +1356,8 @@ namespace VerifiedXCore.Tests
             Assert.Equal("BlockValidatorService.ValidateBlock()-13", StepsSince(since).LastOrDefault());
             Assert.True(BlockValidatorService.WasRefusedForItsContents(second.Height, second.Hash));
             Assert.True(BlockValidatorService.WasRefusedForItsContents(block.Height, block.Hash));
+            // Refused for its contents, but never served to this node by its producer: it counts against nobody.
+            Assert.False(VerifiedXCore.Nodes.BlockcasterNode.ExcludeProducerOfRefusedBlock(second, triedAtTip: true));
 
             // A caster restarted at the height still leaves the producer out: the exclusion is read back from disk.
             ProofUtility.ForgetRefusedBlockProducersInMemory();
