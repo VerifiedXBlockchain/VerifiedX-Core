@@ -1489,7 +1489,9 @@ namespace VerifiedXCore.Nodes
                     var skippedAddresses = new HashSet<string>();
 
                     // FIX B: Use ALL validator proofs for winner selection (not just caster proofs).
-                    var winningCasterProof = await ProofUtility.SortProofs(filteredProofs);
+                    // This caster's own candidate leaves out a winner it already agreed on at this height and got no block from.
+                    var candidateProofs = WithoutUndeliveredWinners(filteredProofs, Height);
+                    var winningCasterProof = await ProofUtility.SortProofs(candidateProofs);
                     var winningProof = winningCasterProof;
                     CasterRoundAudit.AddStep($"Sorting Proofs (deterministic, no local filtering)", true);
                     //ConsoleWriterService.OutputVal($"\r\nSorting Proofs");
@@ -1577,7 +1579,7 @@ namespace VerifiedXCore.Nodes
                                     }
                                     ExcludeValList.Add(winningCasterProof.Address);
                                     // FIX B: Re-select from all validator proofs, not just caster proofs
-                                    winningCasterProof = await ProofUtility.SortProofs(filteredProofs
+                                    winningCasterProof = await ProofUtility.SortProofs(candidateProofs
                                         .Where(x => !ExcludeValList.Contains(x.Address)).ToList()
                                     );
 
@@ -1758,12 +1760,9 @@ namespace VerifiedXCore.Nodes
 
                         CasterRoundAudit.AddStep($"Total Proofs Collection: {proofSnapshot.Count()}", true);
 
-                        var finalizedWinnerGroup = proofSnapshot
-                            .OrderBy(x => Math.Abs(x.VRFNumber))
-                            .GroupBy(x => x.Address)
-                            .OrderByDescending(x => x.Count())
-                            .ThenBy(x => x.Min(y => Math.Abs(y.VRFNumber)))
-                            .FirstOrDefault();
+                        // This caster's vote in the winner agreement is its candidate too: not a winner it already agreed on here
+                        // and got no block from. The others' votes still count in the agreement itself.
+                        var finalizedWinnerGroup = ThisCastersVote(proofSnapshot, Height);
 
                         if (finalizedWinnerGroup != null)
                         {
@@ -2098,21 +2097,7 @@ namespace VerifiedXCore.Nodes
                                         terminalWinner = block.Validator;
                                     }
 
-                                    // CASTER-SYNC-FIX: Block hash agreement phase — verify all casters have the same block
-                                    if (blockFound && block != null)
-                                    {
-                                        CasterRoundAudit.AddStep($"[BlockHashAgreement] Verifying block hash agreement with peer casters…", true);
-                                        var agreedBlock = await VerifyBlockHashAgreementAsync(block, Height, terminalWinner);
-                                        if (agreedBlock != null)
-                                        {
-                                            block = agreedBlock;
-                                            var producerIp = finalizedWinner.IPAddress;
-                                            var winnerCraftedLayout = terminalWinner == Globals.ValidatorAddress;
-                                            await CommitCasterBlockPostAgreementAsync(block, terminalWinner, producerIp, winnerCraftedLayout);
-                                        }
-                                        else
-                                            await OnBlockHashAgreementRoundRejectedAsync(Height, terminalWinner);
-                                    }
+                                    await SettleAgreedRoundAsync(Height, agreedWinner, terminalWinner, blockFound ? block : null, finalizedWinner.IPAddress);
                                 }
                             }
                         }
@@ -4501,6 +4486,94 @@ namespace VerifiedXCore.Nodes
                 return;
             if (Globals.CasterApprovedBlockHashDict.TryRemove(new KeyValuePair<long, string>(height, hash)))
                 CasterLogUtility.Log($"COMMIT-FAILED: h={height} agreed hash {hash[..Math.Min(16, hash.Length)]} withdrawn after validation refused it.", "ROUND");
+        }
+
+        /// <summary>The agreed winners this caster got no block from at one height: that height, and their addresses.</summary>
+        private static (long Height, HashSet<string> Winners) _undeliveredWinners = (-1, new HashSet<string>(StringComparer.Ordinal));
+        private static readonly object UndeliveredWinnersLock = new();
+
+        /// <summary>
+        /// The end of a round whose winner was agreed: the block's hash agreement, then its commit. A round that ends with
+        /// no block from the agreed winner or from any caster, or with no hash agreement on the block it served, leaves the
+        /// tip where it was, and the next round elected the same winner again, so the chain waited on it round after round.
+        /// Such a winner is noted for this height (<see cref="NoteUndeliveredWinner"/>). A block refused at the commit is
+        /// handled there: refused for its own contents, its producer is left out of the height's proofs; refused for a
+        /// reason of this caster's own, its producer stays in.
+        /// </summary>
+        internal static async Task SettleAgreedRoundAsync(long height, string agreedWinner, string terminalWinner, Block? block, string producerIp)
+        {
+            if (block == null)
+            {
+                NoteUndeliveredWinner(height, agreedWinner, "no block from it or any caster");
+                return;
+            }
+            // CASTER-SYNC-FIX: Block hash agreement phase — verify all casters have the same block
+            CasterRoundAudit?.AddStep($"[BlockHashAgreement] Verifying block hash agreement with peer casters…", true);
+            var agreedBlock = await VerifyBlockHashAgreementAsync(block, height, terminalWinner);
+            if (agreedBlock != null)
+            {
+                var winnerCraftedLayout = terminalWinner == Globals.ValidatorAddress;
+                await CommitCasterBlockPostAgreementAsync(agreedBlock, terminalWinner, producerIp, winnerCraftedLayout);
+                return;
+            }
+            await OnBlockHashAgreementRoundRejectedAsync(height, terminalWinner);
+            NoteUndeliveredWinner(height, agreedWinner, "no hash agreement on the block it served");
+        }
+
+        /// <summary>
+        /// Notes that the casters agreed on <paramref name="agreedWinner"/> at <paramref name="height"/> and this caster got
+        /// no block it could commit from it, so this caster does not take it as its candidate there again. Only while the
+        /// tip has not moved: a block that arrived meanwhile ended the height. Held in memory and for this height only.
+        /// </summary>
+        internal static bool NoteUndeliveredWinner(long height, string? agreedWinner, string why)
+        {
+            if (string.IsNullOrEmpty(agreedWinner) || Globals.LastBlock.Height + 1 != height)
+                return false;
+            lock (UndeliveredWinnersLock)
+            {
+                if (_undeliveredWinners.Height != height)
+                    _undeliveredWinners = (height, new HashSet<string>(StringComparer.Ordinal));
+                _undeliveredWinners.Winners.Add(agreedWinner);
+            }
+            CasterLogUtility.Log($"UNDELIVERED: h={height} agreed winner {agreedWinner} is not this caster's candidate again at this height ({why}).", "ROUND");
+            return true;
+        }
+
+        /// <summary>
+        /// The proofs this caster picks its own candidate from at <paramref name="height"/>: without the agreed winners it got
+        /// no block from there. Once the tip has moved past the height nothing is left out, and when leaving them out would
+        /// leave no proof at all, nothing is left out either. Proof checks and the other casters' votes are not affected.
+        /// </summary>
+        internal static List<Proof> WithoutUndeliveredWinners(List<Proof> proofs, long height)
+        {
+            HashSet<string>? left;
+            lock (UndeliveredWinnersLock)
+                left = _undeliveredWinners.Height == height && Globals.LastBlock.Height + 1 == height && _undeliveredWinners.Winners.Count > 0
+                    ? new HashSet<string>(_undeliveredWinners.Winners, StringComparer.Ordinal)
+                    : null;
+            if (left == null)
+                return proofs;
+            var kept = proofs.Where(p => p != null && (p.Address == null || !left.Contains(p.Address))).ToList();
+            return kept.Count > 0 ? kept : proofs;
+        }
+
+        /// <summary>
+        /// The winner this caster votes for in the winner agreement, from the casters' candidates: the one most of them name,
+        /// then the lowest VRF, leaving out the agreed winners it got no block from at this height.
+        /// </summary>
+        internal static IGrouping<string, Proof>? ThisCastersVote(List<Proof> candidates, long height) =>
+            WithoutUndeliveredWinners(candidates, height)
+                .OrderBy(x => Math.Abs(x.VRFNumber))
+                .GroupBy(x => x.Address)
+                .OrderByDescending(x => x.Count())
+                .ThenBy(x => x.Min(y => Math.Abs(y.VRFNumber)))
+                .FirstOrDefault();
+
+        /// <summary>Test hook: forget the noted winners, as a restart does.</summary>
+        internal static void ForgetUndeliveredWinners()
+        {
+            lock (UndeliveredWinnersLock)
+                _undeliveredWinners = (-1, new HashSet<string>(StringComparer.Ordinal));
         }
 
         /// <summary>
