@@ -19,6 +19,8 @@ namespace VerifiedXCore.Utilities
         /// </summary>
         public const int MaxMessageChars = 4096;
         public const int MaxQueued = 20_000;
+        /// <summary>Lines waiting to be written now (the memory log).</summary>
+        public static int QueuedLines => FileQueue.Count;
 
         /// <summary>A message cut to its first <see cref="MaxMessageChars"/> characters, for every log destination.</summary>
         public static string Shorten(string message) =>

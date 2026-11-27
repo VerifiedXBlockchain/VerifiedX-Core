@@ -735,6 +735,21 @@ namespace VerifiedXCore.Utilities
             return height is { } h ? VrfSeed.Ineligibility(address, h) : null;
         }
 
+        /// <summary>
+        /// Keeps a proof a peer sent for the next round, on a caster only. The proofs kept are read and cleared by the
+        /// casting loop alone, so on a validator that is not a caster every one a peer sent stayed for good.
+        /// </summary>
+        public static bool KeepIncomingProof(Proof? proof) =>
+            proof != null && Globals.IsBlockCaster && ValidateIncomingProofForNextRound(proof, out _) && KeepValidatedProof(proof);
+
+        /// <summary>Keeps a proof already validated for the next round, on a caster only.</summary>
+        public static bool KeepValidatedProof(Proof proof)
+        {
+            if (!Globals.IsBlockCaster) return false;
+            Globals.Proofs.Add(proof);
+            return true;
+        }
+
         /// <summary>Round-bound validation against the local tip (next height, current hash).</summary>
         public static bool ValidateIncomingProofForNextRound(Proof proof, out string reason)
         {

@@ -397,6 +397,7 @@ namespace VerifiedXCore.P2P
                     if (peer.FailCount > 600)
                         peer.IsOutgoing = false;
                     Peers.GetAll()?.UpdateSafe(peer);
+                    await NodeInfo.DisposeQuietly(hubConnection); // started but never connected: nothing else holds it
                     return;
                 }
 
@@ -438,7 +439,7 @@ namespace VerifiedXCore.P2P
 
                     if (Globals.ValidatorNodes.TryGetValue(IPAddress, out var currentNode))
                     {
-                        currentNode.Connection = hubConnection;
+                        _ = currentNode.ReplaceConnection(hubConnection);
                         currentNode.NodeIP = IPAddress;
                         currentNode.NodeHeight = node.NodeHeight;
                         currentNode.NodeLastChecked = node.NodeLastChecked;
@@ -739,6 +740,7 @@ namespace VerifiedXCore.P2P
                     if (peer.FailCount > 600)
                         peer.IsOutgoing = false;
                     Peers.GetAll()?.UpdateSafe(peer);
+                    await NodeInfo.DisposeQuietly(hubConnection); // started but never connected: nothing else holds it
                     return;
                 }
 
@@ -780,7 +782,7 @@ namespace VerifiedXCore.P2P
 
                     if (Globals.BlockCasterNodes.TryGetValue(IPAddress, out var currentNode))
                     {
-                        currentNode.Connection = hubConnection;
+                        _ = currentNode.ReplaceConnection(hubConnection);
                         currentNode.NodeIP = IPAddress;
                         currentNode.NodeHeight = node.NodeHeight;
                         currentNode.NodeLastChecked = node.NodeLastChecked;
