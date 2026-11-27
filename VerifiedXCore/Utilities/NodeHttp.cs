@@ -65,7 +65,8 @@ namespace VerifiedXCore.Utilities
             deadline.CancelAfter(timeout ?? PeerReplyTimeout);
             using var content = new StringContent(json, Encoding.UTF8, "application/json");
             using var request = new HttpRequestMessage(HttpMethod.Post, url) { Content = content };
-            using var response = await PeerClient().SendAsync(request, HttpCompletionOption.ResponseHeadersRead, deadline.Token);
+            using var client = PeerClient();
+            using var response = await client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, deadline.Token);
             if (!response.IsSuccessStatusCode) return null;
             return await Bitcoin.Attestation.Net.BtcValidatorSource.ReadBoundedAsync(response.Content, maxBytes, deadline.Token);
         }
@@ -80,7 +81,8 @@ namespace VerifiedXCore.Utilities
             deadline.CancelAfter(timeout ?? PeerReplyTimeout);
             using var content = new StringContent(json, Encoding.UTF8, "application/json");
             using var request = new HttpRequestMessage(HttpMethod.Post, url) { Content = content };
-            using var response = await PeerClient().SendAsync(request, HttpCompletionOption.ResponseHeadersRead, deadline.Token);
+            using var client = PeerClient();
+            using var response = await client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, deadline.Token);
         }
 
         /// <summary>A handler that leaves redirects unfollowed.</summary>
