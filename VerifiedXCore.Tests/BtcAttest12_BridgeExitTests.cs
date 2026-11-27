@@ -1529,27 +1529,78 @@ namespace VerifiedXCore.Tests
         /// burn on, and moved past them (fifth review, round 24). It runs once the node handles burns, from where the
         /// cursor stood when it last did not.
         /// </summary>
+        /// <summary>
+        /// A caster holds a burn's work in memory only. The stretch read again after a restart is counted in Base blocks,
+        /// and with Base's blocks at 200 ms it covered minutes: a burn read before that was not found again. The burns a
+        /// caster handed on and the chain has not redeemed are kept with the cursor, and a restart reads Base again from
+        /// the oldest of them.
+        /// </summary>
+        [Fact]
+        public async Task AfterARestart_TheWatcherReadsBaseAgain_FromTheOldestBurnTheChainHasNotRedeemed()
+        {
+            await Start();
+            BaseBridgeExitWatchService.ResetRewindForTests();
+            const long cursor = 1_000_000;
+            var state = BridgeExitSyncState.GetOrCreate();
+            state.LastScannedBlock = cursor;
+            var old = "0x" + new string('a', 64);
+            var redeemed = "0x" + new string('b', 64);
+            var older = cursor - 10 * BaseBridgeExitWatchService.RestartRewindBlocks;
+            BaseBridgeExitWatchService.NoteOpenBurn(state, old, older);            // handed on long before the cursor
+            BaseBridgeExitWatchService.NoteOpenBurn(state, old, older + 5);        // once
+            BaseBridgeExitWatchService.NoteOpenBurn(state, redeemed, older - 100);
+            Assert.True(VBTCBridgeConsumedBurn.TryMarkConsumed(redeemed, "POOL_UNLOCK", "vfx-tx", Tip));
+            BaseBridgeExitWatchService.PruneOpenBurns(state, latest: cursor);    // the chain has redeemed one
+            Assert.Equal(new[] { old }, state.OpenBurns.Select(b => b.BurnId));
+            BridgeExitSyncState.Save(state);
+
+            // Restart: the process forgets everything but what was saved.
+            BaseBridgeExitWatchService.ResetRewindForTests();
+            var reloaded = BridgeExitSyncState.GetOrCreate();
+            Assert.Equal(older, Assert.Single(reloaded.OpenBurns).BaseBlock);
+            BaseBridgeExitWatchService.ConsumeRewind(reloaded, handling: false);
+            BaseBridgeExitWatchService.ConsumeRewind(reloaded, handling: true);
+            Assert.Equal(older - 1, reloaded.LastScannedBlock);                  // the burn's block is read again
+            Assert.Equal(older - 1, BridgeExitSyncState.GetOrCreate().LastScannedBlock);
+
+            // With no open burn, the stretch alone: two hours of 200 ms blocks.
+            BaseBridgeExitWatchService.ResetRewindForTests();
+            reloaded.OpenBurns.Clear();
+            reloaded.LastScannedBlock = cursor;
+            BaseBridgeExitWatchService.ConsumeRewind(reloaded, handling: false);
+            BaseBridgeExitWatchService.ConsumeRewind(reloaded, handling: true);
+            Assert.Equal(cursor - 36_000, reloaded.LastScannedBlock);
+
+            // A redeemed burn, or one older than a day of Base blocks, is not kept.
+            BaseBridgeExitWatchService.NoteOpenBurn(reloaded, redeemed, cursor);
+            Assert.Empty(reloaded.OpenBurns);
+            BaseBridgeExitWatchService.NoteOpenBurn(reloaded, old, cursor - BaseBridgeExitWatchService.MaxOpenBurnAgeBlocks - 1);
+            BaseBridgeExitWatchService.PruneOpenBurns(reloaded, latest: cursor);
+            Assert.Empty(reloaded.OpenBurns);
+            BaseBridgeExitWatchService.ResetRewindForTests();
+        }
+
         [Fact]
         public async Task TheWatcher_ReadsBaseAgain_OnceTheNodeHandlesBurns()
         {
             await Start();
             BaseBridgeExitWatchService.ResetRewindForTests();
-            var state = new BridgeExitSyncState { LastScannedBlock = 10_000 };
+            var state = new BridgeExitSyncState { LastScannedBlock = 100_000 };
             BaseBridgeExitWatchService.ConsumeRewind(state, handling: false);   // started, not yet a caster
-            state.LastScannedBlock = 10_050;                                       // polls move on meanwhile
+            state.LastScannedBlock = 100_050;                                       // polls move on meanwhile
             BaseBridgeExitWatchService.ConsumeRewind(state, handling: false);
-            Assert.Equal(10_050, state.LastScannedBlock);
+            Assert.Equal(100_050, state.LastScannedBlock);
             BaseBridgeExitWatchService.ConsumeRewind(state, handling: true);
-            Assert.Equal(10_000 - BaseBridgeExitWatchService.RestartRewindBlocks, state.LastScannedBlock);
+            Assert.Equal(100_000 - BaseBridgeExitWatchService.RestartRewindBlocks, state.LastScannedBlock);
             BaseBridgeExitWatchService.ConsumeRewind(state, handling: true);    // once
-            Assert.Equal(10_000 - BaseBridgeExitWatchService.RestartRewindBlocks, state.LastScannedBlock);
+            Assert.Equal(100_000 - BaseBridgeExitWatchService.RestartRewindBlocks, state.LastScannedBlock);
 
             // A caster that loses its place and gets it back reads again from where it stopped handling burns.
-            state.LastScannedBlock = 12_000;
+            state.LastScannedBlock = 120_000;
             BaseBridgeExitWatchService.ConsumeRewind(state, handling: false);
-            state.LastScannedBlock = 12_400;
+            state.LastScannedBlock = 120_400;
             BaseBridgeExitWatchService.ConsumeRewind(state, handling: true);
-            Assert.Equal(12_000 - BaseBridgeExitWatchService.RestartRewindBlocks, state.LastScannedBlock);
+            Assert.Equal(120_000 - BaseBridgeExitWatchService.RestartRewindBlocks, state.LastScannedBlock);
             BaseBridgeExitWatchService.ResetRewindForTests();
         }
 
