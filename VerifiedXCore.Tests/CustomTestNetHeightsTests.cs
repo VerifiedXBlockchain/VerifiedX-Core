@@ -80,7 +80,7 @@ namespace VerifiedXCore.Tests
             Assert.Equal(401, Globals.CustomTestNetRulesHeight);
             // Rules added after Marigold was already running start at CustomTestNetInputRulesHeight instead (a past
             // height would judge blocks produced under the old rules); every other rule is active by 401.
-            var addedWhileRunning = new[] { nameof(Globals.CanonicalInputHeight), nameof(Globals.RawDataVerbatimHeight), nameof(Globals.StrictDataReaderHeight), nameof(Globals.ContractBodyKeySpellingHeight), nameof(Globals.ContractRunLimitsHeight), nameof(Globals.VrfMixHeight), nameof(Globals.BridgeLockMinimumHeight), nameof(Globals.BridgeAllocationsArrayHeight), nameof(Globals.PoolUnlockCreditsAddressHeight), nameof(Globals.BridgeLockEvmAddressHeight) };
+            var addedWhileRunning = new[] { nameof(Globals.CanonicalInputHeight), nameof(Globals.RawDataVerbatimHeight), nameof(Globals.StrictDataReaderHeight), nameof(Globals.ContractBodyKeySpellingHeight), nameof(Globals.ContractRunLimitsHeight), nameof(Globals.VrfMixHeight), nameof(Globals.BridgeLockMinimumHeight), nameof(Globals.BridgeAllocationsArrayHeight), nameof(Globals.PoolUnlockCreditsAddressHeight), nameof(Globals.BridgeLockEvmAddressHeight), nameof(Globals.BridgeVotesBoundToAttemptHeight) };
             var late = RuleHeights()
                 .Where(f => !addedWhileRunning.Contains(f.Name))
                 .Select(f => (f.Name, Value: (long)f.GetValue(null)!))
@@ -111,6 +111,7 @@ namespace VerifiedXCore.Tests
             Assert.Equal(Globals.CustomTestNetLateRulesHeight, Globals.BridgeAllocationsArrayHeight);
             Assert.Equal(Globals.CustomTestNetLateRulesHeight, Globals.PoolUnlockCreditsAddressHeight);
             Assert.Equal(Globals.CustomTestNetLateRulesHeight, Globals.BridgeLockEvmAddressHeight);
+            Assert.Equal(Globals.CustomTestNetLateRulesHeight, Globals.BridgeVotesBoundToAttemptHeight);
             Assert.True(Globals.CustomTestNetInputRulesHeight > Globals.CustomTestNetRulesHeight, "rules added while Marigold runs start after its tip, not at 401");
             Assert.True(Globals.CustomTestNetLateRulesHeight > Globals.CustomTestNetInputRulesHeight, "rules added after Marigold passed 8,500 start after its tip then");
         }
@@ -125,6 +126,7 @@ namespace VerifiedXCore.Tests
             Assert.Equal(long.MaxValue, Globals.BridgeAllocationsArrayHeight);
             Assert.Equal(long.MaxValue, Globals.PoolUnlockCreditsAddressHeight);
             Assert.Equal(long.MaxValue, Globals.BridgeLockEvmAddressHeight);
+            Assert.Equal(long.MaxValue, Globals.BridgeVotesBoundToAttemptHeight);
 
             StartTestnetNode(new Config.Config { TestNet = true });
             Assert.Equal(230_750L, Globals.ReleaseRulesTestnetHeight);
@@ -138,6 +140,7 @@ namespace VerifiedXCore.Tests
             Assert.Equal(long.MaxValue, Globals.BridgeAllocationsArrayHeight); // not in that release
             Assert.Equal(long.MaxValue, Globals.PoolUnlockCreditsAddressHeight); // not in that release
             Assert.Equal(long.MaxValue, Globals.BridgeLockEvmAddressHeight); // not in that release
+            Assert.Equal(long.MaxValue, Globals.BridgeVotesBoundToAttemptHeight); // not in that release
         }
 
         [Fact]

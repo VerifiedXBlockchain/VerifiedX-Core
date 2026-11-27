@@ -4387,8 +4387,14 @@ namespace VerifiedXCore.Services
                         if (votesTok == null || votesTok.Type != JTokenType.Array)
                             return (txResult, "Bridge pool unlock requires CasterConsensusVotes array.");
                         var votes = votesTok.ToObject<List<CasterConsensusVote>>();
+                        // From Globals.BridgeVotesBoundToAttemptHeight the votes count for the caster they elected, and only
+                        // while they are recent.
+                        var (poolAttempt, poolAttemptRefusal) = BridgeCasterConsensus.AttemptFor(txRequest.FromAddress, null, poolGateHeight, blockHeight, blockTime);
+                        if (poolAttemptRefusal != null)
+                            return (txResult, poolAttemptRefusal);
                         var (votesOk, votesReason) = BridgeCasterConsensus.VerifyBoundVotes(votes, poolBurnHash, "POOL_EXIT", totalAmountSats.Value, vfxDestAddr, poolGateHeight,
-                            eachCasterOnce: (blockHeight == null && !blockVerify && !blockDownloads) || poolGateHeight >= Globals.BridgeVoteOncePerCasterHeight);
+                            eachCasterOnce: (blockHeight == null && !blockVerify && !blockDownloads) || poolGateHeight >= Globals.BridgeVoteOncePerCasterHeight,
+                            attempt: poolAttempt);
                         if (!votesOk)
                             return (txResult, $"Caster consensus votes rejected for pool unlock: {votesReason}");
 
@@ -4520,8 +4526,14 @@ namespace VerifiedXCore.Services
                         if (votesTok == null || votesTok.Type != JTokenType.Array)
                             return (txResult, "VBTCb exit to BTC requires CasterConsensusVotes array.");
                         var votes = votesTok.ToObject<List<CasterConsensusVote>>();
+                        // From Globals.BridgeVotesBoundToAttemptHeight the votes count for the caster they elected, only while
+                        // they are recent, and, when the burn's earlier exit failed, only if they were given after it.
+                        var (exitAttempt, exitAttemptRefusal) = BridgeCasterConsensus.AttemptFor(txRequest.FromAddress, exitBurnHash, exitGateHeight, blockHeight, blockTime);
+                        if (exitAttemptRefusal != null)
+                            return (txResult, exitAttemptRefusal);
                         var (votesOk, votesReason) = BridgeCasterConsensus.VerifyBoundVotes(votes, exitBurnHash, "BTC_EXIT", exitTotalSats, btcDestination, exitGateHeight,
-                            eachCasterOnce: (blockHeight == null && !blockVerify && !blockDownloads) || exitGateHeight >= Globals.BridgeVoteOncePerCasterHeight);
+                            eachCasterOnce: (blockHeight == null && !blockVerify && !blockDownloads) || exitGateHeight >= Globals.BridgeVoteOncePerCasterHeight,
+                            attempt: exitAttempt);
                         if (!votesOk)
                             return (txResult, $"Caster consensus votes rejected for exit to BTC: {votesReason}");
 
