@@ -91,6 +91,17 @@ namespace VerifiedXCore.Bitcoin.Models
         }
 
         /// <summary>
+        /// Why no new Base mint may be signed against <paramref name="chainLock"/>, or null when one may. A blacklisted lock
+        /// pays no pool unlock and no Bitcoin exit, so vBTC.b minted against it would be supply that no lock can redeem:
+        /// burns would then outrun the locks able to pay them. A lock that is fully drawn may still back its mint (the pool
+        /// is shared, so its amount paid someone else's burn). A blacklisted lock that is given back may be minted again.
+        /// </summary>
+        public static string? MintRefusal(VBTCBridgeLockState chainLock) =>
+            chainLock.IsBlacklisted
+                ? $"Bridge lock {chainLock.LockId} is blacklisted ({chainLock.BlacklistReason}): it pays no exit, so no mint is signed against it."
+                : null;
+
+        /// <summary>
         /// Blacklist a lock on-chain, preventing it from being selected for future FIFO allocations.
         /// Also reverses the partial unlock so the deducted amount is restored (but remains blacklisted).
         /// </summary>
