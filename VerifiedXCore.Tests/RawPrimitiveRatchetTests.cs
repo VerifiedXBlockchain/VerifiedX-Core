@@ -42,6 +42,9 @@ namespace VerifiedXCore.Tests
             new("async-void", new[] { "async void" }, "async Task (an exception in async void ends the process)"),
             new("port-probe", new[] { "PortUtility.IsPortOpen" },
                 "await PortUtility.IsPortOpenAsync (the blocking probe holds a thread for up to a second per call)", "Utilities/PortUtility.cs"),
+            new("contract-state", new[] { "SmartContractStateTrei.GetSmartContractState" },
+                "SmartContractStateTrei.GetSmartContractHeader where the ledger rows are not read (the full read builds every row a vault has)",
+                "Models/SmartContractStateTrei.cs"),
         };
 
         private static string Root([System.Runtime.CompilerServices.CallerFilePath] string thisFile = "") =>
