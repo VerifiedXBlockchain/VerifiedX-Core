@@ -878,8 +878,20 @@ namespace VerifiedXCore.Bitcoin.Services
         private static async Task ExecuteVfxPoolUnlock(ProcessedBurnRecord record)
         {
             var vfxDestinationAddress = record.VfxDestinationAddress;
-            LogUtility.Log($"[BurnExitConsensus] VfxPoolUnlock: vfxDest={vfxDestinationAddress}, amount={record.Amount}, burn={record.BaseBurnTxHash}", "BurnExitConsensusService.ExecuteVfxPoolUnlock()");
-            var allocations = BridgePoolUnlockService.ComputeUnlockAllocationPlan(record.Amount, VBTCService.NextBlockHeight, vfxDestinationAddress);
+            // The destination burned on Base may be a registered name: it is resolved to its address once, here, and the
+            // unlock credits that address (from Globals.PoolUnlockCreditsAddressHeight; the votes stay on the burned one).
+            var creditAddress = BridgeTxRules.ResolveVfxDestination(vfxDestinationAddress);
+            var creditsAddress = VBTCService.NextBlockHeight >= Globals.PoolUnlockCreditsAddressHeight;
+            var credited = creditsAddress ? creditAddress : vfxDestinationAddress;
+            if (string.IsNullOrEmpty(credited))
+            {
+                record.Status = BurnExitStatus.Failed;
+                ErrorLogUtility.LogError($"[BurnExitConsensus] VfxPoolUnlock {record.BaseBurnTxHash}: destination {vfxDestinationAddress} names no VFX address",
+                    "BurnExitConsensusService.ExecuteVfxPoolUnlock()");
+                return;
+            }
+            LogUtility.Log($"[BurnExitConsensus] VfxPoolUnlock: vfxDest={vfxDestinationAddress}, credit={creditAddress}, amount={record.Amount}, burn={record.BaseBurnTxHash}", "BurnExitConsensusService.ExecuteVfxPoolUnlock()");
+            var allocations = BridgePoolUnlockService.ComputeUnlockAllocationPlan(record.Amount, VBTCService.NextBlockHeight, credited);
 
             if (allocations == null || allocations.Count == 0)
             {
@@ -897,7 +909,8 @@ namespace VerifiedXCore.Bitcoin.Services
                 record.Amount,
                 record.BaseBurnTxHash,
                 allocations,
-                record.ConsensusVotes);
+                record.ConsensusVotes,
+                creditsAddress ? creditAddress : null);
 
             if (result.Success)
             {

@@ -498,6 +498,17 @@ namespace VerifiedXCore
         public const long BridgeLockMinimumTestnetHeight = ReleaseRulesTestnetHeight;
 
         /// <summary>
+        /// From this height a vBTC V2 bridge pool unlock credits its VfxCreditAddress, a VFX address, and a block refuses one
+        /// whose VfxCreditAddress is missing, is not a VFX address, or is not the address its VfxDestinationAddress (the
+        /// destination burned on Base, an address or a registered name) names. Below it the unlock credits
+        /// VfxDestinationAddress as written, and a name was credited as a ledger key nobody can spend from. A
+        /// consensus change to apply: every validator runs it from the same height. Unset (long.MaxValue) on mainnet and
+        /// testnet until the release that activates it. Testnet value in GlobalsNetworkHeights.
+        /// </summary>
+        public static long PoolUnlockCreditsAddressHeight = long.MaxValue;
+        public const long PoolUnlockCreditsAddressTestnetHeight = long.MaxValue;
+
+        /// <summary>
         /// From this height a reserve's Recover() reads each pending NFT_TX row's call as the dispatchers read it. Below it
         /// a row whose Data was not an array of objects made the recovery throw part-way, so every later row, the balance
         /// sweep, the contract re-own and the vBTC sweep never ran, and the reserve stayed under its vault key. Active from LedgerRulesBatchHeight.

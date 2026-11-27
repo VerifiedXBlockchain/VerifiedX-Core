@@ -4128,7 +4128,9 @@ namespace VerifiedXCore.Data
                 var jobj = JObject.Parse(tx.Data);
                 var totalAmount = jobj["TotalAmount"]?.ToObject<decimal?>();
                 var totalAmountSats = jobj["TotalAmountSats"]?.ToObject<long?>();
-                var vfxDestinationAddress = jobj["VfxDestinationAddress"]?.ToObject<string?>();
+                // The address credited: from Globals.PoolUnlockCreditsAddressHeight the VfxCreditAddress resolved when the
+                // unlock was built, before it the burn's destination as written.
+                var vfxDestinationAddress = VerifiedXCore.Bitcoin.Services.BridgeTxRules.PoolUnlockCredited(jobj, tx.Height);
                 var exitBurnTxHash = jobj["ExitBurnTxHash"]?.ToObject<string?>();
                 var allocationsToken = jobj["Allocations"];
 

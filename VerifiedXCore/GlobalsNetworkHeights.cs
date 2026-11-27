@@ -49,6 +49,7 @@ namespace VerifiedXCore
             Globals.ContractBodyKeySpellingHeight = Globals.IsTestNet ? Globals.ContractBodyKeySpellingTestnetHeight : Globals.ContractBodyKeySpellingHeight;
             Globals.ContractRunLimitsHeight = Globals.IsTestNet ? Globals.ContractRunLimitsTestnetHeight : Globals.ContractRunLimitsHeight;
             Globals.BridgeLockMinimumHeight = Globals.IsTestNet ? Globals.BridgeLockMinimumTestnetHeight : Globals.BridgeLockMinimumHeight;
+            Globals.PoolUnlockCreditsAddressHeight = Globals.IsTestNet ? Globals.PoolUnlockCreditsAddressTestnetHeight : Globals.PoolUnlockCreditsAddressHeight;
             Globals.VrfMixHeight = Globals.IsTestNet ? Globals.VrfMixTestnetHeight : Globals.VrfMixHeight;
             Globals.ReserveRecoverReadsEveryRowHeight = Globals.IsTestNet ? Globals.LedgerRulesBatchTestnetHeight : Globals.ReserveRecoverReadsEveryRowHeight;
             Globals.VbtcEnvelopeRulesHeight = Globals.IsTestNet ? Globals.LedgerRulesBatchTestnetHeight : Globals.VbtcEnvelopeRulesHeight;
@@ -173,6 +174,7 @@ namespace VerifiedXCore
             Globals.ContractRunLimitsHeight = CustomTestNetInputRulesHeight;
             Globals.VrfMixHeight = CustomTestNetInputRulesHeight;
             Globals.BridgeLockMinimumHeight = CustomTestNetInputRulesHeight;
+            Globals.PoolUnlockCreditsAddressHeight = CustomTestNetInputRulesHeight;
         }
     }
 }

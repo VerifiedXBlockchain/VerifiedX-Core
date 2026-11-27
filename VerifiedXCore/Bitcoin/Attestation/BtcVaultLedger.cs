@@ -229,7 +229,7 @@ namespace VerifiedXCore.Bitcoin.Attestation
             {
                 var data = JObject.Parse(tx.Data);
                 // Read as HolderLimitRefusal reads them, as validation and apply do.
-                var destination = data["VfxDestinationAddress"]?.ToObject<string?>();
+                var destination = VerifiedXCore.Bitcoin.Services.BridgeTxRules.PoolUnlockCredited(data, height);
                 var shares = new Dictionary<string, decimal>(StringComparer.Ordinal);
                 foreach (var allocation in data["Allocations"]?.ToObject<List<VerifiedXCore.Bitcoin.Models.PoolUnlockAllocation>>() ?? new())
                 {
@@ -292,7 +292,7 @@ namespace VerifiedXCore.Bitcoin.Attestation
         /// multi), or an unlock from the bridge (to the lock's owner, or a pool unlock to its destination on each vault
         /// it draws on). Null otherwise.
         /// </summary>
-        public static string? HolderLimitRefusal(Transaction tx)
+        public static string? HolderLimitRefusal(Transaction tx, long? height = null)
         {
             try
             {
@@ -313,7 +313,7 @@ namespace VerifiedXCore.Bitcoin.Attestation
                     case TransactionType.VBTC_V2_BRIDGE_POOL_UNLOCK:
                     {
                         var data = JObject.Parse(tx.Data);
-                        var destination = data["VfxDestinationAddress"]?.ToObject<string?>();
+                        var destination = VerifiedXCore.Bitcoin.Services.BridgeTxRules.PoolUnlockCredited(data, height ?? (tx.Height > 0 ? tx.Height : (Globals.LastBlock?.Height ?? 0) + 1));
                         // The allocations as validation and apply read them (a numeric lock id becomes its digits; round 13).
                         foreach (var allocation in data["Allocations"]?.ToObject<List<VerifiedXCore.Bitcoin.Models.PoolUnlockAllocation>>() ?? new())
                             if (!string.IsNullOrWhiteSpace(allocation?.LockId))
