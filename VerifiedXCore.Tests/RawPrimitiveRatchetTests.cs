@@ -45,6 +45,9 @@ namespace VerifiedXCore.Tests
             new("contract-state", new[] { "SmartContractStateTrei.GetSmartContractState" },
                 "SmartContractStateTrei.GetSmartContractHeader where the ledger rows are not read (the full read builds every row a vault has)",
                 "Models/SmartContractStateTrei.cs"),
+            new("mempool-add", new[] { "TransactionData.AddToPool" },
+                "TransactionData.SubmitOwnTransaction for a transaction this node made (it reports a refusal and records nothing until the mempool takes it), or read AddToPool's answer",
+                "Data/TransactionData.cs"),
         };
 
         private static string Root([System.Runtime.CompilerServices.CallerFilePath] string thisFile = "") =>

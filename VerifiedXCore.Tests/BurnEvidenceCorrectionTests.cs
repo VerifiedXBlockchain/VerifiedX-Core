@@ -114,5 +114,26 @@ namespace VerifiedXCore.Tests
             rec.ExitType = BurnExitConsensusService.BurnExitType.BtcExit;
             Assert.Null(BurnExitConsensusService.UnlockToRemake(rec, 1_100, _ => false));       // not an unlock
         }
+
+        /// <summary>
+        /// A pool unlock that has left this node's mempool without being mined (a producer dropped it: another unlock drew
+        /// its lock first) is made again a few blocks after its broadcast, not only once 50 blocks have passed. One still
+        /// waiting in the mempool is given the full time, and one whose burn was consumed is not made again.
+        /// </summary>
+        [Fact]
+        public void APoolUnlockDroppedFromTheMempool_IsMadeAgainWithinAFewBlocks()
+        {
+            var rec = new BurnExitConsensusService.ProcessedBurnRecord
+            {
+                BaseBurnTxHash = "0xburn", CompletionVfxTxHash = "unlock-tx", ExitType = BurnExitConsensusService.BurnExitType.VfxPoolUnlock,
+                Status = BurnExitConsensusService.BurnExitStatus.Complete, CompletionBroadcastAtBlock = 1_000,
+            };
+            var dropped = 1_000 + BurnExitConsensusService.DroppedUnlockBlocks;
+            Assert.Null(BurnExitConsensusService.UnlockToRemake(rec, dropped - 1, _ => false, _ => false));   // just sent
+            Assert.True(BurnExitConsensusService.UnlockToRemake(rec, dropped, _ => false, _ => false));       // dropped, not mined
+            Assert.Null(BurnExitConsensusService.UnlockToRemake(rec, dropped, _ => false, _ => true));        // still waiting
+            Assert.False(BurnExitConsensusService.UnlockToRemake(rec, dropped, _ => true, _ => false));       // mined
+            Assert.True(BurnExitConsensusService.UnlockToRemake(rec, 1_100, _ => false, _ => true));          // waiting too long
+        }
     }
 }
