@@ -580,9 +580,66 @@ namespace VerifiedXCore.Tests
                 var row = Row(request, vault);
                 Assert.Equal(VaultWithdrawalState.Pinned, row.State);
                 Assert.Equal(new[] { moved }, row.Pins[0].Inputs);
-                Assert.All(BtcTx.Parse(row.Pins[0].TxHex, Network.Main).Outputs, o => Assert.Equal(newKey, o.ScriptPubKey));
+                var pinned = BtcTx.Parse(row.Pins[0].TxHex, Network.Main);
+                Assert.All(pinned.Outputs, o => Assert.Equal(newKey, o.ScriptPubKey));
+                // The signers read the pinned transaction as it was built (the payment first, then the change), so they no
+                // longer take the change for a second payment, and the coin is not held for good.
+                var keyUid = BtcAttestStore.ScriptRow(newKey.ToHex())?.KeyUID ?? vault;
+                var (ok, why) = FrostSigningAuthorization.Authorize(Announce(keyUid, newKey, request.Hash, pinned, Signers[0].Address));
+                Assert.True(ok, why);
             }
             finally { Globals.WithdrawalDestinationRecheckHeight = prior; }
+        }
+
+        private VfxTx Bump(string vault, string requestHash, long feeRate) =>
+            SignedBy(Minter, Minter.Address, TransactionType.VBTC_V2_COIN_PIN,
+                new { Function = BtcWithdrawals.FeeBumpFunction, ContractUID = vault, WithdrawalRequestHash = requestHash, FeeRate = feeRate, Nonce = Guid.NewGuid().ToString("N") });
+
+        private VfxTx Release(string vault, string requestHash, long feeRate) =>
+            SignedBy(Minter, Minter.Address, TransactionType.VBTC_V2_COIN_PIN,
+                new { Function = BtcWithdrawals.ReleaseFunction, ContractUID = vault, WithdrawalRequestHash = requestHash, FeeRate = feeRate, Nonce = Guid.NewGuid().ToString("N") });
+
+        /// <summary>
+        /// A withdrawal asked for before a re-key, to the address the re-key gives the vault, is fixed on the old key's coin
+        /// (the address is nobody's yet): it pays that address and returns the change to the old key. Once the re-key is in,
+        /// a fee raise returns the change, and a release the whole coin, to the vault's current key, which is the
+        /// destination. Read by script, the signers took both for a payment beyond the amount and refused, the signers
+        /// lead only a withdrawal's newest transaction, and the coin was held for good. Read as built, both are signed.
+        /// </summary>
+        [Fact]
+        public async Task AWithdrawalToTheNextKeysAddress_FixedBeforeTheReKey_IsSignedWhenRaisedOrReleasedAfterIt()
+        {
+            await Start();
+            var vault = await CreateVault(H1 + 1, keyHolders: Signers);
+            await Deposit(vault.Script, 200_000);
+            var stillHere = Signers.Take(3).ToList();
+            await ToNextEpoch(stillHere, leaving: Signers.Skip(3));
+            var ceremony = Ceremony(vault.Uid, stillHere, 2, Signers[0].Address);
+            var request = await Mine(SignedBy(Minter, Minter.Address, TransactionType.VBTC_V2_WITHDRAWAL_REQUEST,
+                new { Function = "VBTCWithdrawalRequest()", ContractUID = vault.Uid, BTCAddress = ceremony.Address, Amount = 0.0002M, FeeRate = 10, UniqueId = Guid.NewGuid().ToString("N") }));
+            var first = BtcTx.Parse(Assert.Single(Row(request, vault.Uid).Pins).TxHex, Network.Main);
+            Assert.Equal(ceremony.Script, first.Outputs[0].ScriptPubKey);                     // the payment, to the next key
+            Assert.Equal(vault.Script, first.Outputs[1].ScriptPubKey);                        // the change, to the old one
+            await Mine(RekeyTx(vault.Uid, ceremony.Proof));
+
+            await Mine(Bump(vault.Uid, request.Hash, 20));
+            var raised = BtcTx.Parse(Row(request, vault.Uid).Pins[^1].TxHex, Network.Main);
+            Assert.All(raised.Outputs, o => Assert.Equal(ceremony.Script, o.ScriptPubKey));    // change to the current key: the destination
+            var (ok, why) = FrostSigningAuthorization.Authorize(Announce(vault.Uid, vault.Script, request.Hash, raised, Signers[0].Address));
+            Assert.True(ok, why);
+
+            await Mine(Release(vault.Uid, request.Hash, 30));
+            var released = BtcTx.Parse(Row(request, vault.Uid).Pins[^1].TxHex, Network.Main);
+            Assert.Equal(ceremony.Script, Assert.Single(released.Outputs).ScriptPubKey);      // the coins back to the current key
+            (ok, why) = FrostSigningAuthorization.Authorize(Announce(vault.Uid, vault.Script, request.Hash, released, Signers[0].Address));
+            Assert.True(ok, why);
+
+            // Still refused: a pinned payment whose first output is not the destination.
+            var swapped = raised.Clone();
+            swapped.Outputs.Clear();
+            swapped.Outputs.Add(raised.Outputs[0].Value, vault.Script);
+            Assert.Contains("first output is not the authorized destination",
+                FrostSigningAuthorization.ReadPinnedOutputs(swapped, ceremony.Script, new[] { vault.Script, ceremony.Script }, release: false).Reason);
         }
 
         /// <summary>
