@@ -214,6 +214,9 @@ namespace VerifiedXCore.Bitcoin.Services
             }
         }
 
+        /// <summary>How long the caster's collector waits for the remaining signers once it has enough signatures.</summary>
+        internal static readonly TimeSpan SpareSignaturesWait = TimeSpan.FromSeconds(3);
+
         /// <summary>Caster: request signatures from active validators over HTTP.</summary>
         public static async Task CollectMintAttestationsForLock(BridgeLockRecord record, int requiredSignatures)
         {
@@ -270,39 +273,24 @@ namespace VerifiedXCore.Bitcoin.Services
 
             // Everyone the contract counts, validators and casters: it needs both groups (UserBridgeMintService.Enough).
             var validators = UserBridgeMintService.ContractSigners(view);
-            var client = Globals.HttpClientFactory?.CreateClient() ?? new HttpClient(VerifiedXCore.Utilities.NodeHttp.NewHandler()) { Timeout = TimeSpan.FromSeconds(25) };
-
-            foreach (var v in validators)
+            var body = JsonConvert.SerializeObject(new MintAttestationRequest
             {
-                var url = $"http://{v.IPAddress.Replace("::ffff:", "")}:{Globals.ValAPIPort}/valapi/Validator/SignMintAttestation";
-                var body = JsonConvert.SerializeObject(new MintAttestationRequest
-                {
-                    LockId = record.LockId,
-                    EvmDestination = record.EvmDestination,
-                    AmountSats = record.AmountSats,
-                    Nonce = nonce,
-                    ChainId = Globals.BaseEvmChainId,
-                    ContractAddress = contract,
-                    SmartContractUID = record.SmartContractUID,
-                    MessageVersion = view.MessageVersion
-                });
-                try
-                {
-                    using var content = new StringContent(body, Encoding.UTF8, "application/json");
-                    var resp = await client.PostAsync(url, content);
-                    var txt = await resp.Content.ReadAsStringAsync();
-                    if (!resp.IsSuccessStatusCode) continue;
-                    var jo = Newtonsoft.Json.Linq.JObject.Parse(txt);
-                    if (jo["success"]?.ToObject<bool>() != true) continue;
-                    var sig = jo["signature"]?.ToString();
-                    if (!string.IsNullOrEmpty(sig)
-                        && string.Equals(ValidatorEthKeyService.RecoverSigner(hash, sig, personalMessage: !typed), v.BaseAddress, StringComparison.OrdinalIgnoreCase))
-                        state.ValidatorSignatures[v.BaseAddress] = sig;
-                }
-                catch
-                {
-                }
-            }
+                LockId = record.LockId,
+                EvmDestination = record.EvmDestination,
+                AmountSats = record.AmountSats,
+                Nonce = nonce,
+                ChainId = Globals.BaseEvmChainId,
+                ContractAddress = contract,
+                SmartContractUID = record.SmartContractUID,
+                MessageVersion = view.MessageVersion
+            });
+            var required = Math.Max(requiredSignatures, view.RequiredMintSignatures);
+            // Collected apart from the state other threads read, and with a short wait for spare signatures: the ones kept
+            // here are the ones the mint is sent with, however much later.
+            var collected = new Dictionary<string, string>(state.ValidatorSignatures);
+            await UserBridgeMintService.AskSignersAsync(validators, body, hash, typed, collected,
+                signed => UserBridgeMintService.Enough(view, required, signed), record.LockId, SpareSignaturesWait);
+            state.ValidatorSignatures = collected;
 
             if (UserBridgeMintService.Enough(view, Math.Max(requiredSignatures, view.RequiredMintSignatures), state.ValidatorSignatures.Keys))
             {

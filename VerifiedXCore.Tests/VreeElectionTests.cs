@@ -1189,9 +1189,103 @@ namespace VerifiedXCore.Tests
             BlockDiagnostics.RollbackSnapshot().Where(r => r.TimeUtc >= since).Select(r => r.Location).ToList();
 
         /// <summary>
+        /// The producer signs the block's hash, which covers its merkle root but not its transactions. A copy whose
+        /// transactions are not the ones its root names is still its own hash and still carries the producer's signature,
+        /// whoever made it: the producer (its root is wrong) or anyone passing the block on (transactions removed). The
+        /// fetch takes no such copy, so a producer that serves one has served no block and is skipped like any producer that
+        /// cannot serve; and its refusal counts against nobody, so a peer cannot have an honest producer left out.
+        /// </summary>
+        [Fact]
+        public async Task ACopyWhoseTransactionsAreNotTheOnesItsMerkleRootNames_IsNoBlockAndCountsAgainstNobody()
+        {
+            var record = Ratified(0);
+            var producer = _electors[11];
+            var wrongRoot = ProducedBlock(producer, Members(record).Take(3), record, merkleRoot: "not-the-merkle-root");
+            Assert.Equal(wrongRoot.Hash, wrongRoot.GetBlockHash());
+            Assert.True(SignatureService.VerifySignature(wrongRoot.Validator, wrongRoot.Hash, wrongRoot.ValidatorSignature));
+            Assert.False(ProofUtility.IsWholeCopy(wrongRoot, out _)); // the fetch takes no such block
+
+            var height = Globals.LastBlock.Height + 1;
+            var reward = new Transaction
+            {
+                FromAddress = "Coinbase_BlkRwd", ToAddress = _electors[10].Address, TransactionType = TransactionType.TX, Timestamp = TimeUtil.GetTime(),
+                Amount = BlockVersionUtility.GetBlockVersion(height) < 4 ? BlockchainData.GetBlockReward() : 0.0M,
+            };
+            reward.Build();
+            var honest = ProducedBlock(_electors[10], Members(record).Take(3), record, transactions: new List<Transaction> { reward });
+            Assert.True(ProofUtility.IsWholeCopy(honest, out _));
+            ProofUtility.NoteServedByProducer(honest);
+            var stripped = JsonConvert.DeserializeObject<Block>(JsonConvert.SerializeObject(honest))!;
+            stripped.Transactions = new List<Transaction>();
+            Assert.Equal(stripped.Hash, stripped.GetBlockHash());     // still its own hash, still the producer's signature
+            Assert.False(ProofUtility.IsWholeCopy(stripped, out _));
+
+            var since = DateTime.UtcNow;
+            Assert.False(await BlockValidatorService.ValidateBlock(stripped, false));
+            Assert.Equal("BlockValidatorService.ValidateBlock()-10", StepsSince(since).LastOrDefault());
+            Assert.False(BlockValidatorService.WasRefusedForItsContents(stripped.Height, stripped.Hash));
+            Assert.False(VerifiedXCore.Nodes.BlockcasterNode.ExcludeProducerOfRefusedBlock(stripped, triedAtTip: true));
+            Assert.False(ProofUtility.ProducedARefusedBlockAt(_electors[10].Address, stripped.Height));
+        }
+
+        /// <summary>
+        /// The round's winner takes its own crafted block without fetching it: that copy is noted as served by its producer
+        /// too, so the winner's own caster leaves it out when the other casters do. A block crafted for another height is not.
+        /// </summary>
+        [Fact]
+        public void TheWinnersOwnCraftedBlock_IsACopyItsProducerServed()
+        {
+            var record = Ratified(0);
+            var prior = Globals.NextValidatorBlock;
+            try
+            {
+                var crafted = ProducedBlock(_electors[11], Members(record).Take(3), record);
+                Globals.NextValidatorBlock = crafted;
+                VerifiedXCore.Nodes.BlockcasterNode.NoteOwnCraftedBlock(crafted.Height + 1);
+                Assert.False(ProofUtility.WasServedByItsProducer(crafted));
+                VerifiedXCore.Nodes.BlockcasterNode.NoteOwnCraftedBlock(crafted.Height);
+                Assert.True(ProofUtility.WasServedByItsProducer(crafted));
+            }
+            finally { Globals.NextValidatorBlock = prior; }
+        }
+
+        /// <summary>
+        /// A content check that runs before the previous hash is compared (here the block's version) counts against the
+        /// producer only for a block on this node's tip: judged against another predecessor, the refusal says nothing about it.
+        /// </summary>
+        [Fact]
+        public async Task ABlockRefusedForItsVersion_CountsAgainstItsProducer_OnlyOnThisNodesTip()
+        {
+            var record = Ratified(0);
+            Block Resigned(Block b, Member by)
+            {
+                b.Hash = b.GetBlockHash();
+                b.ValidatorSignature = SignatureService.CreateSignature(b.Hash, by.Key, by.Pub);
+                return b;
+            }
+
+            var onTip = ProducedBlock(_electors[11], Members(record).Take(3), record);
+            onTip.Version += 1;
+            Resigned(onTip, _electors[11]);
+            var since = DateTime.UtcNow;
+            Assert.False(await BlockValidatorService.ValidateBlock(onTip, false));
+            Assert.Equal("BlockValidatorService.ValidateBlock()-6", StepsSince(since).LastOrDefault());
+            Assert.True(BlockValidatorService.WasRefusedForItsContents(onTip.Height, onTip.Hash));
+
+            var elsewhere = ProducedBlock(_electors[10], Members(record).Take(3), record);
+            elsewhere.Version += 1;
+            elsewhere.PrevHash = "another-predecessor";
+            Resigned(elsewhere, _electors[10]);
+            since = DateTime.UtcNow;
+            Assert.False(await BlockValidatorService.ValidateBlock(elsewhere, false));
+            Assert.Equal("BlockValidatorService.ValidateBlock()-6", StepsSince(since).LastOrDefault());
+            Assert.False(BlockValidatorService.WasRefusedForItsContents(elsewhere.Height, elsewhere.Hash));
+        }
+
+        /// <summary>
         /// A block refused for a transaction in it is noted for its height and hash, and a caster that tried it at its tip
         /// leaves its producer out of that height's election only: elected again, the producer served the same block every
-        /// round and the chain stayed at the height. A block refused for anything else leaves its producer in.
+        /// round and the chain stayed at the height.
         /// </summary>
         [Fact]
         public async Task ABlockRefusedForATransaction_LeavesItsProducerOutOfThatHeightsElection()
@@ -1211,26 +1305,43 @@ namespace VerifiedXCore.Tests
             };
             unsigned.Build();
             var block = ProducedBlock(producer, Members(record).Take(3), record, transactions: new List<Transaction> { reward, unsigned });
+            var passedOn = JsonConvert.DeserializeObject<Block>(JsonConvert.SerializeObject(block))!; // a peer's copy
+            // Fetched from its producer, before it is validated: validation fills in each transaction's height, and the
+            // copy is still the one the producer served.
+            Assert.All(block.Transactions, t => Assert.Equal(0, t.Height));
+            ProofUtility.NoteServedByProducer(block);
             var since = DateTime.UtcNow;
 
             Assert.False(await BlockValidatorService.ValidateBlock(block, false));
+            Assert.Contains(block.Transactions, t => t.Height != 0);
             Assert.Equal("BlockValidatorService.ValidateBlock()-13", StepsSince(since).LastOrDefault());
-            Assert.True(BlockValidatorService.WasRefusedForATransaction(block.Height, block.Hash));
+            Assert.True(BlockValidatorService.WasRefusedForItsContents(block.Height, block.Hash));
 
             // Tried at the tip: the producer gets no proof at that height, and does at the next.
-            Assert.False(VerifiedXCore.Nodes.BlockcasterNode.ExcludeProducerOfRefusedBlock(block.Height, block.Hash, producer.Address, triedAtTip: false));
-            Assert.False(VerifiedXCore.Nodes.BlockcasterNode.ExcludeProducerOfRefusedBlock(block.Height, "another-hash", producer.Address, triedAtTip: true));
+            Assert.False(VerifiedXCore.Nodes.BlockcasterNode.ExcludeProducerOfRefusedBlock(block, triedAtTip: false));
+            // A copy that came through anyone but the producer counts against nobody: a peer can change a transaction and
+            // keep the hash it carries, and the root and the producer's signature cover only that hash.
+            passedOn.Transactions[1].Amount = 2M;
+            Assert.True(ProofUtility.IsWholeCopy(passedOn, out _));
+            Assert.False(VerifiedXCore.Nodes.BlockcasterNode.ExcludeProducerOfRefusedBlock(passedOn, triedAtTip: true));
+            // Nor a copy with an amount re-spelled to the same value: the transaction's hash covers the spelling.
+            var respelled = JsonConvert.DeserializeObject<Block>(JsonConvert.SerializeObject(block))!;
+            respelled.Transactions[1].Fee = 0.000010M;
+            Assert.Equal(block.Transactions[1].Fee, respelled.Transactions[1].Fee);
+            Assert.False(VerifiedXCore.Nodes.BlockcasterNode.ExcludeProducerOfRefusedBlock(respelled, triedAtTip: true));
             Assert.NotEqual("refused-block-at-height", ProofUtility.ProducerIneligibility(producer.Address, block.Height));
-            Assert.True(VerifiedXCore.Nodes.BlockcasterNode.ExcludeProducerOfRefusedBlock(block.Height, block.Hash, producer.Address, triedAtTip: true));
+            Assert.True(VerifiedXCore.Nodes.BlockcasterNode.ExcludeProducerOfRefusedBlock(block, triedAtTip: true));
             Assert.Equal("refused-block-at-height", ProofUtility.ProducerIneligibility(producer.Address, block.Height));
             Assert.NotEqual("refused-block-at-height", ProofUtility.ProducerIneligibility(producer.Address, block.Height + 1));
             Assert.NotEqual("refused-block-at-height", ProofUtility.ProducerIneligibility(_electors[10].Address, block.Height));
 
-            // A block refused for another reason (here its merkle root) is not taken for one refused for a transaction.
-            var other = ProducedBlock(_electors[10], Members(record).Take(3), record, merkleRoot: "not-the-merkle-root");
-            Assert.False(await BlockValidatorService.ValidateBlock(other, false));
-            Assert.False(VerifiedXCore.Nodes.BlockcasterNode.ExcludeProducerOfRefusedBlock(other.Height, other.Hash, _electors[10].Address, triedAtTip: true));
-            Assert.NotEqual("refused-block-at-height", ProofUtility.ProducerIneligibility(_electors[10].Address, other.Height));
+            // A block whose signature is not its producer's is not taken for its producer's fault.
+            var forged = ProducedBlock(_electors[10], Members(record).Take(3), record, merkleRoot: "not-the-merkle-root");
+            forged.ValidatorSignature = SignatureService.CreateSignature(forged.Hash, _electors[9].Key, _electors[9].Pub);
+            Assert.False(await BlockValidatorService.ValidateBlock(forged, false));
+            ProofUtility.NoteServedByProducer(forged);
+            Assert.False(VerifiedXCore.Nodes.BlockcasterNode.ExcludeProducerOfRefusedBlock(forged, triedAtTip: true));
+            Assert.NotEqual("refused-block-at-height", ProofUtility.ProducerIneligibility(_electors[10].Address, forged.Height));
             // Another block refused for a transaction meanwhile (another producer's, at the same height) does not replace
             // the first one's refusal: each is answered for its own hash.
             var reward2 = new Transaction
@@ -1248,8 +1359,10 @@ namespace VerifiedXCore.Tests
             since = DateTime.UtcNow;
             Assert.False(await BlockValidatorService.ValidateBlock(second, false));
             Assert.Equal("BlockValidatorService.ValidateBlock()-13", StepsSince(since).LastOrDefault());
-            Assert.True(BlockValidatorService.WasRefusedForATransaction(second.Height, second.Hash));
-            Assert.True(BlockValidatorService.WasRefusedForATransaction(block.Height, block.Hash));
+            Assert.True(BlockValidatorService.WasRefusedForItsContents(second.Height, second.Hash));
+            Assert.True(BlockValidatorService.WasRefusedForItsContents(block.Height, block.Hash));
+            // Refused for its contents, but never served to this node by its producer: it counts against nobody.
+            Assert.False(VerifiedXCore.Nodes.BlockcasterNode.ExcludeProducerOfRefusedBlock(second, triedAtTip: true));
 
             // A caster restarted at the height still leaves the producer out: the exclusion is read back from disk.
             ProofUtility.ForgetRefusedBlockProducersInMemory();

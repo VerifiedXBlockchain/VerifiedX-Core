@@ -80,7 +80,7 @@ namespace VerifiedXCore.Bitcoin.Services
             }
 
             var burn = NormalizeBurn(RedeemedBurn(tx.TransactionType, jobj, at));
-            var lockIds = ExtractLockIds(jobj, asApply: at >= Globals.PathAuditRulesHeight);
+            var lockIds = at >= Globals.BridgeAllocationsArrayHeight ? AllocatedLockIds(jobj) : ExtractLockIds(jobj, asApply: at >= Globals.PathAuditRulesHeight);
 
             // Check everything first, then register, so a rejected tx leaves the state untouched.
             // A transaction's hash and one of its burns named by position are the same burn too (#277).
@@ -114,6 +114,29 @@ namespace VerifiedXCore.Bitcoin.Services
             if (h.StartsWith("0x", StringComparison.Ordinal)) h = h.Substring(2);
             return h;
         }
+
+        /// <summary>
+        /// From Globals.BridgeAllocationsArrayHeight: every lock a bridge transaction names, trimmed and lower-cased as the
+        /// lock look-up matches them: each allocation's lock, read whatever the shape of Allocations, and the outer LockId
+        /// (what a bridge unlock draws). Before it an object-shaped Allocations was claimed only by the outer LockId, which
+        /// could name a made-up lock while the allocations drew a real one, so two exits in one block drew on one lock.
+        /// Claiming both never takes fewer locks than before.
+        /// </summary>
+        public static List<string> AllocatedLockIds(JObject jobj)
+        {
+            var allocs = jobj["Allocations"];
+            List<VerifiedXCore.Bitcoin.Models.PoolUnlockAllocation>? read = null;
+            if (allocs != null)
+            {
+                try { read = allocs.ToObject<List<VerifiedXCore.Bitcoin.Models.PoolUnlockAllocation>>(); }
+                catch { read = null; }
+            }
+            var ids = (read ?? new()).Select(a => a?.LockId).Append(jobj["LockId"]?.ToString());
+            return ids.Select(NormalizeLockId).Where(id => id.Length > 0).Distinct(StringComparer.Ordinal).ToList();
+        }
+
+        /// <summary>A lock id as the lock look-up matches it: trimmed, any case.</summary>
+        public static string NormalizeLockId(string? lockId) => (lockId ?? string.Empty).Trim().ToLowerInvariant();
 
         public static List<string> ExtractLockIds(JObject jobj, bool asApply = false)
         {

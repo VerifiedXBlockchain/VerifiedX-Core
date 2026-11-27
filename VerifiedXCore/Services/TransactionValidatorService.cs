@@ -362,7 +362,7 @@ namespace VerifiedXCore.Services
             var vaultInTransitError = LedgerIntegrityRules.OwnerKeepsAVaultWholeWhileItChangesHands(txRequest)
                 ?? LedgerIntegrityRules.VbtcRecipientCanHoldIt(txRequest, blockHeight ?? ((Globals.LastBlock?.Height ?? 0) + 1))
                 // A watched vault holds at most so many holders with a balance, so its ledger stays within one document.
-                ?? VerifiedXCore.Bitcoin.Attestation.BtcVaultLedger.HolderLimitRefusal(txRequest)
+                ?? VerifiedXCore.Bitcoin.Attestation.BtcVaultLedger.HolderLimitRefusal(txRequest, blockHeight ?? ((Globals.LastBlock?.Height ?? 0) + 1))
                 // ... and an unlock from the bridge leaves its destination nothing or at least the vault's smallest position.
                 ?? VerifiedXCore.Bitcoin.Attestation.BtcVaultLedger.PoolUnlockPositionRefusal(txRequest, blockHeight ?? ((Globals.LastBlock?.Height ?? 0) + 1))
                 // ... and its document does not grow by a sale's key without bound (round 9).
@@ -4352,6 +4352,11 @@ namespace VerifiedXCore.Services
                     if (allocations == null || allocations.Type != JTokenType.Array || !allocations.HasValues)
                         return (txResult, "Allocations array is required for bridge pool unlock.");
 
+                    // It credits an address: a registered name burned on Base is resolved once, when the unlock is built
+                    // (from Globals.PoolUnlockCreditsAddressHeight).
+                    if (BridgeTxRules.PoolUnlockCreditRefusal(jobj, blockHeight ?? (Globals.LastBlock.Height + 1)) is { } creditRefusal)
+                        return (txResult, creditRefusal);
+
                     // Height-gated hardening (BridgeBurnBindingHeight): votes must come from the caster
                     // committee for this height and bind amount + destination; the Base burn must be a
                     // real VfxExitBurned event on the bridge contract matching them; the burn hash is
@@ -4481,6 +4486,13 @@ namespace VerifiedXCore.Services
                         && ((blockHeight == null && !blockVerify && !blockDownloads) || exitGateHeight >= Globals.BridgeExitCarriesTotalsHeight)
                         && (jobj["TotalAmount"]?.ToObject<decimal?>() == null || jobj["TotalAmountSats"]?.ToObject<long?>() == null))
                         return (txResult, "A bridge exit to BTC that carries allocations carries TotalAmount and TotalAmountSats.");
+
+                    // Its allocations are a JSON array of at least one: the typed reader also took an object holding the list
+                    // under "$values", which the allocation check below and the block's lock guard did not read as allocations.
+                    // At admission at once; in a block from Globals.BridgeAllocationsArrayHeight.
+                    if (((blockHeight == null && !blockVerify && !blockDownloads) || exitGateHeight >= Globals.BridgeAllocationsArrayHeight)
+                        && jobj["Allocations"] is not JArray { HasValues: true })
+                        return (txResult, "A bridge exit to BTC carries its Allocations as a JSON array of at least one allocation.");
 
                     if (exitStrict)
                     {

@@ -317,6 +317,29 @@ namespace VerifiedXCore.Bitcoin.Services
         public static string BurnId(string txHash, int position, int burnsInTransaction) =>
             burnsInTransaction <= 1 ? txHash : $"{txHash}:{position}";
 
+        /// <summary>
+        /// A burn id in its one spelling: "0x" and the transaction hash's 64 hex digits in lower case, then for one of
+        /// several burns ":" and its position written plainly. Surrounding blanks, the case of the digits, a missing "0x"
+        /// and leading zeros of the position do not make another burn (<see cref="SplitBurnId"/> reads them all as the
+        /// same one). Null when the text is not a burn id.
+        /// </summary>
+        public static string? CanonicalBurnId(string? burnId)
+        {
+            var id = (burnId ?? "").Trim();
+            string? position = null;
+            var colon = id.IndexOf(':');
+            if (colon >= 0)
+            {
+                position = id[(colon + 1)..];
+                id = id[..colon];
+                if (position.Length is 0 or > 9 || !position.All(c => c >= '0' && c <= '9')) return null;
+            }
+            if (id.StartsWith("0x", StringComparison.OrdinalIgnoreCase)) id = id[2..];
+            if (id.Length != 64 || !id.All(Uri.IsHexDigit)) return null;
+            id = "0x" + id.ToLowerInvariant();
+            return position == null ? id : $"{id}:{int.Parse(position, System.Globalization.CultureInfo.InvariantCulture)}";
+        }
+
         /// <summary>A burn id's Base transaction hash and, for one of several burns in it, its position (<see cref="BurnId"/>).</summary>
         public static (string TxHash, int? Position) SplitBurnId(string? burnId)
         {

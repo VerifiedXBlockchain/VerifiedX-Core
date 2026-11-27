@@ -136,6 +136,34 @@ namespace VerifiedXCore.Tests
             Assert.True(ProofUtility.ValidateIncomingProofForNextRound(p, out var reason), reason);
         }
 
+        /// <summary>
+        /// A proof a peer sends is kept on a caster only: the casting loop alone reads and clears the proofs kept, so on a
+        /// validator that is not a caster each one stayed for good.
+        /// </summary>
+        [Fact]
+        public void AnIncomingProof_IsKeptOnACaster_AndNotOnAValidatorThatIsNotOne()
+        {
+            var priorCaster = Globals.IsBlockCaster;
+            var priorProofs = Globals.Proofs;
+            try
+            {
+                Globals.Proofs = new System.Collections.Concurrent.ConcurrentBag<Proof>();
+                Globals.IsBlockCaster = false;
+                Assert.False(ProofUtility.KeepIncomingProof(Genuine()));
+                Assert.Empty(Globals.Proofs);
+
+                Globals.IsBlockCaster = true;
+                Assert.True(ProofUtility.KeepIncomingProof(Genuine()));
+                Assert.Single(Globals.Proofs);
+                Assert.False(ProofUtility.KeepIncomingProof(null));
+            }
+            finally
+            {
+                Globals.IsBlockCaster = priorCaster;
+                Globals.Proofs = priorProofs;
+            }
+        }
+
         // ── Round binding and eligibility ──────────────────────────────────────────────────
 
         [Fact]

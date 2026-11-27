@@ -538,13 +538,9 @@ namespace VerifiedXCore.Bitcoin.Services
         {
             try
             {
-                var client = Globals.HttpClientFactory?.CreateClient() ?? VerifiedXCore.Utilities.NodeHttp.NewClient();
-                client.Timeout = TimeSpan.FromSeconds(10);
                 var body = Newtonsoft.Json.JsonConvert.SerializeObject(SignedRequest(action, targets, removes, epoch, nonce));
-                using var content = new StringContent(body, System.Text.Encoding.UTF8, "application/json");
-                var resp = await client.PostAsync($"http://{ip.Replace("::ffff:", "")}:{Globals.ValAPIPort}/valapi/Validator/SignValidatorUpdate", content);
-                if (!resp.IsSuccessStatusCode) return null;
-                var text = await resp.Content.ReadAsStringAsync();
+                var text = await VerifiedXCore.Utilities.NodeHttp.PostForShortReplyAsync($"http://{ip.Replace("::ffff:", "")}:{Globals.ValAPIPort}/valapi/Validator/SignValidatorUpdate", body);
+                if (text == null) return null;
                 if (text.TrimStart().StartsWith("\"")) text = Newtonsoft.Json.JsonConvert.DeserializeObject<string>(text) ?? "";
                 var sig = Newtonsoft.Json.Linq.JObject.Parse(text)["Signature"]?.ToString();
                 return string.Equals(ValidatorEthKeyService.RecoverSigner(digest, sig, personalMessage: false), expectedSigner, StringComparison.OrdinalIgnoreCase) ? sig : null;

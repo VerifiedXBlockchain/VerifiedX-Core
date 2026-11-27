@@ -49,6 +49,21 @@ namespace VerifiedXCore
 
         }
 
+        /// <summary>What a validator hub buffers of what a peer sends before it reads on: a whole block fits.</summary>
+        internal const long HubReceiveBufferBytes = 8 * 1024 * 1024;
+        /// <summary>
+        /// What a validator hub buffers toward a peer that reads slowly. A message larger than this is still sent; the next
+        /// one waits. At 8 MB a connection, with the server's memory pool never shrinking, a few slow peers held tens of MB.
+        /// </summary>
+        internal const long HubSendBufferBytes = 1024 * 1024;
+
+        /// <summary>The buffers of the two validator hubs, /consensus and /blockcaster.</summary>
+        internal static void ApplyHubBuffers(Microsoft.AspNetCore.Http.Connections.HttpConnectionDispatcherOptions options)
+        {
+            options.ApplicationMaxBufferSize = HubReceiveBufferBytes;
+            options.TransportMaxBufferSize = HubSendBufferBytes;
+        }
+
         // This method gets called by the runtime. Use this method to configure the HTTP request pipeline.
         public void Configure(IApplicationBuilder app, IWebHostEnvironment env)
         {
@@ -72,17 +87,9 @@ namespace VerifiedXCore
                 if (Globals.ValidatorAddress != null)
                 {
                     // Map the SignalR hub with transport configuration
-                    endpoints.MapHub<P2PValidatorServer>("/consensus", options =>
-                    {
-                        options.ApplicationMaxBufferSize = 8388608;
-                        options.TransportMaxBufferSize = 8388608;
-                    }).WithDisplayName("ConsensusHub");
+                    endpoints.MapHub<P2PValidatorServer>("/consensus", ApplyHubBuffers).WithDisplayName("ConsensusHub");
 
-                    endpoints.MapHub<P2PBlockcasterServer>("/blockcaster", options =>
-                    {
-                        options.ApplicationMaxBufferSize = 8388608;
-                        options.TransportMaxBufferSize = 8388608;
-                    }).WithDisplayName("BlockcasterHub");
+                    endpoints.MapHub<P2PBlockcasterServer>("/blockcaster", ApplyHubBuffers).WithDisplayName("BlockcasterHub");
                 }
             });
         }

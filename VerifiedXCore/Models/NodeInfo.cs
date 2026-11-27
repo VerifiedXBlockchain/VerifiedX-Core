@@ -13,6 +13,29 @@ namespace VerifiedXCore.Models
     public class NodeInfo
     {
         public HubConnection Connection;
+
+        /// <summary>
+        /// Puts <paramref name="replacement"/> in place and disposes the connection it replaces. A replaced connection was
+        /// left as it was: nothing held it any more, but its socket, its buffers and its receive loop stayed until the peer
+        /// closed it. Returns the disposal, which runs on its own.
+        /// </summary>
+        public Task ReplaceConnection(HubConnection replacement)
+        {
+            var replaced = Connection;
+            Connection = replacement;
+            if (replaced == null || ReferenceEquals(replaced, replacement))
+                return Task.CompletedTask;
+            var disposal = DisposeQuietly(replaced);
+            SafeTask.Forget(disposal, "NodeInfo.ReplaceConnection");
+            return disposal;
+        }
+
+        /// <summary>Disposes a connection nobody will use, whatever state it is in.</summary>
+        public static async Task DisposeQuietly(HubConnection? connection)
+        {
+            if (connection == null) return;
+            try { await connection.DisposeAsync().ConfigureAwait(false); } catch { }
+        }
         public string NodeIP { get; set; } 
 
         public string Address { get; set; }

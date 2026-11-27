@@ -7,6 +7,50 @@ namespace VerifiedXCore.Bitcoin.Services
     /// </summary>
     public static class BridgeTxRules
     {
+        /// <summary>A transparent VFX address as written: no name, no shielded address, no stray whitespace.</summary>
+        public static bool IsVfxAddress(string? address) =>
+            !string.IsNullOrEmpty(address) && string.Equals(address, address.Trim(), StringComparison.Ordinal)
+            && !address.Contains('.') && !address.StartsWith(VerifiedXCore.Privacy.ShieldedAddressConstants.Prefix, StringComparison.Ordinal)
+            && AddressValidateUtility.ValidateRBXAddress(address);
+
+        /// <summary>
+        /// The VFX address a Base burn's destination names: itself when it is an address, the address a registered name
+        /// points to now, or null.
+        /// </summary>
+        public static string? ResolveVfxDestination(string? destination)
+        {
+            if (IsVfxAddress(destination)) return destination;
+            if (string.IsNullOrEmpty(destination) || !string.Equals(destination, destination.Trim(), StringComparison.Ordinal)) return null;
+            try
+            {
+                var (found, address) = VerifiedXCore.Models.Adnr.GetAddress(destination);
+                return found && IsVfxAddress(address) ? address : null;
+            }
+            catch { return null; }
+        }
+
+        /// <summary>
+        /// The address a pool unlock credits at <paramref name="height"/>: its VfxCreditAddress from
+        /// Globals.PoolUnlockCreditsAddressHeight, its VfxDestinationAddress before.
+        /// </summary>
+        public static string? PoolUnlockCredited(Newtonsoft.Json.Linq.JObject data, long height) =>
+            (height >= Globals.PoolUnlockCreditsAddressHeight ? data["VfxCreditAddress"] : data["VfxDestinationAddress"])?.ToObject<string?>();
+
+        /// <summary>
+        /// From Globals.PoolUnlockCreditsAddressHeight: why a pool unlock's VfxCreditAddress is refused (missing, not a VFX
+        /// address, or not the address its VfxDestinationAddress names), or null.
+        /// </summary>
+        public static string? PoolUnlockCreditRefusal(Newtonsoft.Json.Linq.JObject data, long height)
+        {
+            if (height < Globals.PoolUnlockCreditsAddressHeight) return null;
+            var credit = data["VfxCreditAddress"]?.Type == Newtonsoft.Json.Linq.JTokenType.String ? (string?)data["VfxCreditAddress"] : null;
+            if (!IsVfxAddress(credit)) return "A bridge pool unlock credits VfxCreditAddress, which must be a VFX address.";
+            var named = ResolveVfxDestination(data["VfxDestinationAddress"]?.Type == Newtonsoft.Json.Linq.JTokenType.String ? (string?)data["VfxDestinationAddress"] : null);
+            if (!string.Equals(credit, named, StringComparison.Ordinal))
+                return "A bridge pool unlock's VfxCreditAddress is not the address its VfxDestinationAddress names.";
+            return null;
+        }
+
         /// <summary>
         /// A pool unlock must be submitted by a committee caster (the handler), pay a canonical,
         /// well-formed VFX address (no stray whitespace: apply credits the raw string, so a padded

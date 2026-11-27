@@ -512,7 +512,7 @@ namespace VerifiedXCore.P2P
 
                     if (Globals.Nodes.TryGetValue(IPAddress, out var currentNode))
                     {
-                        currentNode.Connection = hubConnection;
+                        _ = currentNode.ReplaceConnection(hubConnection);
                         currentNode.NodeIP = IPAddress;
                         currentNode.NodeHeight = node.NodeHeight;
                         currentNode.NodeLastChecked = node.NodeLastChecked;

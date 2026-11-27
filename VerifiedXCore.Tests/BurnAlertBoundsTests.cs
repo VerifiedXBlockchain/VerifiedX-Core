@@ -75,7 +75,7 @@ namespace VerifiedXCore.Tests
         /// <summary>A fresh alert the caster signed, for a burn that is not on Base.</summary>
         private BurnAlert Alert((PrivateKey Key, string Pub, string Address) caster, int n, string? lockId = null, string? burner = null)
         {
-            var hash = $"0x{_run}{n:x8}";
+            var hash = $"0x{_run}{new string('0', 24)}{n:x8}";
             var timestamp = TimeUtil.GetTime();
             const string destination = "xDestinationAddressForTheUnlock000";
             var message = BridgeCasterConsensus.BuildAlertMessage(hash, "POOL_EXIT", 100_000, destination, caster.Address, timestamp);

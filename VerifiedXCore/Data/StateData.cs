@@ -4128,7 +4128,9 @@ namespace VerifiedXCore.Data
                 var jobj = JObject.Parse(tx.Data);
                 var totalAmount = jobj["TotalAmount"]?.ToObject<decimal?>();
                 var totalAmountSats = jobj["TotalAmountSats"]?.ToObject<long?>();
-                var vfxDestinationAddress = jobj["VfxDestinationAddress"]?.ToObject<string?>();
+                // The address credited: from Globals.PoolUnlockCreditsAddressHeight the VfxCreditAddress resolved when the
+                // unlock was built, before it the burn's destination as written.
+                var vfxDestinationAddress = VerifiedXCore.Bitcoin.Services.BridgeTxRules.PoolUnlockCredited(jobj, tx.Height);
                 var exitBurnTxHash = jobj["ExitBurnTxHash"]?.ToObject<string?>();
                 var allocationsToken = jobj["Allocations"];
 
@@ -4137,6 +4139,13 @@ namespace VerifiedXCore.Data
                     allocationsToken == null)
                 {
                     ErrorLogUtility.LogError("ApplyVBTCBridgePoolUnlock: missing required fields", "StateData.ApplyVBTCBridgePoolUnlock()");
+                    return;
+                }
+
+                // From Globals.BridgeAllocationsArrayHeight the allocations are read only as a JSON array (as they were judged).
+                if (tx.Height >= Globals.BridgeAllocationsArrayHeight && allocationsToken is not JArray)
+                {
+                    ErrorLogUtility.LogError("ApplyVBTCBridgePoolUnlock: allocations are not an array", "StateData.ApplyVBTCBridgePoolUnlock()");
                     return;
                 }
 
@@ -4222,6 +4231,24 @@ namespace VerifiedXCore.Data
             }
         }
 
+        /// <summary>
+        /// Why an exit's allocations cannot all be drawn from the locks as they stand (a lock missing, fully unlocked, or
+        /// asked in all for more than it holds, its parts counted together under the lock's trimmed, any-case id), or null.
+        /// </summary>
+        internal static string? UndrawableExitPart(List<PoolUnlockAllocation> allocations)
+        {
+            foreach (var group in allocations.GroupBy(a => VerifiedXCore.Bitcoin.Services.BridgeIntraBlockGuard.NormalizeLockId(a?.LockId), StringComparer.Ordinal))
+            {
+                var rec = VBTCBridgeLockState.GetByLockId(group.First()?.LockId ?? "");
+                if (rec == null || rec.IsUnlocked) return $"lock {group.Key} not found or already fully unlocked";
+                var amount = group.Sum(a => a?.UnlockAmount ?? 0M);
+                var sats = group.Sum(a => (long)((a?.UnlockAmount ?? 0M) * 100_000_000M));
+                if (amount > rec.RemainingAmount || sats > rec.RemainingAmountSats)
+                    return $"lock {rec.LockId} holds {rec.RemainingAmount}, the exit asks it for {amount}";
+            }
+            return null;
+        }
+
         private static void ApplyVBTCBridgeExitToBTC(Transaction tx)
         {
             try
@@ -4279,6 +4306,14 @@ namespace VerifiedXCore.Data
                     return;
                 }
 
+                // From Globals.BridgeAllocationsArrayHeight the allocations are read only as a JSON array (as they were judged).
+                var allocationsArrayRule = tx.Height >= Globals.BridgeAllocationsArrayHeight;
+                if (allocationsArrayRule && allocationsToken is not JArray)
+                {
+                    ErrorLogUtility.LogError("ApplyVBTCBridgeExitToBTC: allocations are not an array; nothing drawn or recorded", "StateData.ApplyVBTCBridgeExitToBTC()");
+                    return;
+                }
+
                 var allocations = allocationsToken.ToObject<List<PoolUnlockAllocation>>();
                 if (allocations == null || allocations.Count == 0)
                 {
@@ -4291,6 +4326,14 @@ namespace VerifiedXCore.Data
                 if (Math.Abs(allocSum - totalAmount.Value) > 0.00000001M)
                 {
                     ErrorLogUtility.LogError($"ApplyVBTCBridgeExitToBTC: allocation sum {allocSum} != totalAmount {totalAmount.Value}", "StateData.ApplyVBTCBridgeExitToBTC()");
+                    return;
+                }
+
+                // From Globals.BridgeAllocationsArrayHeight every part is drawn or none is (checked before anything is changed): an exit recorded with a part it
+                // could not draw had that part fixed for payment, and on expiry gave its lock back without having taken it.
+                if (allocationsArrayRule && UndrawableExitPart(allocations) is { } undrawable)
+                {
+                    ErrorLogUtility.LogError($"ApplyVBTCBridgeExitToBTC: {undrawable}; nothing drawn or recorded (tx {tx.Hash})", "StateData.ApplyVBTCBridgeExitToBTC()");
                     return;
                 }
 

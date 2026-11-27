@@ -229,7 +229,17 @@ namespace VerifiedXCore.Bitcoin.Services
                 return signatures;
             }
 
-            var client = Globals.HttpClientFactory?.CreateClient() ?? new HttpClient(VerifiedXCore.Utilities.NodeHttp.NewHandler()) { Timeout = TimeSpan.FromSeconds(30) };
+            var body = JsonConvert.SerializeObject(new MintAttestationRequest
+            {
+                LockId = record.LockId,
+                EvmDestination = record.EvmDestination,
+                AmountSats = record.AmountSats,
+                Nonce = nonce,
+                ChainId = chainId,
+                ContractAddress = contractAddress,
+                SmartContractUID = record.SmartContractUID,
+                MessageVersion = view.MessageVersion
+            });
 
             // Retry up to 3 rounds with delay between rounds
             for (int attempt = 0; attempt < 3 && !Enough(view, requiredSigs, signatures.Keys); attempt++)
@@ -242,51 +252,7 @@ namespace VerifiedXCore.Bitcoin.Services
                     validators = ContractSigners(view);
                 }
 
-                foreach (var v in validators)
-                {
-                    var baseAddress = v.BaseAddress;
-                    if (signatures.ContainsKey(baseAddress)) continue;
-
-                    var url = $"http://{v.IPAddress.Replace("::ffff:", "")}:{Globals.ValAPIPort}/valapi/Validator/SignMintAttestation";
-                    var body = JsonConvert.SerializeObject(new MintAttestationRequest
-                    {
-                        LockId = record.LockId,
-                        EvmDestination = record.EvmDestination,
-                        AmountSats = record.AmountSats,
-                        Nonce = nonce,
-                        ChainId = chainId,
-                        ContractAddress = contractAddress,
-                        SmartContractUID = record.SmartContractUID,
-                        MessageVersion = view.MessageVersion
-                    });
-
-                    try
-                    {
-                        using var content = new StringContent(body, Encoding.UTF8, "application/json");
-                        var resp = await client.PostAsync(url, content);
-                        var txt = await resp.Content.ReadAsStringAsync();
-                        if (!resp.IsSuccessStatusCode) continue;
-                        var jo = Newtonsoft.Json.Linq.JObject.Parse(txt);
-                        if (jo["success"]?.ToObject<bool>() != true) continue;
-                        var sig = jo["signature"]?.ToString();
-                        if (string.IsNullOrEmpty(sig)) continue;
-                        var signer = ValidatorEthKeyService.RecoverSigner(hash, sig, personalMessage: !typed);
-                        if (!string.Equals(signer, baseAddress, StringComparison.OrdinalIgnoreCase))
-                        {
-                            LogUtility.Log($"[UserBridgeMint] Validator {v.VfxAddress} returned a signature the contract would not count as its own for lock {record.LockId}; ignored.", "UserBridgeMintService");
-                            continue;
-                        }
-                        signatures[baseAddress] = sig;
-                        LogUtility.Log($"[UserBridgeMint] Got attestation from {baseAddress} for lock {record.LockId}", "UserBridgeMintService");
-                    }
-                    catch (Exception ex)
-                    {
-                        LogUtility.Log($"[UserBridgeMint] Failed to get attestation from {v.IPAddress}: {ex.Message}", "UserBridgeMintService");
-                    }
-
-                    if (Enough(view, requiredSigs, signatures.Keys))
-                        break;
-                }
+                await AskSignersAsync(validators, body, hash, typed, signatures, signed => Enough(view, requiredSigs, signed), record.LockId);
             }
 
             if (!Enough(view, requiredSigs, signatures.Keys))
@@ -296,6 +262,59 @@ namespace VerifiedXCore.Bitcoin.Services
                 return new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
             }
             return signatures;
+        }
+
+        /// <summary>
+        /// Asks each signer that has not signed yet for its signature over a mint, all of them at once, and keeps a
+        /// signature only when it recovers to the signer it was asked of. Ends as soon as <paramref name="enough"/> holds
+        /// for the signers kept (the requests still out are dropped), or when every signer has answered, refused or run
+        /// out of time: one that stays silent, or answers with something long, costs the others nothing. With
+        /// <paramref name="graceAfterEnough"/> the signers still out are given that long to answer after enough have, and
+        /// their signatures are kept too: spare ones cover a signer the contract stops counting before the mint is sent.
+        /// </summary>
+        internal static async Task AskSignersAsync(IEnumerable<ContractSigner> signers, string body, byte[] hash, bool typed,
+            Dictionary<string, string> signatures, Func<IEnumerable<string>, bool> enough, string lockId, TimeSpan graceAfterEnough = default)
+        {
+            using var stop = new CancellationTokenSource();
+            var kept = new object();
+            var enoughAt = false;
+            var asked = signers.Where(v => !signatures.ContainsKey(v.BaseAddress)).ToList();
+            await Task.WhenAll(asked.Select(async v =>
+            {
+                try
+                {
+                    var url = $"http://{v.IPAddress.Replace("::ffff:", "")}:{Globals.ValAPIPort}/valapi/Validator/SignMintAttestation";
+                    var txt = await VerifiedXCore.Utilities.NodeHttp.PostForShortReplyAsync(url, body, stop.Token);
+                    if (txt == null) return;
+                    var jo = Newtonsoft.Json.Linq.JObject.Parse(txt);
+                    if (jo["success"]?.ToObject<bool>() != true) return;
+                    var sig = jo["signature"]?.ToString();
+                    if (string.IsNullOrEmpty(sig)) return;
+                    var signer = ValidatorEthKeyService.RecoverSigner(hash, sig, personalMessage: !typed);
+                    if (!string.Equals(signer, v.BaseAddress, StringComparison.OrdinalIgnoreCase))
+                    {
+                        LogUtility.Log($"[UserBridgeMint] Validator {v.VfxAddress} returned a signature the contract would not count as its own for lock {lockId}; ignored.", "UserBridgeMintService");
+                        return;
+                    }
+                    lock (kept)
+                    {
+                        if (stop.IsCancellationRequested) return; // the collection is over
+                        signatures[v.BaseAddress] = sig;
+                        if (!enoughAt && enough(signatures.Keys))
+                        {
+                            enoughAt = true;
+                            if (graceAfterEnough > TimeSpan.Zero) stop.CancelAfter(graceAfterEnough);
+                            else stop.Cancel();
+                        }
+                    }
+                    LogUtility.Log($"[UserBridgeMint] Got attestation from {v.BaseAddress} for lock {lockId}", "UserBridgeMintService");
+                }
+                catch (OperationCanceledException) when (stop.IsCancellationRequested) { }
+                catch (Exception ex)
+                {
+                    LogUtility.Log($"[UserBridgeMint] Failed to get attestation from {v.IPAddress}: {ex.Message}", "UserBridgeMintService");
+                }
+            }));
         }
 
         /// <summary>How many caster records before the head are searched for a contract caster no longer in the committee.</summary>
