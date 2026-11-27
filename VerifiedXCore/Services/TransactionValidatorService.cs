@@ -5036,6 +5036,10 @@ namespace VerifiedXCore.Services
                 if (rec == null) return (false, $"unknown lock {a.LockId}");
                 if (rec.IsUnlocked) return (false, $"lock {a.LockId} already fully unlocked");
                 if (rec.IsBlacklisted) return (false, $"lock {a.LockId} is blacklisted");
+                // From BridgeAllocationsSignableHeight a lock of a vault whose key cannot sign is not drawn on: an exit part
+                // there is never paid, and vBTC unlocked there can be neither withdrawn nor bridged again.
+                if (height >= Globals.BridgeAllocationsSignableHeight && Bitcoin.Attestation.BtcVaultKeys.CannotSignRefusal(rec.SmartContractUID) is { } cannotSign)
+                    return (false, $"lock {a.LockId}: {cannotSign}");
                 if (!string.IsNullOrEmpty(a.SmartContractUID) && !string.Equals(a.SmartContractUID, rec.SmartContractUID, StringComparison.Ordinal))
                     return (false, $"lock {a.LockId} contract mismatch");
                 if (exact && !string.Equals(a.LockId, rec.LockId, StringComparison.Ordinal))
