@@ -58,7 +58,6 @@ namespace VerifiedXCore.Services
                             options.ListenAnyIP(Globals.ValPort, listenOptions =>
                             {
                                 listenOptions.Protocols = Microsoft.AspNetCore.Server.Kestrel.Core.HttpProtocols.Http1AndHttp2;
-                                listenOptions.UseConnectionLogging();
                             });
                         })
                         .UseStartup<StartupP2PValidator>()
