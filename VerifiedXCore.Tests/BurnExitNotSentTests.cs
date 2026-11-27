@@ -33,6 +33,26 @@ namespace VerifiedXCore.Tests
             Assert.Equal(1, record.FailedRounds);
         }
 
+        /// <summary>
+        /// Through the Bitcoin exit's own failure branch, with the reason the shared sender gives for a mempool conflict: it
+        /// says the transaction conflicts with one "already" waiting, which the branch read as another caster's exit.
+        /// </summary>
+        [Fact]
+        public void A_bitcoin_exit_the_mempool_did_not_take_is_planned_again_not_marked_handled()
+        {
+            var conflict = Record();
+            BurnExitConsensusService.NoteExitNotSent(conflict, $"{TransactionData.MempoolRefusedPrefix} (it conflicts with one already waiting).");
+            Assert.Equal(BurnExitConsensusService.BurnExitStatus.Pending, conflict.Status);
+
+            var duplicate = Record();
+            BurnExitConsensusService.NoteExitNotSent(duplicate, "TX Verify Failed: Exit burn transaction has already been consumed.");
+            Assert.Equal(BurnExitConsensusService.BurnExitStatus.Complete, duplicate.Status);   // another caster's exit, as before
+
+            var failed = Record();
+            BurnExitConsensusService.NoteExitNotSent(failed, "TX Verify Failed: Bridge lock not found.");
+            Assert.Equal(BurnExitConsensusService.BurnExitStatus.Failed, failed.Status);
+        }
+
         [Fact]
         public void A_burn_whose_exit_a_rule_refused_is_left_to_fail()
         {

@@ -395,6 +395,34 @@ namespace VerifiedXCore.Bitcoin.Services
             return true;
         }
 
+        /// <summary>
+        /// What a burn becomes when its EXIT_TO_BTC transaction was not sent. This node's mempool refusing it (it holds an
+        /// exit on the same locks) is judged first: nothing was sent, and the burn is planned again shortly. Its reason says
+        /// the transaction conflicts with one "already" waiting, which the check below read as another caster's exit and
+        /// marked the burn complete, out of every retry. A rule refusing a duplicate (another caster reserved the burn) is
+        /// handled; anything else failed.
+        /// </summary>
+        internal static void NoteExitNotSent(ProcessedBurnRecord record, string? reason)
+        {
+            var err = reason ?? string.Empty;
+            if (NotSentIsRetried(record, err, "EXIT_TO_BTC"))
+                return;
+
+            if (err.IndexOf("Duplicate", StringComparison.OrdinalIgnoreCase) >= 0
+                || err.IndexOf("already", StringComparison.OrdinalIgnoreCase) >= 0)
+            {
+                // Another caster already reserved — safe to treat as handled
+                record.Status = BurnExitStatus.Complete;
+                LogUtility.Log($"[BurnExitConsensus] EXIT_TO_BTC already broadcast for burn {record.BaseBurnTxHash} — treating as handled.",
+                    "BurnExitConsensusService.ExecuteBtcExit()");
+                return;
+            }
+
+            record.Status = BurnExitStatus.Failed;
+            ErrorLogUtility.LogError($"[BurnExitConsensus] VFX EXIT_TO_BTC broadcast failed: {err}. No BTC was sent. Stuck exit will retry.",
+                "BurnExitConsensusService.ExecuteBtcExit()");
+        }
+
         /// <summary>The burns the sweep takes now: pending, and past their retry time.</summary>
         internal static List<ProcessedBurnRecord> DueForARound(IEnumerable<ProcessedBurnRecord> records, long now) =>
             records.Where(r => r.Status == BurnExitStatus.Pending && r.NextAttemptAt <= now).ToList();
@@ -1091,23 +1119,7 @@ namespace VerifiedXCore.Bitcoin.Services
 
                 if (!exitResult.Success)
                 {
-                    var err = exitResult.TxHashOrError ?? string.Empty;
-                    if (err.IndexOf("Duplicate", StringComparison.OrdinalIgnoreCase) >= 0
-                        || err.IndexOf("already", StringComparison.OrdinalIgnoreCase) >= 0)
-                    {
-                        // Another caster already reserved — safe to treat as handled
-                        record.Status = BurnExitStatus.Complete;
-                        LogUtility.Log($"[BurnExitConsensus] EXIT_TO_BTC already broadcast for burn {record.BaseBurnTxHash} — treating as handled.",
-                            "BurnExitConsensusService.ExecuteBtcExit()");
-                        return;
-                    }
-
-                    if (NotSentIsRetried(record, err, "EXIT_TO_BTC"))
-                        return;
-
-                    record.Status = BurnExitStatus.Failed;
-                    ErrorLogUtility.LogError($"[BurnExitConsensus] VFX EXIT_TO_BTC broadcast failed: {err}. No BTC was sent. Stuck exit will retry.",
-                        "BurnExitConsensusService.ExecuteBtcExit()");
+                    NoteExitNotSent(record, exitResult.TxHashOrError);
                     return;
                 }
 
