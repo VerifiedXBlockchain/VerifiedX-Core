@@ -157,9 +157,10 @@ namespace VerifiedXCore.Bitcoin.Services
             {
                 var attested = Attestation.BtcAttestStore.Withdrawal(Attestation.BtcWithdrawals.RefOf(r.TransactionHash, scUID));
                 // A released withdrawal is refunded its amount less the Bitcoin fee of its release (round 18: the full
-                // amount was shown, and a wallet reconciling from this list would credit the fee too).
+                // amount was shown, and a wallet reconciling from this list would credit the fee too). The transaction that
+                // closed it is a release, or its own payment to an address that became the vault's; either way its fee.
                 var releaseFee = attested?.State == Attestation.VaultWithdrawalState.Released
-                    ? Math.Min(Math.Max(attested.Pins.FirstOrDefault(p => p.IsRelease && p.Txid == attested.SettledTxid)?.FeeSats ?? 0, 0), attested.AmountSats) : 0;
+                    ? Math.Min(Math.Max(attested.Pins.FirstOrDefault(p => p.Txid == attested.SettledTxid)?.FeeSats ?? 0, 0), attested.AmountSats) : 0;
                 return (object)new
                 {
                     RequestHash = r.TransactionHash,

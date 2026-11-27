@@ -37,7 +37,7 @@ namespace VerifiedXCore.Bitcoin.Attestation
             foreach (var output in outputs)
             {
                 if (!string.Equals(output.ScriptHex, row.DestinationScriptHex, StringComparison.OrdinalIgnoreCase) || output.Sats < BtcCanonicalWithdrawal.DustSats) continue;
-                if (PaysOwnVault(row, output, vfxHeight, db)) continue;
+                if (PaysOwnVault(row, output.ScriptHex, vfxHeight, db)) continue;
                 var amount = output.Sats + feeSats;
                 if (amount <= row.AmountSats && amount >= PayableSats(row) - BtcCanonicalWithdrawal.DustSats) return output;
             }
@@ -45,15 +45,16 @@ namespace VerifiedXCore.Bitcoin.Attestation
         }
 
         /// <summary>
-        /// Whether an output pays a script of the row's own vault, under any key the vault has had: the Bitcoin stays in the
-        /// vault, so it pays nobody. From <see cref="Globals.WithdrawalOwnScriptAttributionHeight"/> such an output is never
-        /// the row's payment. A re-key can make a withdrawal's destination the vault's own after it was mined, and every
-        /// release and sweep pays the vault's current key: matched by script, one of them settled that withdrawal while
-        /// nothing reached its requester. False below the height.
+        /// Whether a script is one of the row's own vault, under any key the vault has had: an output to it leaves the
+        /// Bitcoin in the vault, so it pays nobody. From <see cref="Globals.WithdrawalOwnScriptAttributionHeight"/> such an
+        /// output is never the row's payment, neither attributed to it (<see cref="PaidOutput"/>) nor, when it is the row's
+        /// own fixed transaction, settling it (<see cref="Settle"/>). A re-key can make a withdrawal's destination the vault's
+        /// own after it was mined or fixed, and every release and sweep pays the vault's current key: matched by script,
+        /// one of them settled that withdrawal while nothing reached its requester. False below the height.
         /// </summary>
-        private static bool PaysOwnVault(VaultWithdrawalRow row, BtcTxOutput output, long vfxHeight, LiteDatabase? db) =>
-            vfxHeight >= Globals.WithdrawalOwnScriptAttributionHeight
-            && BtcAttestStore.ScriptRowsForVault(row.SmartContractUID, db).Any(k => string.Equals(k.ScriptHex, output.ScriptHex, StringComparison.OrdinalIgnoreCase));
+        private static bool PaysOwnVault(VaultWithdrawalRow row, string? scriptHex, long vfxHeight, LiteDatabase? db) =>
+            vfxHeight >= Globals.WithdrawalOwnScriptAttributionHeight && !string.IsNullOrEmpty(scriptHex)
+            && BtcAttestStore.ScriptRowsForVault(row.SmartContractUID, db).Any(k => string.Equals(k.ScriptHex, scriptHex, StringComparison.OrdinalIgnoreCase));
 
         /// <summary>Whether a transaction already settled a row of the vault: one transaction pays one, whichever of its coins is looked at.</summary>
         private static bool PaidAlready(string vault, string txid, LiteDatabase? db) =>
