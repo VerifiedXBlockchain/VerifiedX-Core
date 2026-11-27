@@ -127,6 +127,36 @@ namespace VerifiedXCore.Tests
         }
 
         [Fact]
+        public async Task AnAlert_IsKeptWithTheAmountAndDestinationItsSenderSigned()
+        {
+            // The signature is over whole satoshis and the destination without blanks around it.
+            var burn = Burn(3);
+            var alert = Alert(_caster, burn, BurnExitType.BtcExit, "BTC_EXIT");
+            alert.Amount = 0.0010000099M;
+            alert.BtcDestination = "  " + BtcDestination + " ";
+            await HandleBurnAlert(alert);
+
+            var kept = ProcessedBurnForTests(burn);
+            Assert.NotNull(kept);
+            Assert.Equal(0.001M, kept!.Amount);
+            Assert.Equal(BtcDestination, kept.BtcDestination);
+        }
+
+        [Theory]
+        [InlineData("-1")]
+        [InlineData("21000000.00000001")]
+        [InlineData("79228162514264337593543950335")]
+        public async Task AnAlertNamingAnAmountNoBurnCanHave_IsNotKept(string amount)
+        {
+            var burn = Burn(4);
+            var alert = Alert(_caster, burn, BurnExitType.BtcExit, "BTC_EXIT");
+            alert.Amount = decimal.Parse(amount, System.Globalization.CultureInfo.InvariantCulture);
+            await HandleBurnAlert(alert); // and does not throw
+
+            Assert.Null(ProcessedBurnForTests(burn));
+        }
+
+        [Fact]
         public async Task AnAlertCarryingOneTypeAndSignedForTheOther_IsNotKept()
         {
             var burn = Burn(1);

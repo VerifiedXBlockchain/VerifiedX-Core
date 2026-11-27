@@ -153,42 +153,61 @@ namespace VerifiedXCore.Tests
         }
 
         [Fact]
-        public async Task AlertsHoldABoundedNumberOfOneTransactionsBurns_AndAnotherTransactionIsStillTaken()
+        public async Task OneCastersAlerts_HoldABoundedNumberOfOneTransactionsBurns_AndDoNotHoldBackAnotherCasterOrTransaction()
         {
             for (var position = 0; position < 3 * MaxUnverifiedAlertsPerTransaction; position++)
-                await HandleBurnAlert(Alert(position % 2 == 0 ? _caster : _otherCaster, $"{Hash(6)}:{position}"));
+                await HandleBurnAlert(Alert(_caster, $"{Hash(6)}:{position}"));
             Assert.Equal(MaxUnverifiedAlertsPerTransaction, KeptOfThisRun().Count);
 
-            // A burn of it found on Base no longer counts, and another transaction is not held back.
-            KeptOfThisRun()[0].FoundOnBase = true;
-            await HandleBurnAlert(Alert(_caster, $"{Hash(6)}:900"));
+            // Another caster's alert for a burn of that transaction is taken, and so is this caster's for another transaction.
+            await HandleBurnAlert(Alert(_otherCaster, $"{Hash(6)}:900"));
             await HandleBurnAlert(Alert(_caster, Hash(7)));
-            Assert.NotNull(ProcessedBurnForTests($"{Hash(6)}:900"));
+            Assert.Equal(_otherCaster.Address, ProcessedBurnForTests($"{Hash(6)}:900")?.AlertedBy);
             Assert.NotNull(ProcessedBurnForTests(Hash(7)));
+
+            // A burn of it found on Base no longer counts against the caster.
+            KeptOfThisRun().First(r => r.AlertedBy == _caster.Address && r.BaseBurnTxHash.StartsWith(Hash(6))).FoundOnBase = true;
+            await HandleBurnAlert(Alert(_caster, $"{Hash(6)}:901"));
+            Assert.NotNull(ProcessedBurnForTests($"{Hash(6)}:901"));
         }
 
         [Fact]
-        public async Task APendingBurnTheChainHasRedeemed_IsDropped_AndOthersKeepTheirRound()
+        public async Task APendingBurnWhoseRedemptionTheChainCompleted_IsDropped_AndOthersKeepTheirRound()
         {
             var redeemed = Hash(8);
             var open = Hash(9);
             var started = Hash(10);
-            foreach (var burn in new[] { redeemed, open, started })
+            var inARound = Hash(11);
+            foreach (var burn in new[] { redeemed, open, started, inARound })
                 await HandleBurnAlert(Alert(_caster, burn));
             ProcessedBurnForTests(started)!.CompletionVfxTxHash = "sent-by-this-node"; // this node's own exit for it is under way
-            Assert.True(VerifiedXCore.Bitcoin.Models.VBTCBridgeConsumedBurn.TryMarkConsumed(redeemed, "POOL_UNLOCK", "vfx-tx", 100));
-            Assert.True(VerifiedXCore.Bitcoin.Models.VBTCBridgeConsumedBurn.TryMarkConsumed(started, "POOL_UNLOCK", "vfx-tx-2", 100));
+            ProcessedBurnForTests(inARound)!.Status = BurnExitStatus.InConsensus;
+            foreach (var burn in new[] { redeemed, started, inARound })
+                Assert.True(VerifiedXCore.Bitcoin.Models.VBTCBridgeConsumedBurn.TryMarkConsumed(burn, "POOL_UNLOCK", "vfx-tx-" + burn[^2..], 100));
 
             var sweep = WithoutRedeemed(KeptOfThisRun());
 
-            Assert.Equal(new[] { open, started }.OrderBy(h => h), sweep.Select(r => r.BaseBurnTxHash).OrderBy(h => h));
+            Assert.Equal(new[] { open, started, inARound }.OrderBy(h => h), sweep.Select(r => r.BaseBurnTxHash).OrderBy(h => h));
             Assert.Null(ProcessedBurnForTests(redeemed));
-            Assert.NotNull(ProcessedBurnForTests(open));
-            Assert.NotNull(ProcessedBurnForTests(started));
+            Assert.All(new[] { open, started, inARound }, burn => Assert.NotNull(ProcessedBurnForTests(burn)));
 
             // And once redeemed, no spelling of it is taken again.
             await HandleBurnAlert(Alert(_otherCaster, redeemed + "  "));
             Assert.Null(ProcessedBurnForTests(redeemed));
+        }
+
+        [Fact]
+        public async Task APendingBurnWhoseExitTheChainStillHoldsOpen_IsKept()
+        {
+            // The exit another caster sent is on chain and not yet paid: it can still fail and need this caster's vote again.
+            var burn = Hash(12);
+            await HandleBurnAlert(Alert(_caster, burn));
+            VerifiedXCore.Bitcoin.Models.VBTCBridgeBtcExitState.GetCollection().Insert(new VerifiedXCore.Bitcoin.Models.VBTCBridgeBtcExitState { BaseBurnTxHash = burn, ExitTxHash = "exit-tx" });
+            Assert.True(VerifiedXCore.Bitcoin.Models.VBTCBridgeConsumedBurn.IsBurnUsedAnywhere(burn));
+
+            var sweep = WithoutRedeemed(KeptOfThisRun());
+
+            Assert.Same(ProcessedBurnForTests(burn), Assert.Single(sweep));
         }
 
         [Theory]
