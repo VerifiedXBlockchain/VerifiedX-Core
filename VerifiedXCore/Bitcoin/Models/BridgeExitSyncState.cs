@@ -14,6 +14,13 @@ namespace VerifiedXCore.Bitcoin.Models
         /// <summary>Last Base block number fully scanned for ExitBurned logs.</summary>
         public long LastScannedBlock { get; set; }
 
+        /// <summary>
+        /// Burns this node read on Base and handed to the casters' consensus that the chain has not yet redeemed, each with
+        /// the Base block it was read in. A caster holds a burn's work only in memory; after a restart it reads Base again
+        /// from the oldest of these, however far behind the cursor that is (BaseBridgeExitWatchService.ConsumeRewind).
+        /// </summary>
+        public List<OpenBridgeBurn> OpenBurns { get; set; } = new();
+
         private const string CollectionName = "rsrv_bridge_exit_sync";
 
         public static BridgeExitSyncState GetOrCreate()
@@ -31,5 +38,12 @@ namespace VerifiedXCore.Bitcoin.Models
             var col = DbContext.DB_vBTC.GetCollection<BridgeExitSyncState>(CollectionName);
             col.Upsert(state);
         }
+    }
+
+    /// <summary>A burn handed to the casters' consensus and not yet redeemed on the chain (BridgeExitSyncState.OpenBurns).</summary>
+    public class OpenBridgeBurn
+    {
+        public string BurnId { get; set; } = "";
+        public long BaseBlock { get; set; }
     }
 }

@@ -37,8 +37,21 @@ namespace VerifiedXCore.Bitcoin.Services
         /// <summary>Reads at most this many spans in one poll while the cursor is behind Base, one after another.</summary>
         internal const int CatchUpReadsPerPoll = 50;
 
-        /// <summary>Base blocks read again after a restart: about two hours (round 23).</summary>
-        internal const long RestartRewindBlocks = 3_600;
+        /// <summary>
+        /// Base blocks read again after a restart, besides every burn still open (<see cref="BridgeExitSyncState.OpenBurns"/>):
+        /// about two hours at Base's 200 ms blocks (round 23 sized it at 2 s blocks, which Base left in November 2026).
+        /// </summary>
+        internal const long RestartRewindBlocks = 36_000;
+
+        /// <summary>The most open burns kept for a restart to read again; one past it is left to <see cref="RestartRewindBlocks"/>.</summary>
+        internal const int MaxOpenBurns = 1_000;
+
+        /// <summary>An open burn older than this (one day of Base blocks at 200 ms) is no longer read again after a restart.</summary>
+        internal const long MaxOpenBurnAgeBlocks = 432_000;
+
+        /// <summary>How often the open burns are checked against the chain while polling (a restart checks them at once).</summary>
+        internal const long OpenBurnPruneSeconds = 600;
+        private static long _openBurnsPrunedAt;
         private static bool _started;
         /// <summary>The cursor when this node last was not handling burns (at start, or when it stopped being a synced caster); null while it handles them.</summary>
         private static long? _cursorWhenNotHandling;
@@ -214,12 +227,39 @@ namespace VerifiedXCore.Bitcoin.Services
             }
             if (_cursorWhenNotHandling is not { } since) return;
             _cursorWhenNotHandling = null;
-            var back = Math.Max(0, Math.Min(since, state.LastScannedBlock) - RestartRewindBlocks);
+            PruneOpenBurns(state, state.LastScannedBlock); // what the chain redeemed since they were saved is not read again
+            // The last stretch, and back to the oldest burn this node handed on that the chain has not redeemed: its work
+            // was in memory only, and the stretch alone missed it once it was older.
+            var oldestOpen = state.OpenBurns.Count > 0 ? state.OpenBurns.Min(b => b.BaseBlock) - 1 : long.MaxValue;
+            var back = Math.Max(0, Math.Min(Math.Min(since, state.LastScannedBlock) - RestartRewindBlocks, oldestOpen));
             if (back >= state.LastScannedBlock) return;
             LogUtility.Log($"[BaseBridgeExit] Now handling burns: reading Base again from block {back + 1} (cursor was {state.LastScannedBlock}).",
                 "BaseBridgeExitWatchService.PollOnceInternal");
             state.LastScannedBlock = back;
             BridgeExitSyncState.Save(state);
+        }
+
+        /// <summary>Records a burn this node handed to the casters' consensus, read in Base block <paramref name="baseBlock"/>.</summary>
+        internal static void NoteOpenBurn(BridgeExitSyncState state, string burnId, long baseBlock)
+        {
+            if (string.IsNullOrEmpty(burnId) || state.OpenBurns.Count >= MaxOpenBurns) return;
+            if (state.OpenBurns.Any(b => string.Equals(b.BurnId, burnId, StringComparison.Ordinal)) || Redeemed(burnId)) return;
+            state.OpenBurns.Add(new OpenBridgeBurn { BurnId = burnId, BaseBlock = baseBlock });
+        }
+
+        /// <summary>
+        /// Drops the open burns the chain has redeemed (a pool unlock, or an exit that has not failed: a failed one may be
+        /// exited again) and those older than <see cref="MaxOpenBurnAgeBlocks"/> behind Base block <paramref name="latest"/>.
+        /// </summary>
+        internal static void PruneOpenBurns(BridgeExitSyncState state, long latest)
+        {
+            state.OpenBurns.RemoveAll(b => latest - b.BaseBlock > MaxOpenBurnAgeBlocks || Redeemed(b.BurnId));
+        }
+
+        private static bool Redeemed(string burnId)
+        {
+            try { return VBTCBridgeConsumedBurn.IsBurnUsedAnywhere(burnId); }
+            catch { return false; } // kept: read again rather than lost
         }
 
         /// <summary>Base blocks (about ten minutes) read again once when the path-audit rules begin; see <see cref="ConsumeRulesFlip"/>.</summary>
@@ -253,6 +293,7 @@ namespace VerifiedXCore.Bitcoin.Services
             _started = false;
             _cursorWhenNotHandling = null;
             _positionedSeen = null;
+            _openBurnsPrunedAt = 0;
         }
 
         /// <summary>A burn log's place: its transaction and its index (logs of one transaction share a block).</summary>
@@ -315,6 +356,13 @@ namespace VerifiedXCore.Bitcoin.Services
             // caster, and a first poll read the whole stretch then, handed nothing on and moved past it (round 24). The
             // stretch is counted from where the cursor stood when the node last did not handle burns, so burns passed
             // over while it was not a caster (at start, or after losing its place) are read again too.
+            // Each open burn costs a look-up of the exits: pruned every few minutes, not on every range read.
+            var pruneNow = TimeUtil.GetTime();
+            if (pruneNow - _openBurnsPrunedAt >= OpenBurnPruneSeconds)
+            {
+                PruneOpenBurns(state, latest);
+                _openBurnsPrunedAt = pruneNow;
+            }
             ConsumeRewind(state, Globals.IsBlockCaster && Globals.IsChainSynced);
             ConsumeRulesFlip(state);
 
@@ -376,6 +424,9 @@ namespace VerifiedXCore.Bitcoin.Services
                         if (string.IsNullOrEmpty(log.TransactionHash)) continue;
                         var txHash = burnIds[BurnLogKey(log)]; // the burn's id: its transaction's hash, with its position when that holds several
 
+                        // Kept for a restart until the chain redeems it, also when this read repeats one whose state was not saved.
+                        if (Globals.IsBlockCaster) NoteOpenBurn(state, txHash, (long)(log.BlockNumber?.Value ?? 0));
+
                         if (BurnExitConsensusService.IsAlreadyProcessed(txHash, BurnExitConsensusService.BurnExitType.VfxPoolUnlock, (decimal)amount / 100_000_000M, burner, "", vfxDest))
                             continue;
 
@@ -424,6 +475,9 @@ namespace VerifiedXCore.Bitcoin.Services
 
                     if (string.IsNullOrEmpty(log.TransactionHash)) continue;
                     var txHash = burnIds[BurnLogKey(log)]; // the burn's id: its transaction's hash, with its position when that holds several
+
+                    // Kept for a restart until the chain redeems it, also when this read repeats one whose state was not saved.
+                    if (Globals.IsBlockCaster) NoteOpenBurn(state, txHash, (long)(log.BlockNumber?.Value ?? 0));
 
                     if (BurnExitConsensusService.IsAlreadyProcessed(txHash, BurnExitConsensusService.BurnExitType.BtcExit, (decimal)amount / 100_000_000M, burner, btcDest, ""))
                         continue;
