@@ -428,12 +428,22 @@ namespace VerifiedXCore.Bitcoin.Services
         /// </summary>
         internal static bool NotSentIsRetried(ProcessedBurnRecord record, string? reason, string what)
         {
-            if (!TransactionData.IsMempoolRefusal(reason)) return false;
+            // Base not answering when the transaction's burn was looked up again is no verdict on the burn either: asked
+            // again later, as the look-up before the round is.
+            if (!TransactionData.IsMempoolRefusal(reason) && !BaseCouldNotBeRead(reason)) return false;
             var wait = NoteShortRound(record, TimeUtil.GetTime());
             LogUtility.Log($"[BurnExitConsensus] {what} for burn {record.BaseBurnTxHash} not sent ({reason}); planned again in {wait} s.",
                 "BurnExitConsensusService");
             return true;
         }
+
+        /// <summary>
+        /// Whether a reason says Base could not be read (no provider answered, or none had the receipt yet), as distinct
+        /// from Base answering that the transaction is not the burn. The reasons BaseBridgeService gives for the first.
+        /// </summary>
+        internal static bool BaseCouldNotBeRead(string? reason) =>
+            reason != null && (reason.IndexOf("Could not read", StringComparison.OrdinalIgnoreCase) >= 0
+                               || reason.IndexOf("receipt not found", StringComparison.OrdinalIgnoreCase) >= 0);
 
         /// <summary>
         /// What a burn becomes when its EXIT_TO_BTC transaction was not sent. This node's mempool refusing it (it holds an
