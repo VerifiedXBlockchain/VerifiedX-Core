@@ -563,9 +563,8 @@ namespace VerifiedXCore.Nodes
                 var proof = JsonConvert.DeserializeObject<Proof>(data);
                 if (proof != null)
                 {
-                    // VX-05: ingress validation.
-                    if (ProofUtility.ValidateIncomingProofForNextRound(proof, out _))
-                        Globals.Proofs.Add(proof);
+                    // VX-05: ingress validation; kept on a caster only.
+                    ProofUtility.KeepIncomingProof(proof);
                 }
             }
             catch (Exception ex)

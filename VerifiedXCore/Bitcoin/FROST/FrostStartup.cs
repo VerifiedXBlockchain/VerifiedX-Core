@@ -3195,7 +3195,7 @@ namespace VerifiedXCore.Bitcoin.FROST
                                 && !session.WithdrawalRequestHash.StartsWith(FrostSigningAuthorization.BtcExitPrefix, StringComparison.OrdinalIgnoreCase)
                                 && !VerifiedXCore.Bitcoin.Attestation.BtcWithdrawals.IsSweepReference(session.WithdrawalRequestHash)
                                 && VerifiedXCore.Bitcoin.Models.VBTCWithdrawalCancellation.HasPendingCancellationOrUnreadable(
-                                    session.WithdrawalRequestHash, TimeUtil.GetTime(), session.SmartContractUID))
+                                    session.WithdrawalRequestHash, TimeUtil.GetTime(), FrostSigningAuthorization.VaultOf(session.SmartContractUID ?? "")))
                             {
                                 LogUtility.Log($"[FROST] Sign Round 2 REFUSED for session {sessionId}: a cancellation of withdrawal {session.WithdrawalRequestHash} is being voted on.", "FrostStartup.SignRound2");
                                 context.Response.StatusCode = StatusCodes.Status409Conflict;

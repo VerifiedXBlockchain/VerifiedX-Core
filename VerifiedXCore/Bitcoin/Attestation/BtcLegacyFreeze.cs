@@ -57,8 +57,19 @@ namespace VerifiedXCore.Bitcoin.Attestation
                     return $"Bridge exit failure transactions are no longer accepted (from block {Globals.BitcoinAttestationHeight}).";
             }
 
+            // Each vault is judged once, however often the transaction names it: judging one reads its state document,
+            // which holds its whole ledger. The first vault found frozen, in the order named, is the one refused, as before.
+            var judged = new Dictionary<string, bool>(StringComparer.Ordinal);
+            bool IsLegacy(string? scUID)
+            {
+                if (string.IsNullOrEmpty(scUID)) return false;
+                if (!judged.TryGetValue(scUID, out var legacy))
+                    judged[scUID] = legacy = IsLegacyVault(scUID);
+                return legacy;
+            }
+
             foreach (var (key, _) in SameBlockDebitGuard.GetDebits(tx, height))
-                if (key.Kind == SameBlockDebitGuard.LedgerKind.VbtcV2 && IsLegacyVault(key.ContractUid))
+                if (key.Kind == SameBlockDebitGuard.LedgerKind.VbtcV2 && IsLegacy(key.ContractUid))
                     return Frozen(key.ContractUid);
 
             // Neither an exit to Bitcoin nor an unlock back to VFX may draw on the locks of a frozen vault. The vault
@@ -77,7 +88,7 @@ namespace VerifiedXCore.Bitcoin.Attestation
                         .Append(VerifiedXCore.Bitcoin.Models.VBTCBridgeLockState.GetByLockId(data["LockId"]?.ToObject<string?>() ?? "")?.SmartContractUID)
                         .Append(data["ContractUID"]?.ToObject<string?>());
                     foreach (var vault in vaults)
-                        if (IsLegacyVault(vault)) return Frozen(vault!);
+                        if (IsLegacy(vault)) return Frozen(vault!);
                 }
                 // What the transaction says that cannot be read is no vault here; a fault of this node's disk while a
                 // vault is decompiled is passed on (VBTCService.DecompileFaultIsNodeLocal), not read as "not frozen".
@@ -88,7 +99,7 @@ namespace VerifiedXCore.Bitcoin.Attestation
             {
                 string? scUID = null;
                 try { scUID = JObject.Parse(tx.Data)["ContractUID"]?.ToObject<string?>(); } catch { }
-                if (IsLegacyVault(scUID)) return Frozen(scUID!);
+                if (IsLegacy(scUID)) return Frozen(scUID!);
             }
             return null;
         }

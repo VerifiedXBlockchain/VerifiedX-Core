@@ -58,6 +58,30 @@ namespace VerifiedXCore.Services
             var k = Key(height, winnerAddress);
             Entries[k] = (block, TimeUtil.GetTime() + ttlSeconds);
             PruneCraftLocksBehind(Globals.LastBlock.Height);
+            PruneEntriesBehind(Globals.LastBlock.Height);
         }
+
+        /// <summary>Heights behind the committed tip an entry is kept for: a caster still asking for the block just committed is answered.</summary>
+        internal const long KeptBehindTip = 2;
+
+        /// <summary>
+        /// Drops the blocks of heights more than <see cref="KeptBehindTip"/> behind the committed tip, and any past their time.
+        /// An entry's time was looked at only when the same height and winner were asked for again, which never happens once
+        /// the chain has moved on, so a caster kept one whole block for every height it ever served.
+        /// </summary>
+        internal static void PruneEntriesBehind(long committedHeight)
+        {
+            var now = TimeUtil.GetTime();
+            foreach (var entry in Entries.ToList())
+            {
+                var pipe = entry.Key.IndexOf('|');
+                if (pipe <= 0 || !long.TryParse(entry.Key.AsSpan(0, pipe), out var h))
+                    continue;
+                if (h < committedHeight - KeptBehindTip || (h <= committedHeight && now > entry.Value.ExpiryUnix))
+                    Entries.TryRemove(entry.Key, out _);
+            }
+        }
+
+        internal static int EntryCount => Entries.Count;
     }
 }

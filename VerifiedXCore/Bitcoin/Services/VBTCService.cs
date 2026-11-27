@@ -1002,6 +1002,8 @@ namespace VerifiedXCore.Bitcoin.Services
         internal const int MaxRememberedOutflowData = 4096;
 
         internal static bool RemembersOutflowsOf(string data) => _outflowsByData.ContainsKey(data);
+        /// <summary>Transaction bodies whose outflows are remembered now (the memory log).</summary>
+        internal static int OutflowsRemembered => _outflowsByData.Count + _strictOutflowsByData.Count;
 
         /// <summary>
         /// A vBTC transfer's outflows, read from its data (a pure function of it, remembered by the data's text: bounded,

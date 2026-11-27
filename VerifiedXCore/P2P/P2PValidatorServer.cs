@@ -1383,8 +1383,8 @@ namespace VerifiedXCore.P2P
                     // VX-05: ingress validation.
                     if (ProofUtility.ValidateIncomingProofForNextRound(proof, out _))
                     {
-                        Globals.Proofs.Add(proof);
-                        
+                        ProofUtility.KeepValidatedProof(proof); // on a caster only: nothing else reads or clears them
+
                         if (Globals.OptionalLogging)
                         {
                             LogUtility.Log($"Successfully processed winning proof vote from {peerIP}", "SendWinningProofVote");

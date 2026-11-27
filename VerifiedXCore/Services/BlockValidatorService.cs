@@ -582,25 +582,35 @@ namespace VerifiedXCore.Services
             }
         }
 
-        /// <summary>Blocks this node refused because a transaction in them failed validation: hash → height. Recent heights only.</summary>
-        private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, long> _refusedForATransaction = new(StringComparer.Ordinal);
-        private const long RefusedForATransactionKeptBlocks = 100;
+        /// <summary>
+        /// Blocks this node refused for a fault in their own contents (a transaction, the reward, the VRF proof, the version,
+        /// a cap): hash → height. Recent heights only. A copy whose transactions do not match the merkle root it carries is
+        /// not one: the producer signs the root, not the transactions, so anyone passing the block on can make such a copy.
+        /// </summary>
+        private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, long> _refusedForItsContents = new(StringComparer.Ordinal);
+        private const long RefusedForItsContentsKeptBlocks = 100;
 
-        private static void NoteRefusedForATransaction(long height, string? hash)
+        /// <summary>
+        /// Notes a refusal for a fault in the block's own contents. Called only after its producer's signature over its hash
+        /// has been checked, and counted only for a block on this node's tip: judged against another predecessor (a check
+        /// that runs before the previous hash is compared), the refusal says nothing about the block.
+        /// </summary>
+        private static void NoteRefusedForItsContents(Block block)
         {
-            if (string.IsNullOrEmpty(hash)) return;
-            _refusedForATransaction[hash] = height;
-            foreach (var stale in _refusedForATransaction.Where(kv => kv.Value < height - RefusedForATransactionKeptBlocks).Select(kv => kv.Key).ToList())
-                _refusedForATransaction.TryRemove(stale, out _);
+            if (block.Height == 0 || string.IsNullOrEmpty(block.Hash) || block.PrevHash != Globals.LastBlock.Hash) return;
+            _refusedForItsContents[block.Hash] = block.Height;
+            foreach (var stale in _refusedForItsContents.Where(kv => kv.Value < block.Height - RefusedForItsContentsKeptBlocks).Select(kv => kv.Key).ToList())
+                _refusedForItsContents.TryRemove(stale, out _);
         }
 
         /// <summary>
-        /// Whether this node refused the block at <paramref name="height"/> with <paramref name="hash"/> for a transaction in
-        /// it: a fault of the block's contents, which every node holding the same tip finds the same way. Other blocks
-        /// checked meanwhile do not replace the answer.
+        /// Whether this node refused the block at <paramref name="height"/> with <paramref name="hash"/> for a fault in its
+        /// own contents, signed by its producer, which every node holding the same tip finds the same way. A refusal that
+        /// depends on this node (a certificate, a membership record, its tip, its clock, its signer set) is not one. Other
+        /// blocks checked meanwhile do not replace the answer.
         /// </summary>
-        public static bool WasRefusedForATransaction(long height, string? hash) =>
-            !string.IsNullOrEmpty(hash) && _refusedForATransaction.TryGetValue(hash, out var at) && at == height;
+        public static bool WasRefusedForItsContents(long height, string? hash) =>
+            !string.IsNullOrEmpty(hash) && _refusedForItsContents.TryGetValue(hash, out var at) && at == height;
 
         public static async Task<bool> ValidateBlock(Block block, bool ignoreAdjSignatures, bool blockDownloads = false, bool validateOnly = false, bool updateCLI = false, bool skipCasterCheck = false, string? source = null)
         {
@@ -740,6 +750,7 @@ namespace VerifiedXCore.Services
                     // From the VRF height: the producer's VRF proof and the chain's mix (BlockVrf).
                     if (BlockVrf.Refusal(block, BlockVrf.PreviousOf(block)) is { } vrfRefusal)
                     {
+                        NoteRefusedForItsContents(block);
                         DbContext.Rollback("BlockValidatorService.ValidateBlock()-vrf", vrfRefusal);
                         return result;
                     }
@@ -749,6 +760,7 @@ namespace VerifiedXCore.Services
                 //Validates that the block has same chain ref
                 if (block.ChainRefId != BlockchainData.ChainRef)
                 {
+                    NoteRefusedForItsContents(block);
                     DbContext.Rollback("BlockValidatorService.ValidateBlock()-5");
                     return result;//block rejected due to chainref difference
                 }
@@ -757,6 +769,7 @@ namespace VerifiedXCore.Services
 
                 if (block.Version != blockVersion)
                 {
+                    NoteRefusedForItsContents(block);
                     DbContext.Rollback("BlockValidatorService.ValidateBlock()-6");
                     return result;
                 }
@@ -767,6 +780,7 @@ namespace VerifiedXCore.Services
                     var version4Result = await BlockVersionUtility.Version4Rules(block);
                     if(!version4Result.Item1)
                     {
+                        NoteRefusedForItsContents(block);
                         DbContext.Rollback($"BlockValidatorService.ValidateBlock()-7-4. {version4Result.Item2}");
                         return result;
                     }
@@ -847,6 +861,8 @@ namespace VerifiedXCore.Services
                     var prevTimestamp = Globals.LastBlock.Timestamp;
                     if (prevTimestamp > block.Timestamp || IsAheadOfClock(block.Timestamp, TimeUtil.GetTime()))
                     {
+                        if (prevTimestamp > block.Timestamp) // not ahead of this node's clock, which is this node's own
+                            NoteRefusedForItsContents(block);
                         DbContext.Rollback("BlockValidatorService.ValidateBlock()-9");
                         return result;
                     }
@@ -1147,6 +1163,7 @@ namespace VerifiedXCore.Services
 
                     if (blockCoinBaseResult == false)
                     {
+                        NoteRefusedForItsContents(block);
                         DbContext.Rollback("BlockValidatorService.ValidateBlock()-12");
                         return result;//block rejected
                     }
@@ -1155,12 +1172,14 @@ namespace VerifiedXCore.Services
                     {
                         if (block.Transactions.Count(t => PrivateTransactionTypes.IsPrivateTransaction(t.TransactionType)) > Globals.MaxPrivateTxPerBlock)
                         {
+                            NoteRefusedForItsContents(block);
                             DbContext.Rollback("BlockValidatorService.ValidateBlock()-privateTxCap");
                             return result;
                         }
 
                         if (LedgerIntegrityRules.OverTransactionCap(block.Transactions.Count, block.Height))
                         {
+                            NoteRefusedForItsContents(block);
                             DbContext.Rollback("BlockValidatorService.ValidateBlock()-transactionCap");
                             return result;
                         }
@@ -1728,7 +1747,7 @@ namespace VerifiedXCore.Services
                                 }
                             }
 
-                            NoteRefusedForATransaction(block.Height, block.Hash);
+                            NoteRefusedForItsContents(block);
                             DbContext.Rollback("BlockValidatorService.ValidateBlock()-13", $"Bad TX: {rejectBlockTxHash} | Reason: {rejectBlockReason}");
                             return result;//block rejected due to bad transaction(s)
                         }
