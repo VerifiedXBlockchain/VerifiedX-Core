@@ -1324,6 +1324,11 @@ namespace VerifiedXCore.Tests
             passedOn.Transactions[1].Amount = 2M;
             Assert.True(ProofUtility.IsWholeCopy(passedOn, out _));
             Assert.False(VerifiedXCore.Nodes.BlockcasterNode.ExcludeProducerOfRefusedBlock(passedOn, triedAtTip: true));
+            // Nor a copy with an amount re-spelled to the same value: the transaction's hash covers the spelling.
+            var respelled = JsonConvert.DeserializeObject<Block>(JsonConvert.SerializeObject(block))!;
+            respelled.Transactions[1].Fee = 0.000010M;
+            Assert.Equal(block.Transactions[1].Fee, respelled.Transactions[1].Fee);
+            Assert.False(VerifiedXCore.Nodes.BlockcasterNode.ExcludeProducerOfRefusedBlock(respelled, triedAtTip: true));
             Assert.NotEqual("refused-block-at-height", ProofUtility.ProducerIneligibility(producer.Address, block.Height));
             Assert.True(VerifiedXCore.Nodes.BlockcasterNode.ExcludeProducerOfRefusedBlock(block, triedAtTip: true));
             Assert.Equal("refused-block-at-height", ProofUtility.ProducerIneligibility(producer.Address, block.Height));

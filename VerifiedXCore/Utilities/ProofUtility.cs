@@ -1093,11 +1093,12 @@ namespace VerifiedXCore.Utilities
         /// <summary>
         /// What a copy carries that makes it the block it is: its hash and root, and for each transaction the fields its own
         /// hash and signature are made from. Fields a node fills in while it validates (a transaction's height, its rating)
-        /// are left out, so the copy reads the same before and after validation; amounts are read by value, not spelling.
+        /// are left out, so the copy reads the same before and after validation. Amounts are taken as they are spelled
+        /// (0.00001 is not 0.000010): a transaction's hash covers the spelling, so a re-spelled amount is another copy.
         /// </summary>
         private static string CopyFingerprint(Block block)
         {
-            static string Value(decimal amount) => amount.ToString("G29", System.Globalization.CultureInfo.InvariantCulture);
+            static string Value(decimal amount) => amount.ToString(System.Globalization.CultureInfo.InvariantCulture); // keeps its scale
             var text = new StringBuilder(JsonConvert.SerializeObject(new[] { block.Hash, block.MerkleRoot }));
             foreach (var t in block.Transactions ?? new List<Transaction>())
                 text.Append(JsonConvert.SerializeObject(new object?[]
