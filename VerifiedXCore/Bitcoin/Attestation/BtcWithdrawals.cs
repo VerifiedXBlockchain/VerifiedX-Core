@@ -254,7 +254,7 @@ namespace VerifiedXCore.Bitcoin.Attestation
 
         /// <summary>The contract's UID as state holds it (a lookup ignores case; the tables here are keyed by the stored spelling).</summary>
         private static string? Stored(string? scUID) =>
-            string.IsNullOrEmpty(scUID) ? scUID : SmartContractStateTrei.GetSmartContractState(scUID)?.SmartContractUID ?? scUID;
+            string.IsNullOrEmpty(scUID) ? scUID : SmartContractStateTrei.GetSmartContractHeader(scUID)?.SmartContractUID ?? scUID;
 
         // ── Block application ───────────────────────────────────────────────────────────────────────────────
 

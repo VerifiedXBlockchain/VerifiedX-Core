@@ -208,6 +208,12 @@ namespace VerifiedXCore.Bitcoin.Services
             return false;
         }
 
+        /// <summary>The same check from a contract's header (it reads only the UID and the code).</summary>
+        public static bool IsVbtcV2ContractHeader(SmartContractHeader? header) => header != null && IsVbtcV2Contract(header.CodeOnly());
+
+        /// <summary>The same check from a contract's header (it reads only the UID and the code).</summary>
+        public static bool IsVbtcV1ContractHeader(SmartContractHeader? header) => header != null && IsVbtcV1Contract(header.CodeOnly());
+
         public static bool IsVbtcV2Contract(SmartContractStateTrei? scState)
         {
             if (scState == null || string.IsNullOrEmpty(scState.SmartContractUID) || string.IsNullOrEmpty(scState.ContractData))

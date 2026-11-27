@@ -4,6 +4,16 @@ using VerifiedXCore.Models.SmartContracts;
 
 namespace VerifiedXCore.Models
 {
+    /// <summary>
+    /// A contract's state without its ledger (<see cref="SmartContractStateTrei.GetSmartContractHeader"/>). Read-only: no
+    /// write takes it.
+    /// </summary>
+    public sealed record SmartContractHeader(long Id, string SmartContractUID, string? ContractData, string? MinterAddress, string? OwnerAddress, string? NextOwner, bool IsLocked)
+    {
+        /// <summary>A throwaway state carrying only the UID and the code, for the checks that read just those two.</summary>
+        internal SmartContractStateTrei CodeOnly() => new() { Id = Id, SmartContractUID = SmartContractUID, ContractData = ContractData };
+    }
+
     public class SmartContractStateTrei
     {
         public long Id { get; set; }
@@ -63,6 +73,23 @@ namespace VerifiedXCore.Models
             }
 
             return null;
+        }
+
+        /// <summary>
+        /// The contract's header: who holds it, whether it is changing hands, its code; not its ledger. A vault's ledger
+        /// is a list inside its state document, one row a holder, and <see cref="GetSmartContractState"/> builds every row
+        /// whatever the caller reads, so a rule that needed only the owner or the stored spelling of the UID cost as much as
+        /// the vault had holders. The same document is read (the oldest for the UID); only the fields below are built. The
+        /// header cannot be written back, so it cannot stand in for the state and wipe a ledger.
+        /// </summary>
+        public static SmartContractHeader? GetSmartContractHeader(string smartContractUID)
+        {
+            var scs = GetSCST();
+            if (scs == null || smartContractUID == null) return null;
+            var h = scs.Query().Where(x => x.SmartContractUID == smartContractUID).OrderBy(x => x.Id)
+                .Select(x => new { x.Id, x.SmartContractUID, x.ContractData, x.MinterAddress, x.OwnerAddress, x.NextOwner, x.IsLocked })
+                .FirstOrDefault();
+            return h == null ? null : new SmartContractHeader(h.Id, h.SmartContractUID, h.ContractData, h.MinterAddress, h.OwnerAddress, h.NextOwner, h.IsLocked);
         }
 
         public static IEnumerable<SmartContractStateTrei>? GetSmartContractsOwnedByAddress(string address)

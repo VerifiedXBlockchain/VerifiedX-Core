@@ -1191,6 +1191,9 @@ namespace VerifiedXCore.Services
                             var plonkBatch = PlonkProofVerifier.TryValidatePrivateProofsInBlock(block, blockDownloads);
                             if (!plonkBatch.ok)
                             {
+                                // A proof that fails is the block's fault; a verifier this node has not loaded is this node's.
+                                if (plonkBatch.message != PlonkProofVerifier.VerifierUnavailableReason)
+                                    NoteRefusedForItsContents(block);
                                 DbContext.Rollback("BlockValidatorService.ValidateBlock()-privatePlonkBatch");
                                 return result;
                             }

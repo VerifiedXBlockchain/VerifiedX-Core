@@ -284,7 +284,8 @@ namespace VerifiedXCore.Bitcoin.Services
             decimal totalAmount,
             string exitBurnTxHash,
             List<PoolUnlockAllocation> allocations,
-            IReadOnlyList<CasterConsensusVote>? casterConsensusVotes = null)
+            IReadOnlyList<CasterConsensusVote>? casterConsensusVotes = null,
+            string? vfxCreditAddress = null)
         {
             try
             {
@@ -297,17 +298,30 @@ namespace VerifiedXCore.Bitcoin.Services
 
                 long totalAmountSats = (long)(totalAmount * 100_000_000M);
 
-                var payload = new
-                {
-                    Function = "VBTCBridgePoolUnlock()",
-                    TotalAmount = totalAmount,
-                    TotalAmountSats = totalAmountSats,
-                    VfxDestinationAddress = vfxDestinationAddress,
-                    ExitBurnTxHash = exitBurnTxHash,
-                    Allocations = allocations,
-                    CasterConsensusVotes = casterConsensusVotes
-                };
-                var txData = JsonConvert.SerializeObject(payload);
+                // VfxCreditAddress, the address VfxDestinationAddress names, is what the unlock credits from
+                // Globals.PoolUnlockCreditsAddressHeight; without it the payload is written as before.
+                var txData = string.IsNullOrEmpty(vfxCreditAddress)
+                    ? JsonConvert.SerializeObject(new
+                    {
+                        Function = "VBTCBridgePoolUnlock()",
+                        TotalAmount = totalAmount,
+                        TotalAmountSats = totalAmountSats,
+                        VfxDestinationAddress = vfxDestinationAddress,
+                        ExitBurnTxHash = exitBurnTxHash,
+                        Allocations = allocations,
+                        CasterConsensusVotes = casterConsensusVotes
+                    })
+                    : JsonConvert.SerializeObject(new
+                    {
+                        Function = "VBTCBridgePoolUnlock()",
+                        TotalAmount = totalAmount,
+                        TotalAmountSats = totalAmountSats,
+                        VfxDestinationAddress = vfxDestinationAddress,
+                        VfxCreditAddress = vfxCreditAddress,
+                        ExitBurnTxHash = exitBurnTxHash,
+                        Allocations = allocations,
+                        CasterConsensusVotes = casterConsensusVotes
+                    });
 
                 var poolUnlockTx = new Transaction
                 {

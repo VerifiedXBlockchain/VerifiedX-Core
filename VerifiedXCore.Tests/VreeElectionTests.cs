@@ -1250,6 +1250,145 @@ namespace VerifiedXCore.Tests
         }
 
         /// <summary>
+        /// A caster signs a block only once its own validation takes the block at its tip. Signing claims the height for
+        /// good (only an operator releases it), so a caster that signed a block validation then refused could sign no other
+        /// block at that height, and with every caster held to it the height could never be certified: the chain stopped.
+        /// Here one block at the height is refused for its contents (an unsigned transaction) and is not signed, and the
+        /// next producer's block at the same height is.
+        /// </summary>
+        [Fact]
+        public async Task ACasterSignsNoBlockItsValidationRefuses_AndSignsTheNextBlockAtThatHeight()
+        {
+            var priorEncrypted = Globals.IsWalletEncrypted;
+            var priorPassword = Globals.EncryptPassword;
+            AttestationGuard.ResetForTests();
+            try
+            {
+                // This node is a caster with its own key in its wallet; VREE is not active, so it does not stand down.
+                Globals.IsWalletEncrypted = false;
+                Globals.EncryptPassword = new System.Security.SecureString();
+                var me = AccountData.CreateNewAccount(skipSave: true)!;
+                me.IsValidating = true;
+                AccountData.GetAccounts().Insert(me);
+                Globals.ValidatorAddress = me.Address;
+                Globals.IsBlockCaster = true;
+                Globals.BlockCasters = new System.Collections.Concurrent.ConcurrentBag<Peers> { new Peers { ValidatorAddress = me.Address } };
+                Globals.VreeActivationHeight = long.MaxValue;
+
+                var record = Ratified(0);
+                Block Resigned(Block b, Member by)
+                {
+                    b.Hash = b.GetBlockHash();
+                    b.ValidatorSignature = SignatureService.CreateSignature(b.Hash, by.Key, by.Pub);
+                    return b;
+                }
+
+                var height = Globals.LastBlock.Height + 1;
+                var reward = new Transaction
+                {
+                    FromAddress = "Coinbase_BlkRwd", ToAddress = _electors[11].Address, TransactionType = TransactionType.TX, Timestamp = TimeUtil.GetTime(),
+                    Amount = BlockVersionUtility.GetBlockVersion(height) < 4 ? BlockchainData.GetBlockReward() : 0.0M,
+                };
+                reward.Build();
+                var unsigned = new Transaction
+                {
+                    FromAddress = _electors[11].Address, ToAddress = _electors[10].Address, TransactionType = TransactionType.TX, Timestamp = TimeUtil.GetTime(), Amount = 1M, Fee = 0.00001M,
+                };
+                unsigned.Build();
+                var refused = ProducedBlock(_electors[11], Members(record).Take(3), record, transactions: new List<Transaction> { reward, unsigned });
+                refused.ConsensusCertificate = null;
+                Assert.True(ConsensusCertificateRules.SupportsConsensusCertificate(refused.Version));
+                Assert.False(await ConsensusCertificateHelper.TryAttachCertificateAsync(refused, maxPollRounds: 0));
+                Assert.Null(AttestationGuard.SignedAt(refused.Height));                     // not signed: the height is not claimed
+                Assert.True(BlockValidatorService.WasRefusedForItsContents(refused.Height, refused.Hash)); // its producer can be left out
+
+                var nextReward = new Transaction
+                {
+                    FromAddress = "Coinbase_BlkRwd", ToAddress = _electors[10].Address, TransactionType = TransactionType.TX, Timestamp = TimeUtil.GetTime(),
+                    Amount = BlockVersionUtility.GetBlockVersion(height) < 4 ? BlockchainData.GetBlockReward() : 0.0M,
+                };
+                nextReward.Build();
+                var next = ProducedBlock(_electors[10], Members(record).Take(3), record, transactions: new List<Transaction> { nextReward });
+                next.ConsensusCertificate = null;
+                Assert.Equal(refused.Height, next.Height);
+                await ConsensusCertificateHelper.TryAttachCertificateAsync(next, maxPollRounds: 0); // no peers here, so no quorum
+                Assert.Equal(next.Hash, AttestationGuard.SignedAt(next.Height));             // signed: the next block can be certified
+
+                // A block not on this node's tip is not signed either: this node cannot judge it.
+                var elsewhere = ProducedBlock(_electors[9], Members(record).Take(3), record);
+                elsewhere.PrevHash = "another-predecessor";
+                Resigned(elsewhere, _electors[9]);
+                elsewhere.ConsensusCertificate = null;
+                Assert.NotNull(await ConsensusCertificateHelper.WhyNotSign(elsewhere));
+            }
+            finally
+            {
+                AttestationGuard.ResetForTests();
+                Globals.IsWalletEncrypted = priorEncrypted;
+                Globals.EncryptPassword = priorPassword;
+            }
+        }
+
+        /// <summary>
+        /// A block carrying a private transaction whose proof fails is refused for its contents, so its producer is left out
+        /// of the height's election: casters sign no such block, and without that its producer kept winning the height and
+        /// serving the same block. A refusal because this node has no verifier loaded is this node's own and counts against
+        /// nobody.
+        /// </summary>
+        [Fact]
+        public async Task ABlockWhosePrivateProofFails_CountsAgainstItsProducer_UnlessThisNodeHasNoVerifier()
+        {
+            var priorRules = Globals.PrivateTxProofRulesHeight;
+            var priorAvailable = VerifiedXCore.Privacy.PlonkProofVerifier.VerifierAvailable;
+            var priorCurrent = VerifiedXCore.Privacy.PlonkProofVerifier.CurrentRulesAvailable;
+            try
+            {
+                Globals.PrivateTxProofRulesHeight = 1;
+                var record = Ratified(0);
+                var height = Globals.LastBlock.Height + 1;
+                Block WithBadProof(Member producer)
+                {
+                    var reward = new Transaction
+                    {
+                        FromAddress = "Coinbase_BlkRwd", ToAddress = producer.Address, TransactionType = TransactionType.TX, Timestamp = TimeUtil.GetTime(),
+                        Amount = BlockVersionUtility.GetBlockVersion(height) < 4 ? BlockchainData.GetBlockReward() : 0.0M,
+                    };
+                    reward.Build();
+                    var payload = new VerifiedXCore.Models.Privacy.PrivateTxPayload { Version = 1, Kind = "unshield", Asset = "VFX", ProofB64 = "not base64!" };
+                    var unshield = new Transaction
+                    {
+                        FromAddress = VerifiedXCore.Privacy.PrivacyConstants.ShieldedPoolAddress, ToAddress = _electors[1].Address, Amount = 1M, Fee = 0M, Nonce = 0,
+                        Timestamp = TimeUtil.GetTime(), TransactionType = TransactionType.VFX_UNSHIELD,
+                        Data = VerifiedXCore.Privacy.PrivateTxPayloadCodec.SerializeToJson(payload), Signature = VerifiedXCore.Privacy.PrivacyConstants.PlonkSignatureSentinel,
+                    };
+                    unshield.BuildPrivate();
+                    return ProducedBlock(producer, Members(record).Take(3), record, transactions: new List<Transaction> { reward, unshield });
+                }
+
+                VerifiedXCore.Privacy.PlonkProofVerifier.VerifierAvailable = () => true;
+                VerifiedXCore.Privacy.PlonkProofVerifier.CurrentRulesAvailable = () => true;
+                var badProof = WithBadProof(_electors[11]);
+                var since = DateTime.UtcNow;
+                Assert.False(await BlockValidatorService.ValidateBlock(badProof, false, false, validateOnly: true));
+                Assert.Equal("BlockValidatorService.ValidateBlock()-privatePlonkBatch", StepsSince(since).LastOrDefault());
+                Assert.True(BlockValidatorService.WasRefusedForItsContents(badProof.Height, badProof.Hash));
+
+                VerifiedXCore.Privacy.PlonkProofVerifier.VerifierAvailable = () => false; // this node cannot verify proofs
+                var unjudged = WithBadProof(_electors[10]);
+                since = DateTime.UtcNow;
+                Assert.False(await BlockValidatorService.ValidateBlock(unjudged, false, false, validateOnly: true));
+                Assert.Equal("BlockValidatorService.ValidateBlock()-privatePlonkBatch", StepsSince(since).LastOrDefault());
+                Assert.False(BlockValidatorService.WasRefusedForItsContents(unjudged.Height, unjudged.Hash));
+            }
+            finally
+            {
+                Globals.PrivateTxProofRulesHeight = priorRules;
+                VerifiedXCore.Privacy.PlonkProofVerifier.VerifierAvailable = priorAvailable;
+                VerifiedXCore.Privacy.PlonkProofVerifier.CurrentRulesAvailable = priorCurrent;
+            }
+        }
+
+        /// <summary>
         /// A content check that runs before the previous hash is compared (here the block's version) counts against the
         /// producer only for a block on this node's tip: judged against another predecessor, the refusal says nothing about it.
         /// </summary>

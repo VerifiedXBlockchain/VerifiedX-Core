@@ -246,13 +246,10 @@ namespace VerifiedXCore.Bitcoin.FROST
                 var vaultScripts = watchedKey != null
                     ? Attestation.BtcAttestStore.ScriptRowsForVault(vaultUid).Select(k => Script.FromHex(k.ScriptHex)).ToList()
                     : new List<Script> { depositScript };
-                long destinationSats = 0, changeSats = 0;
-                foreach (var o in tx.Outputs)
-                {
-                    if (o.ScriptPubKey == destinationScript) destinationSats += o.Value.Satoshi;
-                    else if (vaultScripts.Contains(o.ScriptPubKey)) changeSats += o.Value.Satoshi;
-                    else return (false, "Transaction pays an output that is neither the authorized destination nor vault change");
-                }
+                var (destinationSats, changeSats, outputsReason) = pinnedDestinationScriptHex != null
+                    ? ReadPinnedOutputs(tx, destinationScript, vaultScripts, pinnedRelease)
+                    : ReadOutputsByScript(tx, destinationScript, vaultScripts);
+                if (outputsReason != null) return (false, outputsReason);
                 long inputSats = 0;
                 foreach (var so in spentOutputs) inputSats += so.Value.Satoshi;
 
@@ -271,6 +268,44 @@ namespace VerifiedXCore.Bitcoin.FROST
                 ErrorLogUtility.LogError($"FrostSigningAuthorization error: {ex}", "FrostSigningAuthorization.Authorize");
                 return (false, $"Authorization error: {ApiErrorText.For(ex)}");
             }
+        }
+
+        /// <summary>
+        /// A transaction consensus pinned (its id was matched to the pinned one before this is read), read as the chain's
+        /// builder lays it out: the payment first, to the authorized destination, then change to the vault; a release pays
+        /// only the vault. Read by script instead, a payment to one of the vault's own addresses (an address a re-key made
+        /// the vault's after the withdrawal was asked for) was counted with the change, or the change with the payment,
+        /// and the transaction was refused: the coin it held stayed held, for good once its fee rate could not be raised.
+        /// </summary>
+        internal static (long DestinationSats, long ChangeSats, string? Reason) ReadPinnedOutputs(NBitcoin.Transaction tx, Script destinationScript, IReadOnlyCollection<Script> vaultScripts, bool release)
+        {
+            long destinationSats = 0, changeSats = 0;
+            for (var i = 0; i < tx.Outputs.Count; i++)
+            {
+                var o = tx.Outputs[i];
+                if (i == 0 && !release)
+                {
+                    if (o.ScriptPubKey != destinationScript)
+                        return (0, 0, "The transaction's first output is not the authorized destination");
+                    destinationSats += o.Value.Satoshi;
+                }
+                else if (vaultScripts.Contains(o.ScriptPubKey)) changeSats += o.Value.Satoshi;
+                else return (0, 0, "Transaction pays an output that is neither the authorized destination nor vault change");
+            }
+            return (destinationSats, changeSats, null);
+        }
+
+        /// <summary>A transaction nothing pinned (a vault the chain does not watch): each output is read by its script.</summary>
+        private static (long DestinationSats, long ChangeSats, string? Reason) ReadOutputsByScript(NBitcoin.Transaction tx, Script destinationScript, IReadOnlyCollection<Script> vaultScripts)
+        {
+            long destinationSats = 0, changeSats = 0;
+            foreach (var o in tx.Outputs)
+            {
+                if (o.ScriptPubKey == destinationScript) destinationSats += o.Value.Satoshi;
+                else if (vaultScripts.Contains(o.ScriptPubKey)) changeSats += o.Value.Satoshi;
+                else return (0, 0, "Transaction pays an output that is neither the authorized destination nor vault change");
+            }
+            return (destinationSats, changeSats, null);
         }
 
         /// <summary>
