@@ -122,6 +122,38 @@ namespace VerifiedXCore.Tests
         }
 
         [Fact]
+        public async Task TheMove_OfAUidWithTwoDocuments_KeepsTheLedgerEveryReaderReads()
+        {
+            await Start();
+            var vault = (await CreateVault(H1 + 1)).Uid;
+            await Apply(Tip + 1, Transfer(vault, 0.01M, Minter, _a));
+            var read = State(vault);
+            var addresses = new[] { Minter.Address, _a.Address, _c.Address };
+            var balances = addresses.ToDictionary(a => a, a => VaultLedgerStore.Balance(read, a));
+            // A younger document under the same UID with a different ledger. Readers read the oldest; the younger one is never read.
+            var younger = new SmartContractStateTrei
+            {
+                SmartContractUID = vault, ContractData = read.ContractData, MinterAddress = read.MinterAddress, OwnerAddress = read.OwnerAddress,
+                SCStateTreiTokenizationTXes = new List<SmartContractStateTreiTokenizationTX> { Credit(_a.Address, 1M), Credit(_c.Address, 5M) },
+            };
+            SmartContractStateTrei.GetSCST().Insert(younger);
+            Assert.Equal(read.Id, State(vault).Id);
+
+            await MoveAtTheNextBlock();
+
+            var after = State(vault);
+            Assert.Equal(read.Id, after.Id);
+            Assert.True(after.LedgerMoved);
+            foreach (var a in addresses)
+                Assert.Equal(balances[a], VaultLedgerStore.Balance(after, a));   // the younger ledger wrote nothing over it
+            Assert.Equal(0M, VaultLedgerStore.Balance(after, _c.Address));
+            Assert.Equal(balances.Count(kv => kv.Value != 0M), VaultLedgerStore.HolderCount(after));
+            var left = SmartContractStateTrei.GetSCST().FindById(younger.Id);
+            Assert.NotEqual(true, left.LedgerMoved);                            // left as it was, unread as before
+            Assert.Equal(2, left.SCStateTreiTokenizationTXes!.Count);
+        }
+
+        [Fact]
         public async Task AfterTheMove_ABlocksTransfersWriteTheEntries_AndAreJudgedOnThem()
         {
             await Start();

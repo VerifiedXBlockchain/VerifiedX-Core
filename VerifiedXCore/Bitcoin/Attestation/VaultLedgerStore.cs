@@ -360,7 +360,8 @@ namespace VerifiedXCore.Bitcoin.Attestation
         /// that has not moved (an older build crossed the height): every contract with a ledger in its document gets one
         /// entry per holder, holding that holder's balance read from the rows, and its two counts; its rows leave the
         /// document. Each contract moves in one write, so a move cut short is finished at the next block with nothing
-        /// counted twice; the world record's marker is set once all have moved. Returns how many contracts moved.
+        /// counted twice; the world record's marker is set once all have moved. A younger document under a UID that already
+        /// has one is left as it is, unread as before. Returns how many contracts moved.
         /// </summary>
         public static int MoveAll(long height)
         {
@@ -370,6 +371,9 @@ namespace VerifiedXCore.Bitcoin.Attestation
             var moved = 0;
             foreach (var contract in scs.FindAll().Where(c => c.SCStateTreiTokenizationTXes != null).ToList())
             {
+                // Only the document every reader reads for this UID (the oldest) moves. A younger document under the same UID
+                // is never read; moving it too would write its balances over the read one's, as both key the same entries.
+                if (SmartContractStateTrei.GetSmartContractHeader(contract.SmartContractUID)?.Id != contract.Id) continue;
                 var balances = new Dictionary<string, decimal>(StringComparer.Ordinal);
                 foreach (var row in contract.SCStateTreiTokenizationTXes!)
                 {
