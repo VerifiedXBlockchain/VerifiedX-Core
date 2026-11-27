@@ -356,6 +356,9 @@ namespace VerifiedXCore.Bitcoin.Attestation
             withdrawals.EnsureIndex(x => x.RequestHash);
             withdrawals.EnsureIndex(x => x.LastModifiedHeight);
             withdrawals.EnsureIndex(x => x.RequestVfxHeight); // the sweep rate reads the last thousand blocks' requests only
+            // A vault's rows in one state are read without its rows in every other state, which are never deleted.
+            try { withdrawals.EnsureIndex(VaultStateIndexName, VaultStateIndexExpression); }
+            catch (Exception ex) { VerifiedXCore.Utilities.ErrorLogUtility.LogError($"Withdrawal vault and state index: {ex.Message}", "BtcAttestStore.EnsureIndexes()"); }
             var payments = db.GetCollection<VaultPaymentRow>(Payments);
             payments.EnsureIndex(x => x.SmartContractUID);
             payments.EnsureIndex(x => x.BitcoinHeight);
@@ -524,8 +527,32 @@ namespace VerifiedXCore.Bitcoin.Attestation
             (db ?? Db).GetCollection<VaultWithdrawalRow>(Withdrawals).Upsert(row);
         }
 
-        public static List<VaultWithdrawalRow> WithdrawalsOf(string scUID, VaultWithdrawalState state, LiteDatabase? db = null) =>
-            (db ?? Db).GetCollection<VaultWithdrawalRow>(Withdrawals).Find(x => x.SmartContractUID == scUID && x.State == state).ToList();
+        /// <summary>
+        /// The index on a withdrawal's vault and state together: "vault|state" for a vault UID of at most 200 characters,
+        /// the UID alone for a longer one (LiteDB refuses a key over 1,023 bytes).
+        /// </summary>
+        internal const string VaultStateIndexExpression = "IIF(LENGTH($.SmartContractUID) <= 200, $.SmartContractUID + '|' + $.State, $.SmartContractUID)";
+        internal const string VaultStateIndexName = "VaultState";
+
+        /// <summary>
+        /// The vault's withdrawals in one state: the rows whose vault UID equals <paramref name="scUID"/> as the database
+        /// compares it. Read through <see cref="VaultStateIndexExpression"/>, so the vault's rows in other states are not
+        /// loaded: the rows indexed under the vault and the state, and those indexed under the vault alone (long UIDs),
+        /// each checked against the vault and the state. In no particular order, as before: callers that need one sort.
+        /// </summary>
+        public static List<VaultWithdrawalRow> WithdrawalsOf(string scUID, VaultWithdrawalState state, LiteDatabase? db = null)
+        {
+            var d = db ?? Db;
+            var col = d.GetCollection<VaultWithdrawalRow>(Withdrawals);
+            if (string.IsNullOrEmpty(scUID)) return col.Find(x => x.SmartContractUID == scUID && x.State == state).ToList();
+            var collation = d.Collation;
+            // A row without a UID is stored without the field, and never equalled a UID asked for.
+            return col.Find(LiteDB.Query.EQ(VaultStateIndexExpression, scUID + "|" + state))
+                .Concat(col.Find(LiteDB.Query.EQ(VaultStateIndexExpression, scUID)))
+                .Where(x => x.State == state && !string.IsNullOrEmpty(x.SmartContractUID) && collation.Compare(x.SmartContractUID, scUID) == 0)
+                .GroupBy(x => x.Ref, StringComparer.Ordinal).Select(g => g.First())
+                .ToList();
+        }
 
         public static List<VaultWithdrawalRow> WithdrawalsInState(VaultWithdrawalState state, LiteDatabase? db = null) =>
             (db ?? Db).GetCollection<VaultWithdrawalRow>(Withdrawals).Find(x => x.State == state).ToList();

@@ -52,6 +52,7 @@ namespace VerifiedXCore
             Globals.VaultLedgerHeight = Globals.IsTestNet ? Globals.VaultLedgerTestnetHeight : Globals.VaultLedgerHeight;
             Globals.BridgeAllocationsArrayHeight = Globals.IsTestNet ? Globals.BridgeAllocationsArrayTestnetHeight : Globals.BridgeAllocationsArrayHeight;
             Globals.PoolUnlockCreditsAddressHeight = Globals.IsTestNet ? Globals.PoolUnlockCreditsAddressTestnetHeight : Globals.PoolUnlockCreditsAddressHeight;
+            Globals.BridgeLockEvmAddressHeight = Globals.IsTestNet ? Globals.BridgeLockEvmAddressTestnetHeight : Globals.BridgeLockEvmAddressHeight;
             Globals.VrfMixHeight = Globals.IsTestNet ? Globals.VrfMixTestnetHeight : Globals.VrfMixHeight;
             Globals.ReserveRecoverReadsEveryRowHeight = Globals.IsTestNet ? Globals.LedgerRulesBatchTestnetHeight : Globals.ReserveRecoverReadsEveryRowHeight;
             Globals.VbtcEnvelopeRulesHeight = Globals.IsTestNet ? Globals.LedgerRulesBatchTestnetHeight : Globals.VbtcEnvelopeRulesHeight;
@@ -179,6 +180,7 @@ namespace VerifiedXCore
             Globals.VaultLedgerHeight = CustomTestNetInputRulesHeight;
             Globals.BridgeAllocationsArrayHeight = CustomTestNetInputRulesHeight;
             Globals.PoolUnlockCreditsAddressHeight = CustomTestNetInputRulesHeight;
+            Globals.BridgeLockEvmAddressHeight = CustomTestNetInputRulesHeight;
         }
     }
 }

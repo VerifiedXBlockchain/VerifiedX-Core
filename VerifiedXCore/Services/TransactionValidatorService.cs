@@ -4139,6 +4139,13 @@ namespace VerifiedXCore.Services
                     if (string.IsNullOrEmpty(evmDestination) || !evmDestination.StartsWith("0x") || evmDestination.Length != 42)
                         return (txResult, "Invalid EvmDestination for bridge lock.");
 
+                    // ... and an address Base can mint to: "0x" and 40 hex digits, not the zero address. A shorter one padded
+                    // with spaces to 42, or the zero address, debited vBTC that no mint could ever pay. Refused at admission at
+                    // every height; in blocks from BridgeLockEvmAddressHeight.
+                    if ((blockHeight == null || blockHeight.Value >= Globals.BridgeLockEvmAddressHeight)
+                        && !VerifiedXCore.Bitcoin.Services.BridgeTxRules.IsMintableEvmAddress(evmDestination))
+                        return (txResult, BridgeLockDestinationNotMintableReason);
+
                     // Validators never sign a Base mint for a destination that begins with an admin message tag, so a lock to
                     // one would debit vBTC that is never minted. Refused at admission at every height; in blocks from the
                     // path-audit height.
@@ -4737,6 +4744,7 @@ namespace VerifiedXCore.Services
             catch { return null; }
         }
         internal const string BridgeLockDestinationIsAdminTagReason = "A bridge lock's EvmDestination cannot begin with a Base admin message tag.";
+        internal const string BridgeLockDestinationNotMintableReason = "A bridge lock's EvmDestination is \"0x\" and 40 hex digits, and not the zero address.";
 
         /// <summary>
         /// Bridge locks one sender may have waiting in the mempool (policy, not a block rule). Each lock costs every node a
