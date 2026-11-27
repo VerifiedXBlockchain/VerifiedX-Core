@@ -200,7 +200,7 @@ namespace VerifiedXCore.Tests
             ["Services/HistoricalTransactionExceptions.cs|json-parse"] = 1,
             ["Services/KeystoreCrypto.cs|base64"] = 1,
             ["Services/LedgerIntegrityRules.cs|base64"] = 3,
-            ["Services/LedgerIntegrityRules.cs|contract-state"] = 10,
+            ["Services/LedgerIntegrityRules.cs|contract-state"] = 9,
             ["Services/LedgerIntegrityRules.cs|json-parse"] = 17,
             ["Services/MonitoringService.cs|log-write"] = 1,
             ["Services/PasswordKeyWrap.cs|base64"] = 2,

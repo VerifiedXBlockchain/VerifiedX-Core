@@ -1654,7 +1654,7 @@ namespace VerifiedXCore.Services
             var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             foreach (var uid in uids)
             {
-                var resolved = string.IsNullOrEmpty(uid) ? "" : SmartContractStateTrei.GetSmartContractState(uid)?.SmartContractUID ?? uid;
+                var resolved = string.IsNullOrEmpty(uid) ? "" : SmartContractStateTrei.GetSmartContractHeader(uid)?.SmartContractUID ?? uid;
                 if (!seen.Add(resolved))
                     return true;
             }
