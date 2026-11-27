@@ -808,6 +808,131 @@ namespace VerifiedXCore.Tests
             }
         }
 
+        private VfxTx RequestTo(string vault, string btcAddress, decimal amount, int feeRate = 10) =>
+            SignedBy(Minter, Minter.Address, TransactionType.VBTC_V2_WITHDRAWAL_REQUEST,
+                new { Function = "VBTCWithdrawalRequest()", ContractUID = vault, BTCAddress = btcAddress, Amount = amount, FeeRate = feeRate, UniqueId = Guid.NewGuid().ToString("N") });
+
+        /// <summary>
+        /// A release returns a withdrawal's coins to the vault's current key. With two coins, the first closes the released
+        /// withdrawal and the second is looked at with no withdrawal holding it. Below the height its output, paying the
+        /// address another withdrawal asked for before the re-key gave it to the vault, was taken for that withdrawal's
+        /// payment: settled, while the Bitcoin never left the vault. From the height an output to the vault's own key pays
+        /// nobody: the withdrawal stays open, does not claim the release kept as a payment either, and is refunded when its
+        /// window runs out.
+        /// </summary>
+        [Theory]
+        [InlineData(true)]
+        [InlineData(false)]
+        public async Task AReleaseToTheNewKey_DoesNotPayAWithdrawalAskedForToThatAddress_FromTheHeight(bool fromTheHeight)
+        {
+            var prior = (Globals.VreeActivationHeight, Globals.WithdrawalOwnScriptAttributionHeight, Globals.WithdrawalDestinationRecheckHeight);
+            Globals.VreeActivationHeight = 1;                       // payments are attributed by destination
+            Globals.WithdrawalDestinationRecheckHeight = H1;        // and a withdrawal to the vault's own address is never fixed
+            Globals.WithdrawalOwnScriptAttributionHeight = fromTheHeight ? H1 : long.MaxValue;
+            try
+            {
+                await Start();
+                var vault = await CreateVault(H1 + 1, keyHolders: Signers);
+                await Deposit(vault.Script, 30_000);
+                await Deposit(vault.Script, 30_000);
+                var released = await Mine(Request(vault.Uid, 0.0005M));
+                Assert.Equal(2, Assert.Single(Row(released, vault.Uid).Pins).Inputs.Count);
+                await Deposit(vault.Script, 55_000); // free, and too little for the next withdrawal
+
+                var stillHere = Signers.Take(3).ToList();
+                await ToNextEpoch(stillHere, leaving: Signers.Skip(3));
+                var ceremony = Ceremony(vault.Uid, stillHere, 2, Signers[0].Address);
+                // Asked for before the re-key, to the address the re-key gives the vault, for what the release's two coins hold.
+                var toNextKey = await Mine(RequestTo(vault.Uid, ceremony.Address, 0.0006M));
+                Assert.Equal(VaultWithdrawalState.Waiting, Row(toNextKey, vault.Uid).State);
+                await Mine(RekeyTx(vault.Uid, ceremony.Proof));
+                var sweep = Assert.Single(BtcAttestStore.WithdrawalsOf(vault.Uid, VaultWithdrawalState.Pinned).Where(w => w.IsSweep));
+                await SignAndConfirm(sweep.Pins[0]);
+
+                await Mine(Release(vault.Uid, released.Hash, 30));
+                var release = Row(released, vault.Uid).Pins[^1];
+                Assert.True(release.IsRelease);
+                Assert.Equal(2, release.Inputs.Count);
+                var releaseTx = await SignAndConfirm(release);
+                Assert.Equal(ceremony.Script, Assert.Single(releaseTx.Outputs).ScriptPubKey);
+                Assert.Equal(VaultWithdrawalState.Released, Row(released, vault.Uid).State);
+
+                var row = Row(toNextKey, vault.Uid);
+                if (!fromTheHeight)
+                {
+                    // Settled by the release, whose Bitcoin is back in the vault.
+                    Assert.Equal(VaultWithdrawalState.Settled, row.State);
+                    Assert.Equal(release.Txid, row.SettledTxid);
+                    return;
+                }
+                Assert.Equal(VaultWithdrawalState.Waiting, row.State);
+                Assert.Null(row.SettledTxid);
+                Assert.Empty(row.Pins);
+                // Kept as a payment nothing was open for; the withdrawal, tried again on the vault's changed coins, did not claim it.
+                var kept = BtcAttestStore.Payment(release.Txid, vault.Uid);
+                Assert.NotNull(kept);
+                Assert.Null(kept!.ClaimedByRef);
+
+                var before = await Spendable(vault.Uid, Minter);
+                await AdvanceTo(BtcWithdrawals.ExpiresAtVfxHeight(row));
+                Assert.Equal(VaultWithdrawalState.Expired, Row(toNextKey, vault.Uid).State);
+                Assert.Equal(before + 0.0006M, await Spendable(vault.Uid, Minter));
+                Assert.Null(BtcAttestStore.Payment(release.Txid, vault.Uid)!.ClaimedByRef);
+            }
+            finally { (Globals.VreeActivationHeight, Globals.WithdrawalOwnScriptAttributionHeight, Globals.WithdrawalDestinationRecheckHeight) = prior; }
+        }
+
+        /// <summary>
+        /// A withdrawal fixed on the old key's coin before the re-key, to the address the re-key gives the vault, that never
+        /// confirms: a sweep takes its coin once it has stopped moving, and pays the new key. Below the height the sweep was
+        /// taken for the withdrawal's payment: the withdrawal was settled with nothing paid, and the sweep was void. From the
+        /// height the sweep is the sweep: settled, and the withdrawal is void and refunded.
+        /// </summary>
+        [Theory]
+        [InlineData(true)]
+        [InlineData(false)]
+        public async Task ASweepOfAStoppedWithdrawalsCoin_DoesNotPayItsDestinationWhenThatIsTheNewKey_FromTheHeight(bool fromTheHeight)
+        {
+            var prior = (Globals.VreeActivationHeight, Globals.WithdrawalOwnScriptAttributionHeight);
+            Globals.VreeActivationHeight = 1;
+            Globals.WithdrawalOwnScriptAttributionHeight = fromTheHeight ? H1 : long.MaxValue;
+            try
+            {
+                await Start();
+                var vault = await CreateVault(H1 + 1, keyHolders: Signers);
+                await Deposit(vault.Script, 200_000);
+                var stillHere = Signers.Take(3).ToList();
+                await ToNextEpoch(stillHere, leaving: Signers.Skip(3));
+                var ceremony = Ceremony(vault.Uid, stillHere, 2, Signers[0].Address);
+                var request = await Mine(RequestTo(vault.Uid, ceremony.Address, 0.002M, feeRate: 40));
+                var oldPin = Assert.Single(Row(request, vault.Uid).Pins);
+                await Mine(RekeyTx(vault.Uid, ceremony.Proof));
+                var before = await Spendable(vault.Uid, Minter);
+
+                var stopped = BtcWithdrawals.MovingSince(Row(request, vault.Uid)) + BtcAttestRules.StuckPinBlocks;
+                await AdvanceTo(stopped % BtcAttestRules.TakeRetryBlocks == 0 ? stopped : stopped + BtcAttestRules.TakeRetryBlocks - stopped % BtcAttestRules.TakeRetryBlocks);
+                var sweep = Assert.Single(BtcAttestStore.WithdrawalsOf(vault.Uid, VaultWithdrawalState.Pinned).Where(w => w.IsSweep));
+                Assert.Equal(oldPin.Inputs, sweep.Pins[0].Inputs);
+                Assert.Equal(ceremony.Script.ToHex(), sweep.DestinationScriptHex);
+                await SignAndConfirm(sweep.Pins[0]);
+
+                var row = Row(request, vault.Uid);
+                var swept = BtcAttestStore.Withdrawal(sweep.Ref)!;
+                if (!fromTheHeight)
+                {
+                    Assert.Equal(VaultWithdrawalState.Settled, row.State);
+                    Assert.Equal(sweep.Pins[0].Txid, row.SettledTxid);
+                    Assert.Equal(VaultWithdrawalState.Void, swept.State);
+                    return;
+                }
+                Assert.Equal(VaultWithdrawalState.Void, row.State);
+                Assert.Equal(VaultWithdrawalState.Settled, swept.State);
+                Assert.Equal(sweep.Pins[0].Txid, swept.SettledTxid);
+                Assert.True(await Spendable(vault.Uid, Minter) > before); // refunded (less the sweep's fee, which falls on the owner)
+            }
+            finally { (Globals.VreeActivationHeight, Globals.WithdrawalOwnScriptAttributionHeight) = prior; }
+        }
+
         /// <summary>
         /// A re-key among three validators made a key that all three had to sign (67% of three): with no holder to spare
         /// it was due again at its first count, and the vault was re-keyed and swept again and again. A re-key's key

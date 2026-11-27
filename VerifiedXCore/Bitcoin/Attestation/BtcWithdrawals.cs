@@ -373,7 +373,7 @@ namespace VerifiedXCore.Bitcoin.Attestation
                         if (!answered && BtcAttestRules.PaysByDestination(vfxHeight) && spend.Outputs != null && !PaidAlready(coin.SmartContractUID, spend.Txid, db))
                         {
                             var (inputs, inputSats) = SpendsOf(spend.Txid, coin.SmartContractUID, effects);
-                            var paid = PaidOutput(row, spend.Outputs, inputSats);
+                            var paid = PaidOutput(row, spend.Outputs, inputSats, vfxHeight, db);
                             if (paid != null)
                             {
                                 answered = true;

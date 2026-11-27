@@ -26,8 +26,10 @@ namespace VerifiedXCore.Bitcoin.Attestation
         /// The output of a transaction that pays this row, or null. The script is the row's destination; the amount is the
         /// row's less the fee the transaction paid, read from the transaction (every input of a vault-key transaction is a
         /// recorded vault coin), allowing the dust top-up the builder takes out of the payout, and never above the amount.
+        /// Every attribution of a payment to a row asks here, and an output to the row's own vault is never its payment
+        /// (<see cref="PaysOwnVault"/>).
         /// </summary>
-        internal static BtcTxOutput? PaidOutput(VaultWithdrawalRow row, IReadOnlyList<BtcTxOutput>? outputs, long inputSats)
+        internal static BtcTxOutput? PaidOutput(VaultWithdrawalRow row, IReadOnlyList<BtcTxOutput>? outputs, long inputSats, long vfxHeight, LiteDatabase? db)
         {
             if (outputs == null || outputs.Count == 0 || row.IsSweep || string.IsNullOrEmpty(row.DestinationScriptHex)) return null;
             var feeSats = inputSats - outputs.Sum(o => o.Sats);
@@ -35,11 +37,23 @@ namespace VerifiedXCore.Bitcoin.Attestation
             foreach (var output in outputs)
             {
                 if (!string.Equals(output.ScriptHex, row.DestinationScriptHex, StringComparison.OrdinalIgnoreCase) || output.Sats < BtcCanonicalWithdrawal.DustSats) continue;
+                if (PaysOwnVault(row, output, vfxHeight, db)) continue;
                 var amount = output.Sats + feeSats;
                 if (amount <= row.AmountSats && amount >= PayableSats(row) - BtcCanonicalWithdrawal.DustSats) return output;
             }
             return null;
         }
+
+        /// <summary>
+        /// Whether an output pays a script of the row's own vault, under any key the vault has had: the Bitcoin stays in the
+        /// vault, so it pays nobody. From <see cref="Globals.WithdrawalOwnScriptAttributionHeight"/> such an output is never
+        /// the row's payment. A re-key can make a withdrawal's destination the vault's own after it was mined, and every
+        /// release and sweep pays the vault's current key: matched by script, one of them settled that withdrawal while
+        /// nothing reached its requester. False below the height.
+        /// </summary>
+        private static bool PaysOwnVault(VaultWithdrawalRow row, BtcTxOutput output, long vfxHeight, LiteDatabase? db) =>
+            vfxHeight >= Globals.WithdrawalOwnScriptAttributionHeight
+            && BtcAttestStore.ScriptRowsForVault(row.SmartContractUID, db).Any(k => string.Equals(k.ScriptHex, output.ScriptHex, StringComparison.OrdinalIgnoreCase));
 
         /// <summary>Whether a transaction already settled a row of the vault: one transaction pays one, whichever of its coins is looked at.</summary>
         private static bool PaidAlready(string vault, string txid, LiteDatabase? db) =>
@@ -68,7 +82,7 @@ namespace VerifiedXCore.Bitcoin.Attestation
                 .OrderBy(r => r.RequestVfxHeight).ThenBy(r => r.Ref, StringComparer.Ordinal);
             foreach (var row in open)
             {
-                var paid = PaidOutput(row, spend.Outputs, inputSats);
+                var paid = PaidOutput(row, spend.Outputs, inputSats, vfxHeight, db);
                 if (paid == null) continue;
                 SettleByPayment(row, spend.Txid, spend.TxHex ?? "", inputs, inputSats, spend.Outputs, paid, report, vfxHeight, db);
                 return true;
@@ -108,7 +122,7 @@ namespace VerifiedXCore.Bitcoin.Attestation
                          .Where(p => p.ClaimedByRef == null && !p.Dropped && p.SeenAtVfxHeight >= vfxHeight - BtcAttestRules.RememberedPaymentBlocks)
                          .OrderBy(p => p.BitcoinHeight).ThenBy(p => p.Txid, StringComparer.Ordinal))
             {
-                var paid = PaidOutput(row, payment.Outputs, payment.InputSats);
+                var paid = PaidOutput(row, payment.Outputs, payment.InputSats, vfxHeight, db);
                 if (paid == null) continue;
                 payment.ClaimedByRef = row.Ref;
                 BtcAttestStore.SavePayment(payment, db);
