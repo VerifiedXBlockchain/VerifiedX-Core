@@ -1803,9 +1803,7 @@ namespace VerifiedXCore.Services
                         if (!ownerLocal && !nextOwnerLocal &&
                             VerifiedXCore.Bitcoin.Attestation.VaultLedgerStore.HasRows(scStateTreiRec))
                         {
-                            holdsBalance = localAddrs.Any(a => VerifiedXCore.Bitcoin.Attestation.VaultLedgerStore.Rows(scStateTreiRec)
-                                .Where(t => t.FromAddress == a || t.ToAddress == a)
-                                .Sum(t => t.Amount) > 0);
+                            holdsBalance = localAddrs.Any(a => VerifiedXCore.Bitcoin.Attestation.VaultLedgerStore.Balance(scStateTreiRec, a) > 0);
                         }
 
                         if (!ownerLocal && !nextOwnerLocal && !holdsBalance && !inboundPending.Contains(v2c.SmartContractUID))
