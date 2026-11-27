@@ -122,6 +122,14 @@ namespace VerifiedXCore
         public const long CustomTestNetInputRulesHeight = 8500;
 
         /// <summary>
+        /// Rules added once Marigold had passed <see cref="CustomTestNetInputRulesHeight"/> take effect from this block: dated
+        /// 8,500 they would judge blocks Marigold mined before its nodes ran them, and a node syncing from block 0 would
+        /// refuse, or apply differently, its own history. Set on 2026-11-27 with Marigold's tip about 25,000, room to
+        /// upgrade every Marigold node first.
+        /// </summary>
+        public const long CustomTestNetLateRulesHeight = 30_000;
+
+        /// <summary>
         /// The custom testnet's heights, over the testnet ones. Config.ProcessConfig selects a custom testnet after
         /// Program.cs and the Warden first apply the heights, so it applies them again once it has.
         /// </summary>
@@ -176,11 +184,11 @@ namespace VerifiedXCore
             Globals.ContractBodyKeySpellingHeight = CustomTestNetInputRulesHeight;
             Globals.ContractRunLimitsHeight = CustomTestNetInputRulesHeight;
             Globals.VrfMixHeight = CustomTestNetInputRulesHeight;
-            Globals.BridgeLockMinimumHeight = CustomTestNetInputRulesHeight;
-            Globals.VaultLedgerHeight = CustomTestNetInputRulesHeight;
-            Globals.BridgeAllocationsArrayHeight = CustomTestNetInputRulesHeight;
-            Globals.PoolUnlockCreditsAddressHeight = CustomTestNetInputRulesHeight;
-            Globals.BridgeLockEvmAddressHeight = CustomTestNetInputRulesHeight;
+            Globals.BridgeLockMinimumHeight = CustomTestNetLateRulesHeight;
+            Globals.BridgeAllocationsArrayHeight = CustomTestNetLateRulesHeight;
+            Globals.PoolUnlockCreditsAddressHeight = CustomTestNetLateRulesHeight;
+            Globals.BridgeLockEvmAddressHeight = CustomTestNetLateRulesHeight;
+            Globals.VaultLedgerHeight = CustomTestNetLateRulesHeight;
         }
     }
 }
