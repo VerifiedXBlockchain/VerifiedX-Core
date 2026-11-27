@@ -8,9 +8,9 @@ namespace VerifiedXCore.Services
 {
     /// <summary>
     /// Once a minute, one line in its own log file saying where this node's memory is: the process, the garbage collector's
-    /// heaps, the thread pool, how many peers are connected and how many entries the larger in-memory stores hold. It reads
-    /// counts and collector figures only and serializes nothing, so it costs nothing to leave on. The file goes through the
-    /// shared log writer, which caps a line and rotates the file.
+    /// heaps, the thread pool, how many peers are connected (and how many peer records are held), and how many entries the
+    /// larger in-memory stores hold. It reads counts and collector figures only and serializes nothing, so it costs
+    /// nothing to leave on. The file goes through the shared log writer, which caps a line and rotates the file.
     /// </summary>
     public static class MemoryLogService
     {
@@ -56,9 +56,14 @@ namespace VerifiedXCore.Services
 
             line.Append(" threads=").Append(ThreadPool.ThreadCount).Append(" queuedWork=").Append(ThreadPool.PendingWorkItemCount);
 
-            line.Append(" validatorPeers=").Append(Count(() => Globals.ValidatorNodes.Count))
-                .Append(" casterPeers=").Append(Count(() => Globals.BlockCasterNodes.Count))
-                .Append(" peers=").Append(Count(() => Globals.Nodes.Count));
+            // Connected now, and records held: a record can outlive its connection, and both matter (one is traffic, the
+            // other is what is kept).
+            line.Append(" validatorPeers=").Append(Count(() => Globals.ValidatorNodes.Values.Count(n => n.IsConnected)))
+                .Append(" validatorPeerRecords=").Append(Count(() => Globals.ValidatorNodes.Count))
+                .Append(" casterPeers=").Append(Count(() => Globals.BlockCasterNodes.Values.Count(n => n.IsConnected)))
+                .Append(" casterPeerRecords=").Append(Count(() => Globals.BlockCasterNodes.Count))
+                .Append(" peers=").Append(Count(() => Globals.Nodes.Values.Count(n => n.IsConnected)))
+                .Append(" peerRecords=").Append(Count(() => Globals.Nodes.Count));
 
             line.Append(" craftedBlocks=").Append(Count(() => RequestBlockCache.EntryCount))
                 .Append(" casterRounds=").Append(Count(() => Globals.CasterRoundDict.Count))
