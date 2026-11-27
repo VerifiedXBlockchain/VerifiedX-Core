@@ -265,7 +265,7 @@ namespace VerifiedXCore.Data
             try { vbtcWithdrawalRequests.EnsureIndex(VerifiedXCore.Bitcoin.Models.VBTCWithdrawalRequest.CompletedShortUidIndexName, VerifiedXCore.Bitcoin.Models.VBTCWithdrawalRequest.CompletedShortUidIndexExpression); }
             catch (Exception ex) { ErrorLogUtility.LogError($"Withdrawal request completed index: {ex.Message}", "DbContext.Initialize()"); }
             // A request's UniqueId is looked up under its requester and contract; a requester's other rows are never deleted.
-            try { vbtcWithdrawalRequests.EnsureIndex(VerifiedXCore.Bitcoin.Models.VBTCWithdrawalRequest.RequestKeyIndexName, VerifiedXCore.Bitcoin.Models.VBTCWithdrawalRequest.RequestKeyIndexExpression); }
+            try { VerifiedXCore.Bitcoin.Models.VBTCWithdrawalRequest.EnsureKeyHashes(DB_VBTCWithdrawalRequests); }
             catch (Exception ex) { ErrorLogUtility.LogError($"Withdrawal request key index: {ex.Message}", "DbContext.Initialize()"); }
             // Token votes likewise: each vote cast read every vote ever cast in validation and again in apply, and a vote
             // costs one fee (round 33). Only fields whose every value is bounded are indexed: LiteDB refuses an index key
@@ -610,6 +610,8 @@ namespace VerifiedXCore.Data
             DB_Bitcoin = new LiteDatabase(new ConnectionString { Filename = path + RSRV_DB_BITCOIN, Connection = ConnectionType.Direct, ReadOnly = false });
             DB_TokenizedWithdrawals = new LiteDatabase(new ConnectionString { Filename = path + RSRV_DB_TOKENIZED_WITHDRAWALS, Connection = ConnectionType.Direct, ReadOnly = false });
             DB_VBTCWithdrawalRequests = new LiteDatabase(new ConnectionString { Filename = path + RSRV_DB_VBTC_WITHDRAWAL_REQUESTS, Connection = ConnectionType.Direct, ReadOnly = false });
+            try { VerifiedXCore.Bitcoin.Models.VBTCWithdrawalRequest.EnsureKeyHashes(DB_VBTCWithdrawalRequests); }
+            catch (Exception ex) { ErrorLogUtility.LogError($"Withdrawal request key index: {ex.Message}", "DbContext.MigrateDbNewChainRef()"); }
             DB_vBTC = new LiteDatabase(new ConnectionString { Filename = path + RSRV_DB_VBTC, Connection = ConnectionType.Direct, ReadOnly = false });
             VerifiedXCore.Bitcoin.Models.VBTCWithdrawalCancellation.EnsureIndexes(DB_vBTC);
             DB_Shares = new LiteDatabase(new ConnectionString { Filename = path + RSRV_DB_SHARES, Connection = ConnectionType.Direct, ReadOnly = false });

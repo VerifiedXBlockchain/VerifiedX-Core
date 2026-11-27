@@ -56,6 +56,22 @@ namespace VerifiedXCore.Bitcoin.Models
         public string? CompleteAfterBtcTxId { get; set; }
         public string? DeferredSignedTxHex { get; set; }
 
+        /// <summary>
+        /// A fixed-length hash of the row's key (requester, UniqueId, contract), equal for two keys exactly when the
+        /// database compares each of the three as equal: the index the key is looked up through (<see cref="RowsUnderKey"/>).
+        /// Worked out from the three fields whenever the row is written, never set. Local to this node: its value depends
+        /// on how this node's database compares strings.
+        /// </summary>
+        [Newtonsoft.Json.JsonIgnore, System.Text.Json.Serialization.JsonIgnore]
+        public string? RequestKeyHash { get => KeyHashAsStored(RequestorAddress, OriginalUniqueId, SmartContractUID); set { } }
+
+        /// <summary>
+        /// Which comparison <see cref="RequestKeyHash"/> was made with (<see cref="KeyHashVersion"/>); none when the hash
+        /// could not be made. A row carrying another, or none, is hashed again before the index is read.
+        /// </summary>
+        [Newtonsoft.Json.JsonIgnore, System.Text.Json.Serialization.JsonIgnore]
+        public string? RequestKeyHashVersion { get => RequestKeyHash == null ? null : KeyHashVersion(); set { } }
+
         // S3C §0: ~1 hour at ~10s/block; matches the existing 1-hour FROST ceremony TTL.
         public const long EXPIRY_BLOCKS = 360;
 
@@ -142,29 +158,157 @@ namespace VerifiedXCore.Bitcoin.Models
                 .ToList();
         }
 
+        /// <summary>The hash of a key none of whose parts is missing is 64 hex digits; a row missing one carries this instead.</summary>
+        internal const string NoKeyHash = "-";
+
+        private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, string?> KeyHashVersions = new();
+
         /// <summary>
-        /// The index on a request's requester, UniqueId and contract together ("requester|UniqueId|contract"), kept while
-        /// the three are at most 320 characters long; a longer row is indexed under its requester alone (LiteDB refuses a
-        /// key over 1,023 bytes).
+        /// Names the way this node's database compares strings, as far as a key's hash depends on it: the collation, the
+        /// version of the comparison data behind it, and the sort keys it gives a few fixed strings. Null when the
+        /// platform gives no sort keys.
         /// </summary>
-        internal const string RequestKeyIndexExpression = "IIF(LENGTH($.RequestorAddress) + LENGTH($.OriginalUniqueId) + LENGTH($.SmartContractUID) <= 320, $.RequestorAddress + '|' + $.OriginalUniqueId + '|' + $.SmartContractUID, $.RequestorAddress)";
-        internal const string RequestKeyIndexName = "RequesterUniqueIdContract";
+        internal static string? KeyHashVersion()
+        {
+            var collation = DbContext.DB_VBTCWithdrawalRequests?.Collation;
+            if (collation == null) return null;
+            var name = collation.ToString();
+            if (KeyHashVersions.TryGetValue(name, out var known)) return known;
+            try
+            {
+                {
+                    var compare = collation.Culture.CompareInfo;
+                    using var sha = System.Security.Cryptography.SHA256.Create();
+                    using var bytes = new MemoryStream();
+                    void Add(byte[] part) { bytes.Write(BitConverter.GetBytes(part.Length)); bytes.Write(part); }
+                    Add(System.Text.Encoding.UTF8.GetBytes($"{collation}|{compare.Version?.FullVersion}|{compare.Version?.SortId}"));
+                    foreach (var probe in new[] { "", "a", "A", "Z", "0", "9", ":", "x1", "\u00e9", "\u00df", "\u0130", "\u200d", "\u4e2d" })
+                        Add(compare.GetSortKey(probe, collation.SortOptions).KeyData);
+                    return KeyHashVersions[name] = "v1" + Convert.ToHexString(sha.ComputeHash(bytes.ToArray()), 0, 8).ToLowerInvariant();
+                }
+            }
+            catch (Exception ex) when (ex is not OutOfMemoryException) { return null; } // not kept: asked again next time
+        }
+
+        /// <summary>
+        /// The hash of a key as asked for: SHA-256 over the three parts' sort keys under the database's collation, each
+        /// with its length. Two strings have the same sort key exactly when the collation compares them as equal, so two
+        /// keys have the same hash exactly when the database's own comparison finds all three parts equal. Null when a
+        /// part is missing or the platform gives no sort keys.
+        /// </summary>
+        internal static string? KeyHash(string? address, string? uniqueId, string? scUID)
+        {
+            if (string.IsNullOrEmpty(address) || string.IsNullOrEmpty(uniqueId) || string.IsNullOrEmpty(scUID) || KeyHashVersion() == null) return null;
+            try
+            {
+                var collation = DbContext.DB_VBTCWithdrawalRequests.Collation;
+                var compare = collation.Culture.CompareInfo;
+                using var sha = System.Security.Cryptography.SHA256.Create();
+                using var bytes = new MemoryStream();
+                foreach (var part in new[] { address, uniqueId, scUID })
+                {
+                    var key = compare.GetSortKey(part, collation.SortOptions).KeyData;
+                    bytes.Write(BitConverter.GetBytes(key.Length));
+                    bytes.Write(key);
+                }
+                return Convert.ToHexString(sha.ComputeHash(bytes.ToArray())).ToLowerInvariant();
+            }
+            catch (Exception ex) when (ex is not OutOfMemoryException) { return null; }
+        }
+
+        /// <summary>
+        /// The hash a row is written with: of its three parts as the database stores them (trimmed; an empty one is not
+        /// stored), <see cref="NoKeyHash"/> when one is missing. Null only when no hash can be made on this platform.
+        /// </summary>
+        internal static string? KeyHashAsStored(string? address, string? uniqueId, string? scUID)
+        {
+            var db = DbContext.DB_VBTCWithdrawalRequests;
+            if (db == null || KeyHashVersion() == null) return null;
+            string? Stored(string? value) => value == null ? null : db.Mapper.Serialize(typeof(string), value) is { IsString: true } kept ? kept.AsString : null;
+            var (a, u, c) = (Stored(address), Stored(uniqueId), Stored(scUID));
+            return a == null || u == null || c == null ? NoKeyHash : KeyHash(a, u, c);
+        }
+
+        /// <summary>
+        /// Creates the indexes on the key's hash and its version, and hashes every row that does not carry this node's
+        /// current hash: rows written before the field existed, and rows hashed under another comparison. Called when the
+        /// database is opened; <see cref="RowsUnderKey"/> calls it again if it meets such a row later.
+        /// </summary>
+        internal static void EnsureKeyHashes(LiteDatabase? db)
+        {
+            if (db == null) return;
+            var rows = db.GetCollection(DbContext.RSRV_VBTC_WITHDRAWAL_REQUESTS);
+            try { if (rows.DropIndex(RetiredKeyIndexName)) { } } catch { }
+            rows.EnsureIndex(nameof(RequestKeyHash), "$." + nameof(RequestKeyHash));
+            rows.EnsureIndex(nameof(RequestKeyHashVersion), "$." + nameof(RequestKeyHashVersion));
+            var version = KeyHashVersion();
+            if (version == null) return;
+            lock (RowWrite)
+            {
+                while (true)
+                {
+                    // The rows whose version sorts before the current one (none at all sorts first) and those after it.
+                    var stale = rows.Find(Query.LT("$." + nameof(RequestKeyHashVersion), version), limit: 1000)
+                        .Concat(rows.Find(Query.GT("$." + nameof(RequestKeyHashVersion), version), limit: 1000)).ToList();
+                    if (stale.Count == 0) break;
+                    foreach (var row in stale)
+                    {
+                        string? Text(string field) => row.TryGetValue(field, out var value) && value.IsString && value.AsString.Length > 0 ? value.AsString : null;
+                        var (a, u, c) = (Text(nameof(RequestorAddress)), Text(nameof(OriginalUniqueId)), Text(nameof(SmartContractUID)));
+                        row[nameof(RequestKeyHash)] = a == null || u == null || c == null ? NoKeyHash : KeyHash(a, u, c) ?? throw new InvalidOperationException("A request's key could not be hashed.");
+                        row[nameof(RequestKeyHashVersion)] = version;
+                        rows.Update(row);
+                    }
+                }
+            }
+        }
+
+        /// <summary>The index an earlier build kept on the three fields joined; dropped when met.</summary>
+        internal const string RetiredKeyIndexName = "RequesterUniqueIdContract";
+
+        /// <summary>Whether every row carries this node's current hash: the first and the last version in the index are the current one (or there is no row).</summary>
+        private static bool KeyHashesAreCurrent(LiteDB.ILiteCollection<VBTCWithdrawalRequest> col, string version)
+        {
+            const string field = "$." + nameof(RequestKeyHashVersion);
+            var first = col.Query().OrderBy(field).Select(field).Limit(1).ToList();
+            if (first.Count == 0) return true;
+            var last = col.Query().OrderByDescending(field).Select(field).Limit(1).ToList();
+            bool Current(BsonValue value) => value.IsString && string.Equals(value.AsString, version, StringComparison.Ordinal);
+            return Current(first[0][nameof(RequestKeyHashVersion)]) && Current(last[0][nameof(RequestKeyHashVersion)]);
+        }
 
         /// <summary>
         /// The rows whose requester, UniqueId and contract each equal the given one as the database compares it, by Id.
-        /// Read through <see cref="RequestKeyIndexExpression"/>, so the requester's other rows are not loaded: the rows
-        /// indexed under the three together, and the requester's rows indexed under the requester alone (long ones), each
-        /// checked field by field.
+        /// Read through the index on <see cref="RequestKeyHash"/>, so no other row of the requester is loaded, however long
+        /// its key: the rows under the key's hash, each then checked field by field. The index is read only while every
+        /// row carries this node's current hash; a row that does not is hashed first, and if that cannot be done, or a
+        /// part of the key is missing, the rows are found as before the index existed.
         /// </summary>
         public static List<VBTCWithdrawalRequest> RowsUnderKey(LiteDB.ILiteCollection<VBTCWithdrawalRequest> col, string? address, string? uniqueId, string? scUID)
         {
-            if (string.IsNullOrEmpty(address) || string.IsNullOrEmpty(uniqueId) || string.IsNullOrEmpty(scUID))
-                return col.Query().Where(x => x.RequestorAddress == address && x.OriginalUniqueId == uniqueId && x.SmartContractUID == scUID)
+            List<VBTCWithdrawalRequest> Unindexed() =>
+                col.Query().Where(x => x.RequestorAddress == address && x.OriginalUniqueId == uniqueId && x.SmartContractUID == scUID)
                     .ToList().OrderBy(x => x.Id).ToList();
+
+            var hash = KeyHash(address, uniqueId, scUID);
+            var version = KeyHashVersion();
+            if (hash == null || version == null) return Unindexed();
+            try
+            {
+                if (!KeyHashesAreCurrent(col, version))
+                {
+                    EnsureKeyHashes(DbContext.DB_VBTCWithdrawalRequests);
+                    if (!KeyHashesAreCurrent(col, version)) return Unindexed();
+                }
+            }
+            catch (Exception ex)
+            {
+                ErrorLogUtility.LogError($"Withdrawal request key hashes: {ex.Message}", "VBTCWithdrawalRequest.RowsUnderKey()");
+                return Unindexed();
+            }
             var collation = DbContext.DB_VBTCWithdrawalRequests.Collation;
-            // A row without one of the three is stored without the field, and never equalled a value asked for.
-            return col.Find(LiteDB.Query.EQ(RequestKeyIndexExpression, address + "|" + uniqueId + "|" + scUID))
-                .Concat(col.Find(LiteDB.Query.EQ(RequestKeyIndexExpression, address)))
+            return col.Find(LiteDB.Query.EQ("$." + nameof(RequestKeyHash), hash))
+                // A row without one of the three is stored without the field, and never equalled a value asked for.
                 .Where(x => !string.IsNullOrEmpty(x.RequestorAddress) && !string.IsNullOrEmpty(x.OriginalUniqueId) && !string.IsNullOrEmpty(x.SmartContractUID)
                     && collation.Compare(x.RequestorAddress, address) == 0
                     && collation.Compare(x.OriginalUniqueId, uniqueId) == 0
