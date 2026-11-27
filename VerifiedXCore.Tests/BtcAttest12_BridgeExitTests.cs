@@ -489,6 +489,12 @@ namespace VerifiedXCore.Tests
                 var answer = await Ask();                                                           // goes on to the signing key
                 Assert.NotEqual(VerifiedXCore.Bitcoin.Services.BaseBridgeAttestationService.LockInsideReorgWindowReason, answer);
                 Assert.DoesNotContain("not at the network's height", answer ?? "");
+
+                // A blacklisted lock pays no exit, so no mint is signed against it; given back, it may be minted again.
+                Assert.True(VBTCBridgeLockState.BlacklistLock(lockId, 0M, 0L, "FROST fail: test"));
+                Assert.Contains("is blacklisted", await Ask());
+                Assert.Equal(1, VBTCBridgeLockState.GiveBackFailBlacklisted());
+                Assert.DoesNotContain("is blacklisted", await Ask() ?? "");
             }
             finally
             {

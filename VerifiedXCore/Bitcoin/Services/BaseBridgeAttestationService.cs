@@ -124,6 +124,13 @@ namespace VerifiedXCore.Bitcoin.Services
                     return Task.FromResult<(bool, string?, string?)>((false, null, "Lock id must be the lock's own id exactly"));
                 }
 
+                // Only a lock that can pay exits backs a mint: one minted while blacklisted is supply no lock redeems.
+                if (VBTCBridgeLockState.MintRefusal(chainLock) is { } mintRefusal)
+                {
+                    LogUtility.Log($"[BridgeAttest] REJECT: {mintRefusal}", TAG);
+                    return Task.FromResult<(bool, string?, string?)>((false, null, mintRefusal));
+                }
+
                 // C-066: vBTCb is minted on Base for good, while the block that carried the lock can still be replaced by
                 // a reorganisation: a lock signed at depth one and dropped by a reorg left vBTCb with no lock behind it. No
                 // attestation until the lock is MintAttestationDepth deep, and none from a node off the network's chain.
