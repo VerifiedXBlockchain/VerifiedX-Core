@@ -158,6 +158,29 @@ namespace VerifiedXCore.Tests
             Assert.Equal(Globals.ReleaseRulesTestnetHeight, Globals.CanonicalInputHeight);
         }
 
+        /// <summary>
+        /// A payment to a withdrawal's own vault stops settling it at WithdrawalOwnScriptAttributionHeight; such a withdrawal
+        /// stops being fixed on coins at WithdrawalDestinationRecheckHeight. The first must never come before the second, on
+        /// any network: between the two, a bridge exit's part to its own vault would be voided by its own payment, fixed
+        /// again, paid to the vault again, and so on, at a Bitcoin fee each time.
+        /// </summary>
+        [Fact]
+        public void OwnScriptAttribution_StartsNoEarlierThanTheDestinationRecheck_OnEveryNetwork()
+        {
+            Globals.IsTestNet = false;
+            Globals.IsCustomTestNet = false;
+            Globals.ApplyNetworkHeights();
+            Assert.True(Globals.WithdrawalOwnScriptAttributionHeight >= Globals.WithdrawalDestinationRecheckHeight, "mainnet");
+
+            StartTestnetNode(new Config.Config { TestNet = true });
+            Assert.False(Globals.IsCustomTestNet);
+            Assert.True(Globals.WithdrawalOwnScriptAttributionHeight >= Globals.WithdrawalDestinationRecheckHeight, "testnet");
+
+            StartTestnetNode(new Config.Config { TestNet = true, TestNetName = "marigold" });
+            Assert.True(Globals.IsCustomTestNet);
+            Assert.True(Globals.WithdrawalOwnScriptAttributionHeight >= Globals.WithdrawalDestinationRecheckHeight, "custom testnet");
+        }
+
         [Fact]
         public void Mainnet_LeavesTheCanonicalInputRuleUnset()
         {
