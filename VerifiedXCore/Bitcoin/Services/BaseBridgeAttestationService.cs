@@ -221,6 +221,33 @@ namespace VerifiedXCore.Bitcoin.Services
             }
         }
 
+        /// <summary>Seconds a lock's collected state is kept for the progress route after it was last collected.</summary>
+        internal const long AttestationStateSeconds = 30 * 60;
+        /// <summary>The most locks whose collected state is kept at once; past it the oldest go first.</summary>
+        internal const int MaxAttestationStates = 2_000;
+
+        /// <summary>
+        /// Drops the collected state of locks last collected longer ago than <see cref="AttestationStateSeconds"/>, and
+        /// the oldest beyond <see cref="MaxAttestationStates"/>. A lock still being collected is collected again every
+        /// round and so stays; one that is ready or minted has its signatures on its lock record. Returns how many went.
+        /// </summary>
+        internal static int PruneAttestationStates(long now)
+        {
+            var dropped = 0;
+            foreach (var entry in Pending)
+                if (now - entry.Value.CreatedAt > AttestationStateSeconds && Pending.TryRemove(entry))
+                    dropped++;
+            var over = Pending.Count - MaxAttestationStates;
+            if (over > 0)
+                foreach (var entry in Pending.OrderBy(e => e.Value.CreatedAt).ThenBy(e => e.Key, StringComparer.Ordinal).Take(over).ToList())
+                    if (Pending.TryRemove(entry))
+                        dropped++;
+            return dropped;
+        }
+
+        /// <summary>Tests only: how many locks' collected state is held.</summary>
+        internal static int AttestationStatesHeld => Pending.Count;
+
         /// <summary>How long the caster's collector waits for the remaining signers once it has enough signatures.</summary>
         internal static readonly TimeSpan SpareSignaturesWait = TimeSpan.FromSeconds(3);
 
@@ -319,6 +346,7 @@ namespace VerifiedXCore.Bitcoin.Services
             {
                 try
                 {
+                    PruneAttestationStates(TimeUtil.GetTime());
                     if (Globals.IsBlockCaster && BaseBridgeService.IsBridgeConfigured)
                     {
                         var required = await BaseBridgeService.GetRequiredMintSignaturesFromChainAsync();
