@@ -246,5 +246,43 @@ namespace VerifiedXCore.Tests
                 Assert.Contains("no longer accepted (from block " + H2, why);
             }
         }
+        private static long Allocated(Action run)
+        {
+            var before = GC.GetAllocatedBytesForCurrentThread();
+            run();
+            return GC.GetAllocatedBytesForCurrentThread() - before;
+        }
+
+        /// <summary>
+        /// A bridge exit or unlock names a vault for each of its allocations, and the freeze reads the state document of
+        /// each vault named (its whole ledger) to see whether it is frozen. A transaction naming the same large watched vault
+        /// in every allocation read that document once per allocation; it is read once for each vault named, with the same
+        /// answer.
+        /// </summary>
+        [Fact]
+        public async Task ABridgeUnlockNamingOneVaultInEveryAllocation_ReadsThatVaultOnce()
+        {
+            await Start();
+            var watched = await CreateVault(H1 + 1);
+            var state = SmartContractStateTrei.GetSmartContractState(watched.Uid)!;
+            state.SCStateTreiTokenizationTXes = Enumerable.Range(0, 20_000)
+                .Select(i => new SmartContractStateTreiTokenizationTX { FromAddress = "+", ToAddress = $"xHolder{i:D27}", Amount = 0.00001M })
+                .ToList();
+            SmartContractStateTrei.UpdateSmartContract(state);
+
+            var allocations = Enumerable.Range(0, 200)
+                .Select(i => new { LockId = $"no-such-lock-{i}", UnlockAmount = 0.00001M, SmartContractUID = watched.Uid }).ToArray();
+            var unlock = SignedBy(_holder, _holder.Address, TransactionType.VBTC_V2_BRIDGE_POOL_UNLOCK,
+                new { Function = "VBTCBridgePoolUnlock()", ContractUID = watched.Uid, Amount = 0.002M, Allocations = allocations });
+
+            Assert.False(BtcLegacyFreeze.IsLegacyVault(watched.Uid)); // warm
+            Assert.Null(BtcLegacyFreeze.Refusal(unlock, H2));         // a watched vault is not frozen
+            var read = Allocated(() => BtcLegacyFreeze.IsLegacyVault(watched.Uid));
+            string? refusal = "unset";
+            var check = Allocated(() => refusal = BtcLegacyFreeze.Refusal(unlock, H2));
+            Assert.Null(refusal);
+            var reads = (double)check / read;
+            Assert.True(reads < 4, $"the freeze allocated {check:N0} bytes, {reads:F1} reads of the vault's document ({read:N0} bytes each), for {allocations.Length} allocations");
+        }
     }
 }
