@@ -300,11 +300,15 @@ namespace VerifiedXCore.Tests
 
         /// <summary>
         /// 2. An exit on a watched vault that could not be pinned is failed by rule (ExpireExit) and its locks restored.
-        /// Its votes, public in its block, then count for no later attempt, even its own handler's: a new attempt carries
-        /// votes given after the failed exit's block. Fresh votes from a new round are accepted and the exit made again.
+        /// Its votes, public in its block, then count for no later attempt, even its own handler's, whether they were
+        /// stamped before that block or after it within the skew the block allowed: a new attempt carries votes stamped
+        /// later than any vote that block could hold. Fresh votes from a new round are accepted and the exit made again.
         /// </summary>
-        [Fact]
-        public async Task AfterAnExitIsFailedByRule_ItsVotesCountForNoLaterAttempt_AndFreshVotesMakeItAgain()
+        [Theory]
+        [InlineData(-10)]  // stamped before the failed exit's block
+        [InlineData(60)]   // after it, within the forward skew the block allows
+        [InlineData(420)]  // the latest that block allows
+        public async Task AfterAnExitIsFailedByRule_ItsVotesCountForNoLaterAttempt_AndFreshVotesMakeItAgain(long stampedAfterItsBlock)
         {
             await Start();
             var vault = await CreateVault(H1 + 1); // watched, with no Bitcoin yet: nothing can be pinned for it
@@ -313,9 +317,9 @@ namespace VerifiedXCore.Tests
             var lockId = Lock(0.004M, vault.Uid);
             var burn = NewBurn();
             var now = TimeUtil.GetTime();
-            var firstBlock = now - 200;
-            var firstVotes = Votes(burn, "BTC_EXIT", 400_000, BtcDest, firstBlock - 10, Handler);
-            var first = Exit(burn, 0.004M, firstVotes, Handler, lockId, vault.Uid, timestamp: firstBlock - 10);
+            var firstBlock = now - 1_000;
+            var firstVotes = Votes(burn, "BTC_EXIT", 400_000, BtcDest, firstBlock + stampedAfterItsBlock, Handler);
+            var first = Exit(burn, 0.004M, firstVotes, Handler, lockId, vault.Uid, timestamp: firstBlock + stampedAfterItsBlock);
             Accepted(await InBlock(first, Tip + 1, firstBlock));
             await ApplyStored(Tip + 1, firstBlock, first);
             var mined = Tip;
@@ -340,6 +344,13 @@ namespace VerifiedXCore.Tests
             BlockchainData.GetBlocks().DeleteMany(b => b.Height == mined);
             Refused(await InBlock(again, Tip + 1, now), "could not be read", "without the failed exit's block");
             BlockchainData.GetBlocks().InsertSafe(stored);
+
+            // A vote stamped as late as the failed exit's block allowed is one it could have carried; one second later is not.
+            var latest = BridgeCasterConsensus.LatestVoteInBlock(firstBlock);
+            Assert.Equal(firstBlock + 420, latest);
+            Refused(await InBlock(Exit(burn, 0.004M, Votes(burn, "BTC_EXIT", 400_000, BtcDest, latest, Handler), Handler, lockId, vault.Uid), Tip + 1, now),
+                BridgeCasterConsensus.VoteOutsideAttemptTimeReason, "with votes the failed exit's block allowed");
+            Accepted(await InBlock(Exit(burn, 0.004M, Votes(burn, "BTC_EXIT", 400_000, BtcDest, latest + 1, Handler), Handler, lockId, vault.Uid), Tip + 1, now));
 
             // A new round's votes, given after it, make the exit again.
             var fresh = Exit(burn, 0.004M, Votes(burn, "BTC_EXIT", 400_000, BtcDest, now - 5, Handler), Handler, lockId, vault.Uid);

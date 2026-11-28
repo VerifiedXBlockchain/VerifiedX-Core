@@ -796,8 +796,9 @@ namespace VerifiedXCore
         /// agreed to, signed by that caster (the confirmation's handler signature), and that handler is the transaction's
         /// sender. Each counted vote is timestamped no earlier than BridgeCasterConsensus.VoteMaxAgeSeconds before the
         /// block and no later than the block's allowance for clock skew, and, when the burn has an earlier exit that
-        /// failed, after the block that holds that exit. At admission the same rules are judged against this node's
-        /// clock with a margin (BridgeCasterConsensus.AttemptFor). The vote message itself is unchanged.
+        /// failed, after the latest time the block that holds that exit allowed a vote to be stamped. At admission the
+        /// same rules are judged against this node's clock with a margin (BridgeCasterConsensus.AttemptFor). The vote
+        /// message itself is unchanged.
         /// Unset (long.MaxValue) on both networks until the release that activates it.
         /// </summary>
         public static long BridgeVotesBoundToAttemptHeight = long.MaxValue;

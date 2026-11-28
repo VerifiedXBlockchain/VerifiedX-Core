@@ -274,9 +274,17 @@ namespace VerifiedXCore.Bitcoin.Services
         /// rescan) is held to the handler and to the earlier attempt only. At admission (<paramref name="blockHeight"/>
         /// null) they are taken from this node's clock, the age limit <see cref="VoteAdmissionMarginSeconds"/> shorter and
         /// the skew allowance without the block margin. When <paramref name="failedExitBurn"/> has an exit that failed and
-        /// was recorded with its block (ExitVfxHeight), a counted vote is newer than that block: the earlier attempt's votes
-        /// were given before it. Refusal is set when that block cannot be read.
+        /// was recorded with its block (ExitVfxHeight), a counted vote is newer than the latest a vote in that block could be
+        /// stamped (<see cref="LatestVoteInBlock"/>): no vote the earlier attempt carried counts again. A new round after
+        /// that exit failed is at least VBTCWithdrawalRequest.EXPIRY_BLOCKS blocks later. Refusal is set when that block
+        /// cannot be read.
         /// </summary>
+        /// <summary>
+        /// The latest a counted vote may be stamped in a block stamped <paramref name="blockTime"/>: the forward skew a
+        /// block allows a transaction's timestamp, with the margin.
+        /// </summary>
+        public static long LatestVoteInBlock(long blockTime) => blockTime + Globals.MaxFutureSkewSeconds + LedgerIntegrityRules.BlockTimeMarginSeconds;
+
         public static (VoteAttempt? Attempt, string? Refusal) AttemptFor(string submitter, string? failedExitBurn, long height, long? blockHeight, long? blockTime)
         {
             if (height < Globals.BridgeVotesBoundToAttemptHeight) return (null, null);
@@ -288,7 +296,7 @@ namespace VerifiedXCore.Bitcoin.Services
                 var earlier = VerifiedXCore.Data.BlockchainData.GetBlockByHeight(failed.ExitVfxHeight);
                 if (earlier == null)
                     return (null, $"The block of this burn's earlier exit ({failed.ExitVfxHeight}) could not be read.");
-                notBefore = earlier.Timestamp + 1;
+                notBefore = LatestVoteInBlock(earlier.Timestamp) + 1;
             }
 
             var notAfter = long.MaxValue;
@@ -301,7 +309,7 @@ namespace VerifiedXCore.Bitcoin.Services
             else if (blockTime != null)
             {
                 notBefore = Math.Max(notBefore, blockTime.Value - VoteMaxAgeSeconds);
-                notAfter = blockTime.Value + Globals.MaxFutureSkewSeconds + LedgerIntegrityRules.BlockTimeMarginSeconds;
+                notAfter = LatestVoteInBlock(blockTime.Value);
             }
             return (new VoteAttempt(submitter ?? string.Empty, notBefore, notAfter), null);
         }
