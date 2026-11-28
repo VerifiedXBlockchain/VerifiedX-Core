@@ -422,9 +422,19 @@ namespace VerifiedXCore.Services
         public static CasterMembershipRecord? GetForHeight(long height)
         {
             // From the membership chain's start the chain says which record governs a height, the same on every node
-            // that holds its blocks (MembershipChain); the records this node holds decide only below it.
+            // that holds its blocks (MembershipChain); the records this node holds decide only below it. A block being
+            // judged is judged by the chain's record and the election or reset it carries itself, never by one this node
+            // happens to hold: two nodes, one holding a rotation and one not, would give the same block two verdicts.
             if (MembershipChain.RecordFor(height) is { } onChain)
-                return StartingAtNextBlock(height, onChain) ?? onChain;
+                return MembershipChain.IsJudging
+                    ? MembershipChain.CarriedByJudgedBlock(height, onChain) ?? onChain
+                    : StartingAtNextBlock(height, onChain) ?? onChain;
+            return HeldForHeight(height);
+        }
+
+        /// <summary>The record this node holds that governs <paramref name="height"/> by its own records alone: max EffectiveFromHeight &lt;= height.</summary>
+        public static CasterMembershipRecord? HeldForHeight(long height)
+        {
             var head = GetCurrent();
             if (head == null) return null;
             if (head.EffectiveFromHeight <= height) return head;
@@ -435,10 +445,9 @@ namespace VerifiedXCore.Services
         }
 
         /// <summary>
-        /// An election or a seed reset is in force from the block that carries it, and that block is judged before it is
-        /// written: for the next block, the one this node took from the block itself (VreeService.AdoptFromBlock, before its
-        /// transactions are judged) or holds for it, when it extends the chain's record and takes effect at that height.
-        /// VreeElection.PrepareBlockRecord puts a held one on the block, so the block's certificate must be its committee's.
+        /// Outside block judging (a caster's own round, the record it attaches to the block it certifies, the pool it works
+        /// with): an election or a seed reset this node holds that takes effect at the next block and extends the chain's
+        /// record. It governs that block only if the block carries it (MembershipChain.CarriedByJudgedBlock).
         /// </summary>
         private static CasterMembershipRecord? StartingAtNextBlock(long height, CasterMembershipRecord onChain)
         {

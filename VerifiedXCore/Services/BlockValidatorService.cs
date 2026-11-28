@@ -730,6 +730,7 @@ namespace VerifiedXCore.Services
             }
 
             await ValidateBlockSemaphore.WaitAsync();
+            using var judging = MembershipChain.Judging(block); // committee reads in this validation: the chain's and this block's own
 
             long? committedHeight = null; // set once the block is written: from then on a failure leaves the state behind it
             Action? undoCarriedRecord = null; // set once the block's record replaces siblings, cleared once the block is taken
@@ -2277,6 +2278,7 @@ namespace VerifiedXCore.Services
         //This method does not add block or update any treis
         public static async Task<bool> ValidateBlockForTask(Block block, bool ignoreAdjSignatures, bool blockDownloads = false)
         {
+            using var judging = MembershipChain.Judging(block);
             bool result = false;
 
             if (block == null) return result; //null block submitted. reject 

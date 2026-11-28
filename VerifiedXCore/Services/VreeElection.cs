@@ -797,7 +797,11 @@ namespace VerifiedXCore.Services
                     block.MembershipRecord = null;
                     break;
             }
-            AttachRecord(block);
+            // From the membership chain's start a block is judged by what it carries: a record this node holds is never put
+            // on a block it judges, or two nodes would judge one block by two committees (only the caster that certifies a
+            // block attaches one, ConsensusCertificateHelper).
+            if (!MembershipChain.ActiveAt(block.Height))
+                AttachRecord(block);
             return null;
         }
 

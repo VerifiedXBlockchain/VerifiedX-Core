@@ -64,6 +64,43 @@ namespace VerifiedXCore.Services
         }
 
         private static readonly ConcurrentDictionary<string, List<CasterMembershipRecord>?> _cache = new(StringComparer.Ordinal);
+
+        /// <summary>The block whose validation is running in this flow (BlockValidatorService), or null.</summary>
+        private static readonly AsyncLocal<Block?> _judged = new();
+
+        /// <summary>Whether a block is being judged in this flow: committee reads then come from the chain and that block only.</summary>
+        public static bool IsJudging => _judged.Value != null;
+
+        /// <summary>
+        /// Marks this flow as judging <paramref name="block"/> until the result is disposed. Every committee read inside it
+        /// (the certificate, the transactions' votes and senders) then reads the chain's record, or the election or reset
+        /// the block itself carries, and never a record this node holds that the block does not carry.
+        /// </summary>
+        public static IDisposable Judging(Block? block)
+        {
+            var prior = _judged.Value;
+            _judged.Value = block;
+            return new Restore(prior);
+        }
+
+        private sealed class Restore : IDisposable
+        {
+            private readonly Block? _prior;
+            public Restore(Block? prior) => _prior = prior;
+            public void Dispose() => _judged.Value = _prior;
+        }
+
+        /// <summary>
+        /// The election or reset the block being judged carries, when it is valid, takes effect at <paramref name="height"/>
+        /// (the block's own) and extends <paramref name="onChain"/>; else null.
+        /// </summary>
+        public static CasterMembershipRecord? CarriedByJudgedBlock(long height, CasterMembershipRecord onChain)
+        {
+            var block = _judged.Value;
+            if (block == null || block.Height != height || block.MembershipRecord is not { } carried || !IsCarriedType(carried.ChangeType)) return null;
+            if (carried.RecordSeq != onChain.RecordSeq + 1 || !string.Equals(carried.PrevRecordHash, onChain.RecordHash, StringComparison.OrdinalIgnoreCase)) return null;
+            return VreeElection.JudgeCarried(block) == VreeElection.CarriedVerdict.Valid ? carried : null;
+        }
         private const int CacheSize = 512;
 
         private static LiteDB.ILiteCollection<ChainRow>? Collection() => DbContext.DB?.GetCollection<ChainRow>(COLLECTION_NAME);

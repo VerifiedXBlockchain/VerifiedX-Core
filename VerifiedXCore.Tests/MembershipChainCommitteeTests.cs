@@ -250,6 +250,41 @@ namespace VerifiedXCore.Tests
             finally { Globals.VreeActivationHeight = priorVree; }
         }
 
+        /// <summary>
+        /// This node holds a seed reset (as it would an election or a rotation) that takes effect at the next block, and the
+        /// next block does not carry it: the outgoing committee certified it. A node without the reset takes that block, and
+        /// so must this one, or one block gets two verdicts. The block is judged by the chain's committee; the held record is
+        /// not put on it. Outside block judging (this node's own round) the held record is still the one it casts under.
+        /// </summary>
+        [Fact]
+        public async Task ARecordThisNodeHolds_ForTheNextBlock_DoesNotChangeTheVerdictOnABlockThatDoesNotCarryIt()
+        {
+            var priorVree = Globals.VreeActivationHeight;
+            Globals.VreeActivationHeight = 1;
+            try
+            {
+                await StartTheChain(Old);
+                var seeds = SeedNodeService.GetBootstrapSeedPeers().Where(p => !string.IsNullOrEmpty(p.ValidatorAddress))
+                    .Select(p => new CasterInfo { Address = p.ValidatorAddress!, PeerIP = (p.PeerIP ?? "").Replace("::ffff:", ""), PublicKey = p.ValidatorPublicKey ?? "" })
+                    .OrderBy(c => c.Address, StringComparer.Ordinal).ToList();
+                var reset = new CasterMembershipRecord
+                {
+                    RecordSeq = _anchor.RecordSeq + 1, EffectiveFromHeight = Tip + 1, PrevRecordHash = _anchor.RecordHash,
+                    ChangeType = CasterMembershipStore.BootstrapResetChangeType, Casters = seeds,
+                };
+                reset.RecordHash = CasterMembershipStore.ComputeRecordHash(reset);
+                Hold(reset);
+                Assert.Equal(reset.RecordHash, CasterMembershipStore.GetForHeight(Tip + 1)!.RecordHash); // its own round
+
+                var block = NextBlock(Old.Take(3), null);
+                Assert.True(await Take(block));
+
+                Assert.Null(BlockchainData.GetBlockByHeight(block.Height)!.MembershipRecord);
+                Assert.Equal(_anchor.RecordHash, MembershipChain.RecordFor(Tip + 1)!.RecordHash);
+            }
+            finally { Globals.VreeActivationHeight = priorVree; }
+        }
+
         // ── Below the chain's start nothing changes ─────────────────────────────────────────────
 
         [Fact]
