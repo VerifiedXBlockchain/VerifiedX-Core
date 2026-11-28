@@ -195,6 +195,9 @@ namespace VerifiedXCore.Tests
             var priorResyncing = Globals.IsResyncing;
             var priorStopTimers = Globals.StopAllTimers;
             var priorContract = BaseBridgeService.ContractAddress;
+            var priorBurnEvents = BaseBridgeService.BurnEventsForTests;
+            var onBase = new BaseBridgeService.BurnEventInfo { AmountSats = BelowSmallestExit, Destination = "bc1q", Burner = Burner };
+            BaseBridgeService.BurnEventsForTests = (id, vfx) => id == burn && !vfx ? (true, onBase, "") : (false, null, "No matching burn event emitted by the bridge contract");
             Globals.ValidatorAddress = validator.Address;
             Globals.IsChainSynced = true;
             Globals.IsResyncing = false;
@@ -203,11 +206,11 @@ namespace VerifiedXCore.Tests
             try
             {
                 (bool Ok, string? Sig, string? Error) Ask(string? id = null, string? to = null, long? sats = null, string? contract = null, int version = VbtcbTypedData.MessageVersion) =>
-                    BaseBridgeAttestationService.HandleRefundAttestationRequest(new RefundAttestationRequest
+                    BaseBridgeAttestationService.HandleRefundAttestationRequestAsync(new RefundAttestationRequest
                     {
                         RefundId = id ?? burn, To = to ?? Burner, AmountSats = sats ?? BelowSmallestExit,
                         ChainId = Globals.BaseEvmChainId, ContractAddress = contract ?? configured, MessageVersion = version,
-                    });
+                    }).GetAwaiter().GetResult();
 
                 Assert.Equal(BaseBridgeAttestationService.RefundInsideReorgWindowReason, Ask().Error);
                 for (var i = 0; i < BaseBridgeAttestationService.MintAttestationDepth; i++) await Apply(Tip + 1);
@@ -218,6 +221,16 @@ namespace VerifiedXCore.Tests
                 Assert.Equal("Amount mismatch", Ask(sats: BelowSmallestExit + 1).Error);
                 Assert.Equal(BaseBridgeAttestationService.ContractOrChainMismatchReason, Ask(contract: "0x" + new string('d', 40)).Error);
                 Assert.Equal(BaseBridgeAttestationService.UnsupportedMessageVersionReason, Ask(version: 3).Error);
+
+                // Recorded by the casters alone, so each validator reads the burn on Base before signing: a burn Base does not
+                // show, or one by another burner or of another amount, is refused.
+                BaseBridgeService.BurnEventsForTests = (_, _) => (false, null, "No matching burn event emitted by the bridge contract");
+                Assert.StartsWith(BaseBridgeAttestationService.BurnNotOnBaseReason, Ask().Error);
+                BaseBridgeService.BurnEventsForTests = (_, _) => (true, new BaseBridgeService.BurnEventInfo { AmountSats = BelowSmallestExit, Burner = "0x" + new string('e', 40) }, "");
+                Assert.Equal(BaseBridgeAttestationService.BurnDoesNotMatchRefundReason, Ask().Error);
+                BaseBridgeService.BurnEventsForTests = (_, _) => (true, new BaseBridgeService.BurnEventInfo { AmountSats = BelowSmallestExit + 1, Burner = Burner }, "");
+                Assert.Equal(BaseBridgeAttestationService.BurnDoesNotMatchRefundReason, Ask().Error);
+                BaseBridgeService.BurnEventsForTests = (id, vfx) => id == burn && !vfx ? (true, onBase, "") : (false, null, "none");
 
                 var (ok, sig, error) = Ask();
                 Assert.True(ok, error);
@@ -231,6 +244,7 @@ namespace VerifiedXCore.Tests
                 Globals.IsResyncing = priorResyncing;
                 Globals.StopAllTimers = priorStopTimers;
                 BaseBridgeService.ContractAddress = priorContract;
+                BaseBridgeService.BurnEventsForTests = priorBurnEvents;
             }
         }
 

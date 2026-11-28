@@ -1005,10 +1005,17 @@ namespace VerifiedXCore.Bitcoin.Services
                 return;
             }
             var localDest = localRecord.ExitType == BurnExitType.VfxPoolUnlock ? localRecord.VfxDestinationAddress : localRecord.BtcDestination;
+            // The round's vote message can read the exit table: built only for a committee caster's confirmation.
+            var committee = ExitCommittee();
+            if (string.IsNullOrWhiteSpace(confirmation.ConfirmingCasterAddress) || !committee.Contains(confirmation.ConfirmingCasterAddress))
+            {
+                LogUtility.Log($"[BurnExitConsensus] REJECTED confirmation for {confirmation.BaseBurnTxHash} from {confirmation.ConfirmingCasterAddress}: confirming caster is not a committee member", "BurnExitConsensusService");
+                return;
+            }
             var (confOk, confReason) = BridgeCasterConsensus.VerifyConfirmation(
                 confirmation.ConfirmingCasterAddress, confirmation.BaseBurnTxHash, BurnTypeString(localRecord.ExitType),
                 (long)(localRecord.Amount * 100_000_000M), localDest, confirmation.Timestamp, confirmation.Signature,
-                ExitCommittee(), RoundVoteMessage(localRecord, confirmation.Timestamp, VBTCService.NextBlockHeight));
+                committee, RoundVoteMessage(localRecord, confirmation.Timestamp, VBTCService.NextBlockHeight));
             if (!confOk)
             {
                 LogUtility.Log($"[BurnExitConsensus] REJECTED confirmation for {confirmation.BaseBurnTxHash} from {confirmation.ConfirmingCasterAddress}: {confReason}", "BurnExitConsensusService");

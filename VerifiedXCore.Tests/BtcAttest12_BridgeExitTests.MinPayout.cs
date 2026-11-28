@@ -29,6 +29,39 @@ namespace VerifiedXCore.Tests
             return SignedBy(Caster, Caster.Address, TransactionType.VBTC_V2_BRIDGE_EXIT_TO_BTC, data, free: true);
         }
 
+        /// <summary>A failed exit that named its burner (Globals.ExitPartRefundHeight) is refunded only to that burner.</summary>
+        [Fact]
+        public async Task AFailedMinimumPayoutExit_ThatNamedItsBurner_IsRefundedOnlyToThatBurner()
+        {
+            var priorPartRefund = Globals.ExitPartRefundHeight;
+            try
+            {
+                await Start();
+                SeatTheCommittee();
+                Globals.ExitMinPayoutHeight = Tip + 1;
+                Globals.BridgeBurnRefundHeight = Tip + 1;
+                Globals.ExitPartRefundHeight = Tip + 1;
+                var vault = await CreateVault(Tip + 1);
+                await Deposit(vault.Script, 1_000_000);
+                var lockId = await Lock(vault.Uid, 0.004M);
+                var burn = NewBurn();
+                var data = JObject.Parse(ExitWithMinimum(burn, 399_000, (lockId, vault.Uid, 0.004M)).Data);
+                data["BaseBurner"] = Burner;
+                await Mine(SignedBy(Caster, Caster.Address, TransactionType.VBTC_V2_BRIDGE_EXIT_TO_BTC, data, free: true));
+                Assert.Equal(Burner, Record(burn).BaseBurner);
+                await AdvanceTo(Tip + VBTCWithdrawalRequest.EXPIRY_BLOCKS + 1);
+                Assert.True(Record(burn).IsFailedRecord);
+
+                await RefusedInBlock(Refund(burn, 400_000, reason: VBTCBridgeRefundState.MinPayoutExitFailedReason, burner: "0x" + new string('c', 40)), "refunded to that address");
+                await Mine(Refund(burn, 400_000, reason: VBTCBridgeRefundState.MinPayoutExitFailedReason));
+                Assert.Equal(Burner, VBTCBridgeRefundState.Get(burn)!.BaseBurner);
+            }
+            finally
+            {
+                Globals.ExitPartRefundHeight = priorPartRefund;
+            }
+        }
+
         [Fact]
         public async Task AnExitPartPayingBelowItsShareOfTheMinimum_IsNeverPinned_TheExitExpires_AndTheBurnIsRefunded()
         {

@@ -5640,13 +5640,13 @@ namespace VerifiedXCore.Bitcoin.Controllers
         /// </summary>
         [HttpPost("SignRefundAttestation")]
         [ProducesResponseType(typeof(object), StatusCodes.Status200OK)]
-        public string SignRefundAttestation([FromBody] RefundAttestationRequest request)
+        public async Task<string> SignRefundAttestation([FromBody] RefundAttestationRequest request)
         {
             try
             {
                 if (request == null)
                     return JsonConvert.SerializeObject(new { success = false, message = "Payload cannot be null" });
-                var (ok, sig, err) = Services.BaseBridgeAttestationService.HandleRefundAttestationRequest(request);
+                var (ok, sig, err) = await Services.BaseBridgeAttestationService.HandleRefundAttestationRequestAsync(request);
                 return ok
                     ? JsonConvert.SerializeObject(new { success = true, signature = sig })
                     : JsonConvert.SerializeObject(new { success = false, message = err ?? "Signing failed" });

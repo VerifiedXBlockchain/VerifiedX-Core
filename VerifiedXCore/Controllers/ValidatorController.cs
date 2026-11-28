@@ -68,13 +68,13 @@ namespace VerifiedXCore.Controllers
         /// </summary>
         [HttpPost]
         [Route("SignRefundAttestation")]
-        public ActionResult<string> SignRefundAttestation([FromBody] Bitcoin.Models.RefundAttestationRequest? request)
+        public async Task<ActionResult<string>> SignRefundAttestation([FromBody] Bitcoin.Models.RefundAttestationRequest? request)
         {
             try
             {
                 if (request == null)
                     return BadRequest(JsonConvert.SerializeObject(new { success = false, error = "Empty request body" }));
-                var (success, signatureHex, error) = Bitcoin.Services.BaseBridgeAttestationService.HandleRefundAttestationRequest(request);
+                var (success, signatureHex, error) = await Bitcoin.Services.BaseBridgeAttestationService.HandleRefundAttestationRequestAsync(request);
                 return Ok(success
                     ? JsonConvert.SerializeObject(new { success = true, signature = signatureHex })
                     : JsonConvert.SerializeObject(new { success = false, error = error ?? "Attestation failed" }));

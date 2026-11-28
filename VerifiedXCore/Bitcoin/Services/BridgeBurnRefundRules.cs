@@ -67,6 +67,8 @@ namespace VerifiedXCore.Bitcoin.Services
                 var failed = FailedMinPayoutExit(refund.BurnId);
                 if (failed == null) return "This burn has no exit that carried a minimum payout and was failed by rule.";
                 if (failed.AmountSats != refund.AmountSats) return $"The failed exit was for {failed.AmountSats} sats; the whole burn is refunded.";
+                if (!string.IsNullOrEmpty(failed.BaseBurner) && !string.Equals(failed.BaseBurner, refund.Burner, StringComparison.OrdinalIgnoreCase))
+                    return $"The failed exit's burner was {failed.BaseBurner}; its burn is refunded to that address.";
                 return null;
             }
             return $"A bridge burn is not refunded for the reason \"{refund.Reason}\".";

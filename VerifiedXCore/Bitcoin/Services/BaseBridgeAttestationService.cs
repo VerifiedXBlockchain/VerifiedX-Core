@@ -230,9 +230,9 @@ namespace VerifiedXCore.Bitcoin.Services
         /// exact id, at least MintAttestationDepth blocks deep, the recipient and amount it holds, this node's contract and
         /// chain, the typed message (version 4), and only from a node on the network's chain. Returns the hex signature.
         /// </summary>
-        public static (bool success, string? signatureHex, string? error) HandleRefundAttestationRequest(RefundAttestationRequest request)
+        public static async Task<(bool success, string? signatureHex, string? error)> HandleRefundAttestationRequestAsync(RefundAttestationRequest request)
         {
-            const string TAG = "BaseBridgeAttestationService.HandleRefundAttestationRequest";
+            const string TAG = "BaseBridgeAttestationService.HandleRefundAttestationRequestAsync";
             try
             {
                 if (request == null) return (false, null, "Payload cannot be null");
@@ -261,6 +261,14 @@ namespace VerifiedXCore.Bitcoin.Services
                     return (false, null, UnsupportedMessageVersionReason);
                 if (NotReadyToAttest() is { } notReady)
                     return (false, null, notReady);
+                // A refund mints on Base with no VFX lock behind it, and the casters' votes alone recorded it: each validator
+                // reads the burn on Base itself before signing. The burner must be the refund's recipient, and the refund
+                // the whole burn, or for one part of a split exit (its id the burn's with "#" and the vault) no more than it.
+                if (await BurnOnBaseRefusal(refund) is { } notOnBase)
+                {
+                    LogUtility.Log($"[BridgeAttest] REJECT refund {refund.RefundId}: {notOnBase}", TAG);
+                    return (false, null, notOnBase);
+                }
 
                 var account = AccountData.GetSingleAccount(Globals.ValidatorAddress);
                 if (account == null) return (false, null, "Validator account not loaded");
@@ -276,6 +284,20 @@ namespace VerifiedXCore.Bitcoin.Services
                 LogUtility.Log($"[BridgeAttest] EXCEPTION signing refund {request?.RefundId}: {ex.Message}", TAG);
                 return (false, null, ApiErrorText.For(ex));
             }
+        }
+
+        internal const string BurnNotOnBaseReason = "The refund's burn is not a BTC exit burn on Base";
+        internal const string BurnDoesNotMatchRefundReason = "The refund does not match its burn on Base";
+
+        private static async Task<string?> BurnOnBaseRefusal(VBTCBridgeRefundState refund)
+        {
+            var (ok, burn, why) = await BaseBridgeService.TryGetBurnEventAsync(refund.BaseBurnTxHash, vfxExit: false);
+            if (!ok || burn == null) return $"{BurnNotOnBaseReason}: {why}";
+            var wholeBurn = string.Equals(refund.RefundId, refund.BaseBurnTxHash, StringComparison.Ordinal);
+            if (!string.Equals(burn.Burner, refund.BaseBurner, StringComparison.OrdinalIgnoreCase)
+                || (wholeBurn ? refund.AmountSats != burn.AmountSats : refund.AmountSats > burn.AmountSats))
+                return BurnDoesNotMatchRefundReason;
+            return null;
         }
 
         /// <summary>Seconds a lock's collected state is kept for the progress route after it was last collected.</summary>
