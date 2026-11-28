@@ -417,8 +417,14 @@ namespace VerifiedXCore.Services
                                         }
                                     }
 
-                                    taskDict[heightToDownload] = (P2PClient.GetBlock(heightToDownload, AvailableNode),
-                                        AvailableNode.NodeIP);
+                                    // A peer that served this block without the record it carries is asked again only
+                                    // when no other peer has it.
+                                    var source = heightToDownload == nextHeightToValidate
+                                        ? CarriedRecordCompletion.PreferSource(heightToDownload, AvailableNode, Globals.Nodes.Values.Where(x =>
+                                            x.IsSendingBlock == 0 && x.IsConnected && x.NodeHeight >= heightToDownload && RecoverySourcePolicy.IsEligible(x)))
+                                        : AvailableNode;
+                                    taskDict[heightToDownload] = (P2PClient.GetBlock(heightToDownload, source),
+                                        source.NodeIP);
                                 }
                             }
                         }
