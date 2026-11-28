@@ -550,6 +550,17 @@ namespace VerifiedXCore
         public const long BridgeLockEvmAddressTestnetHeight = long.MaxValue;
 
         /// <summary>
+        /// From this height a vBTC V2 bridge lock is at least VBTCService.MinBridgeLockPartSats, the smallest part a vault
+        /// pays in an exit to Bitcoin, so a fresh lock can pay an exit part by itself. Smaller locks, made one by one at a
+        /// VFX fee, were spread across vaults where no exit could use them together, and the cost of combining them fell
+        /// on whoever redeemed against them. Admission refuses a smaller one from the same height (the block it would
+        /// enter). A tightening rule. Unset (long.MaxValue) on mainnet and testnet until the release that activates it.
+        /// Testnet value in GlobalsNetworkHeights.
+        /// </summary>
+        public static long BridgeLockPartMinimumHeight = long.MaxValue;
+        public const long BridgeLockPartMinimumTestnetHeight = long.MaxValue;
+
+        /// <summary>
         /// From this height a bridge exit to Bitcoin carries its Allocations as a JSON array of at least one allocation, and
         /// apply reads a bridge exit's or pool unlock's Allocations only as an array. Within a block each allocation's lock is
         /// claimed once under its trimmed, lower-cased id (the lock look-up ignores case), whatever the exit's outer LockId says.
