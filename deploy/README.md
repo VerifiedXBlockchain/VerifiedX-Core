@@ -72,8 +72,10 @@ the casters cannot without the validators.
 - V5: if so many casters go dark that `updateCasters` can no longer be approved, `proposeCasterReplacement` lets 2/3 of
   the validators name the casters to remove and those to seat (each newcomer signing its own seat). It is a pending
   removal: it waits `upgradeDelay()`, `executeRemoval()` carries it out, and either group's blocking minority cancels it,
-  so casters that are still live can always stop their own replacement. This is how Base follows a caster committee
-  that VFX re-elected after an outage. A newcomer seated meanwhile is kept as it is; the list stays between 3 and 10.
+  so casters that are still live can always stop their own replacement. It never seats more casters than it removes,
+  so the validators alone cannot grow a caster majority of their own, and VFX nodes veto one that would seat a key
+  outside the VFX caster committee. This is how Base follows a caster committee that VFX re-elected after an outage. A
+  newcomer the casters seated during the delay (and perhaps removed again) is left as they made it.
 - V5: a removal proposed before V5 is never executed (V4 kept no seat nonces, so V5 cannot tell a member admitted again
   under V4); a new proposal may replace it at once.
 - V5: `burnForBTCExit` takes at least `MIN_BTC_EXIT_SATS` (25,186 sats, the smallest part a VFX vault pays in an exit

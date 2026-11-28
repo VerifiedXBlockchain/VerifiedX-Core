@@ -1330,7 +1330,11 @@ describe("vBTCb V4", function () {
             await expect(proposeReplacement(token, [vals[0], ...casters], dark, fresh)).to.be.revertedWithCustomError(V5, "InsufficientSignatures");
             await expect(proposeReplacement(token, vals.slice(0, 2), dark, fresh, [fresh[0], fresh[0]])).to.be.revertedWithCustomError(V5, "NewCasterDidNotSign");
             await expect(proposeReplacement(token, vals.slice(0, 2), dark, [])).to.be.revertedWithCustomError(V5, "CasterCountOutOfRange");
-            await expect(proposeReplacement(token, vals.slice(0, 2), [], fresh)).to.be.revertedWithCustomError(V5, "OneSignaturePerNewCaster");
+            await expect(proposeReplacement(token, vals.slice(0, 2), [], fresh)).to.be.revertedWithCustomError(V5, "CasterCountOutOfRange");
+            // Never more seats than it clears: 2/3 of the validators cannot grow a caster majority of their own.
+            await expect(proposeReplacement(token, vals.slice(0, 2), [casters[0].address], fresh)).to.be.revertedWithCustomError(V5, "CasterCountOutOfRange");
+            await expect(proposeReplacement(token, vals.slice(0, 2), [...dark, casters[2].address, vals[0].address], fresh)).to.be.revertedWithCustomError(V5, "CasterCountOutOfRange");
+            await expect(proposeReplacement(token, vals.slice(0, 2), dark, fresh, [fresh[0]])).to.be.revertedWithCustomError(V5, "OneSignaturePerNewCaster");
             await expect(proposeReplacement(token, vals.slice(0, 2), dark, [fresh[0], fresh[0]])).to.be.revertedWithCustomError(V5, "DuplicateInBatch");
             await expect(proposeReplacement(token, vals.slice(0, 2), dark, [casters[2], fresh[0]])).to.be.revertedWithCustomError(V5, "AlreadyACaster");
             await expect(proposeReplacement(token, vals.slice(0, 2), [vals[0].address], fresh.slice(0, 1))).to.be.revertedWithCustomError(V5, "NotACaster");
@@ -1346,6 +1350,18 @@ describe("vBTCb V4", function () {
             await time.increase(48 * HOUR);
             await expect(token.executeRemoval()).to.emit(token, "CastersUpdated").withArgs([], [casters[0].address], 100n);
             expect([...(await token.getCasters())].sort()).to.deep.equal([casters[1].address, casters[2].address, fresh[0].address].sort());
+        });
+
+        it("a newcomer the casters seated and removed again during the delay is not seated by the replacement", async function () {
+            const { token, vals, casters } = await loadFixture(deploySplitFixture);
+            const [fresh, other] = wallets(2);
+            await proposeReplacement(token, vals.slice(0, 2), [casters[0].address], [fresh]);
+            await updateCasters(token, [...vals.slice(0, 2), ...casters.slice(1)], [fresh, other]);
+            await updateCasters(token, [...vals.slice(0, 2), ...casters.slice(1), other], [], [fresh.address]);
+            await time.increase(48 * HOUR);
+            await expect(token.executeRemoval()).to.emit(token, "CastersUpdated").withArgs([], [casters[0].address], 100n);
+            expect(await token.isCaster(fresh.address)).to.equal(false);
+            expect([...(await token.getCasters())].sort()).to.deep.equal([casters[1].address, casters[2].address, other.address].sort());
         });
     });
 

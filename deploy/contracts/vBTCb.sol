@@ -452,9 +452,10 @@ contract vBTCb is ERC20Upgradeable, UUPSUpgradeable {
         bytes[] calldata signatures,
         bytes[] calldata newCasterSignatures
     ) external onlyProxy {
-        require(remove.length > 0 && newCasterSignatures.length == add.length, OneSignaturePerNewCaster());
-        require(_casters.length - remove.length + add.length >= MIN_CASTERS
-            && _casters.length - remove.length + add.length <= MAX_CASTERS, CasterCountOutOfRange());
+        // Never more seats than it clears: the validators alone cannot grow the list into a caster majority of their own.
+        require(remove.length > 0 && add.length <= remove.length && remove.length <= _casters.length, CasterCountOutOfRange());
+        require(newCasterSignatures.length == add.length, OneSignaturePerNewCaster());
+        require(_casters.length - remove.length + add.length >= MIN_CASTERS, CasterCountOutOfRange());
         _requireRemovalSlotFree();
 
         bytes32 digest = _hashTypedData(keccak256(abi.encode(
@@ -468,7 +469,8 @@ contract vBTCb is ERC20Upgradeable, UUPSUpgradeable {
             for (uint256 j = 0; j < i; j++) require(remove[j] != remove[i], DuplicateInBatch());
         }
         for (uint256 i = 0; i < add.length; i++) {
-            require(add[i] != address(0) && !isCaster[add[i]], AlreadyACaster());
+            require(add[i] != address(0), InvalidAddress());
+            require(!isCaster[add[i]], AlreadyACaster());
             for (uint256 j = 0; j < i; j++) require(add[j] != add[i], DuplicateInBatch());
             (address own, ECDSA.RecoverError error, ) = ECDSA.tryRecover(digest, newCasterSignatures[i]);
             require(error == ECDSA.RecoverError.NoError && own == add[i], NewCasterDidNotSign());
@@ -508,6 +510,7 @@ contract vBTCb is ERC20Upgradeable, UUPSUpgradeable {
         address[] memory list = _stillRemovable(_pendingRemovals, false);
         address[] memory casterList = _stillRemovable(_pendingCasterRemovals, true);
         address[] memory adds = _pendingCasterAdds;
+        uint256 pendingNonce = pendingRemovalNonce;
         uint256 n = list.length;
         uint256 m = casterList.length;
         uint256 height = pendingRemovalHeight;
@@ -521,7 +524,8 @@ contract vBTCb is ERC20Upgradeable, UUPSUpgradeable {
             // Seated as by updateCasters; one seated meanwhile is kept as it is.
             uint256 k = 0;
             for (uint256 i = 0; i < adds.length; i++) {
-                if (isCaster[adds[i]]) continue;
+                // Seated meanwhile (and perhaps removed again since) by updateCasters: left as the casters made it.
+                if (isCaster[adds[i]] || casterSince[adds[i]] >= pendingNonce) continue;
                 isCaster[adds[i]] = true;
                 casterSince[adds[i]] = adminNonce + 1;
                 _casters.push(adds[i]);
@@ -912,7 +916,7 @@ contract vBTCb is ERC20Upgradeable, UUPSUpgradeable {
     }
 
     /**
-     * @dev Reserved storage slots for future upgrades. V4 took ten slots (its address shares V3's last slot), V5 four.
+     * @dev Reserved storage slots for future upgrades. V4 took ten slots (its address shares V3's last slot), V5 five.
      */
     uint256[35] private __gap;
 

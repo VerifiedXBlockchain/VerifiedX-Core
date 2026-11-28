@@ -291,12 +291,22 @@ namespace VerifiedXCore.Bitcoin.Services
         }
 
         /// <summary>The contract's pending proposeRemoval: the validators and casters it names, and when it can run (0: none).</summary>
-        public sealed record PendingRemoval(IReadOnlyList<string> Validators, IReadOnlyList<string> Casters, BigInteger Eta);
+        /// <summary>
+        /// The contract's pending removal. From V5 it can also seat casters (<see cref="CasterAdds"/>, proposeCasterReplacement),
+        /// and <see cref="Nonce"/> is pendingRemovalNonce: 0 for a removal proposed before V5, which V5 never executes; -1 on V4.
+        /// </summary>
+        public sealed record PendingRemoval(IReadOnlyList<string> Validators, IReadOnlyList<string> Casters, BigInteger Eta)
+        {
+            public IReadOnlyList<string> CasterAdds { get; init; } = Array.Empty<string>();
+            public BigInteger Nonce { get; init; } = -1;
+        }
 
         private const string PENDING_REMOVAL_ABI = @"[
             {""inputs"":[],""name"":""getPendingRemovals"",""outputs"":[{""internalType"":""address[]"",""name"":"""",""type"":""address[]""}],""stateMutability"":""view"",""type"":""function""},
             {""inputs"":[],""name"":""getPendingCasterRemovals"",""outputs"":[{""internalType"":""address[]"",""name"":"""",""type"":""address[]""}],""stateMutability"":""view"",""type"":""function""},
-            {""inputs"":[],""name"":""pendingRemovalEta"",""outputs"":[{""internalType"":""uint256"",""name"":"""",""type"":""uint256""}],""stateMutability"":""view"",""type"":""function""}
+            {""inputs"":[],""name"":""pendingRemovalEta"",""outputs"":[{""internalType"":""uint256"",""name"":"""",""type"":""uint256""}],""stateMutability"":""view"",""type"":""function""},
+            {""inputs"":[],""name"":""getPendingCasterAdds"",""outputs"":[{""internalType"":""address[]"",""name"":"""",""type"":""address[]""}],""stateMutability"":""view"",""type"":""function""},
+            {""inputs"":[],""name"":""pendingRemovalNonce"",""outputs"":[{""internalType"":""uint256"",""name"":"""",""type"":""uint256""}],""stateMutability"":""view"",""type"":""function""}
         ]";
 
         /// <summary>Stands in for the Base RPC in tests.</summary>
@@ -316,7 +326,11 @@ namespace VerifiedXCore.Bitcoin.Services
                     if (eta == 0) return new PendingRemoval(Array.Empty<string>(), Array.Empty<string>(), 0);
                     var validators = await c.GetFunction("getPendingRemovals").CallAsync<List<string>>();
                     var casters = await c.GetFunction("getPendingCasterRemovals").CallAsync<List<string>>();
-                    return new PendingRemoval(validators, casters, eta);
+                    var pending = new PendingRemoval(validators, casters, eta);
+                    BigInteger nonce;
+                    try { nonce = await c.GetFunction("pendingRemovalNonce").CallAsync<BigInteger>(); }
+                    catch { return pending; } // V4: no seat nonces and no caster replacement
+                    return pending with { Nonce = nonce, CasterAdds = await c.GetFunction("getPendingCasterAdds").CallAsync<List<string>>() };
                 }
                 catch { }
             }

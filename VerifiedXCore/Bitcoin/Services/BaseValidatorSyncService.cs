@@ -248,16 +248,19 @@ namespace VerifiedXCore.Bitcoin.Services
         }
 
         /// <summary>
-        /// The first member a pending removal names that this node sees live: a caster in its current caster record, or a
-        /// validator that keeps its seat at the epoch boundary (funded, seen in the two days before it). Null when it names
-        /// none, as when it clears members that went dark.
+        /// Why this node vetoes a pending removal: the first member it names that this node sees live (a caster in its current
+        /// caster record, or a validator that keeps its seat at the epoch boundary: funded, seen in the two days before it),
+        /// or, for a V5 caster replacement, the first caster it would seat that is not in that record. Null when there is
+        /// none, as when it clears members that went dark for the committee's own, and for a removal proposed before V5
+        /// (the contract never executes it, and cancelPending would also drop a pending upgrade).
         /// </summary>
         internal static string? LiveTargetOf(BaseBridgeService.PendingRemoval pending, long epoch)
         {
-            if (pending.Eta == 0) return null;
+            if (pending.Eta == 0 || pending.Nonce == 0) return null;
             var committee = (VerifiedXCore.Services.CasterMembershipStore.GetCurrent()?.Casters ?? new List<VerifiedXCore.Models.CasterInfo>())
                 .Select(c => BaseSignerSetPolicy.BaseAddressOf(c.PublicKey).ToLowerInvariant()).Where(a => a.Length > 0).ToHashSet();
             if (pending.Casters.FirstOrDefault(c => committee.Contains(c.ToLowerInvariant())) is { } caster) return caster;
+            if (pending.CasterAdds.FirstOrDefault(c => !committee.Contains(c.ToLowerInvariant())) is { } stranger) return stranger;
             var kept = BaseSignerSetPolicy.KeptAt(epoch);
             return pending.Validators.FirstOrDefault(v => kept.Contains(v.ToLowerInvariant()));
         }
