@@ -353,6 +353,9 @@ namespace VerifiedXCore.Bitcoin.Services
                         record.Status = BurnExitStatus.Complete;
                         record.RedemptionSeenAtBlock = Math.Max(1, tip);
                         record.RedemptionMissingSinceBlock = 0;
+                        // The chain paying the burn shows it is one: a record a caster's alert made is no longer an alert
+                        // this node could not verify, and is kept for the whole watch.
+                        record.FoundOnBase = true;
                     }
                     else if (paid)
                         dropped = _processedBurns.TryRemove(new KeyValuePair<string, ProcessedBurnRecord>(record.BaseBurnTxHash, record));
@@ -1732,6 +1735,7 @@ namespace VerifiedXCore.Bitcoin.Services
             lock (record.Sync)
             {
                 record.Status = BurnExitStatus.Complete;
+                record.FoundOnBase = true; // the chain paid it: no longer an alert this node could not verify
                 if (record.ExitType == BurnExitType.VfxPoolUnlock) record.RedemptionSeenAtBlock = currentBlock;
             }
             LogUtility.Log($"[BurnExitConsensus] {record.BaseBurnTxHash} is redeemed on chain; this caster's record of it is complete.", "BurnExitConsensusService");
@@ -1872,7 +1876,7 @@ namespace VerifiedXCore.Bitcoin.Services
                     (kvp.Value.Status == BurnExitStatus.Failed && (now - kvp.Value.DetectedAt).TotalHours > FAILED_TTL_HOURS) ||
                     // An alerted burn this node never found on Base: dropped, and taken again if it is alerted or seen later.
                     // One being looked up right now is left to its round.
-                    (kvp.Value.IsUnverifiedAlert && kvp.Value.Status != BurnExitStatus.InConsensus
+                    (kvp.Value.IsUnverifiedAlert && kvp.Value.Status != BurnExitStatus.InConsensus && kvp.Value.RedemptionSeenAtBlock <= 0
                         && (now - kvp.Value.DetectedAt).TotalMinutes > UNVERIFIED_ALERT_TTL_MINUTES))
                 .Select(kvp => kvp.Key).ToList();
 

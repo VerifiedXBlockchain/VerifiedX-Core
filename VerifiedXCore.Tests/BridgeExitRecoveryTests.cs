@@ -213,6 +213,27 @@ namespace VerifiedXCore.Tests
         }
 
         [Fact]
+        public void APoolUnlockKnownOnlyFromAnAlert_ThatAnotherCasterPaid_IsKeptForTheWholeWatch()
+        {
+            // A caster's alert made the record; the burn was paid before this caster looked it up on Base itself.
+            var alerted = Track(34, BurnExitType.VfxPoolUnlock, BurnExitStatus.Pending, r => { r.AlertedBy = "xOtherCaster"; r.FoundOnBase = false; r.FieldsFromBase = false; });
+            Assert.True(VBTCBridgeConsumedBurn.TryMarkConsumed(alerted.BaseBurnTxHash, "POOL_UNLOCK", "handlers-tx", 995));
+            WithoutRedeemed(new List<ProcessedBurnRecord> { alerted });
+
+            // Past the time an alert never found on Base is dropped, and past the time a completed record is held.
+            alerted.DetectedAt = DateTime.UtcNow.AddHours(-30);
+            PruneExpiredRecords();
+
+            Assert.Same(alerted, ProcessedBurnForTests(alerted.BaseBurnTxHash));
+            Assert.False(alerted.IsUnverifiedAlert); // and it no longer counts against the caster that alerted it
+
+            // The watch over, it goes as any completed record does.
+            ReopenUnlocksTheChainLost(1_000 + RedemptionWatchBlocks + 1, stateIsSettled: () => true);
+            PruneExpiredRecords();
+            Assert.Null(ProcessedBurnForTests(alerted.BaseBurnTxHash));
+        }
+
+        [Fact]
         public void ABurnTheChainHasNotPaid_IsStillTakenForStuck()
         {
             var unpaid = Track(31, BurnExitType.VfxPoolUnlock, BurnExitStatus.ConsensusReached);
