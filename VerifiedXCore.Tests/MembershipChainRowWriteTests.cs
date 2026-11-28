@@ -61,6 +61,36 @@ namespace VerifiedXCore.Tests
             Assert.Equal(demotion.RecordHash, MembershipChain.RecordFor(Tip + 1)!.RecordHash);
         }
 
+        /// <summary>
+        /// A committee read runs between a block's row being written and the block itself (another thread: a caster's round,
+        /// admission, the API). It does not see the row, whose block is not stored yet, and it leaves it there: once the
+        /// block is stored its demotion is in force. Before, the read deleted the row and the block was stored without it.
+        /// </summary>
+        [Fact]
+        public async Task ACommitteeReadBetweenTheRowAndTheBlock_LeavesTheRow()
+        {
+            await StartTheChain();
+            var demotion = Next(_anchor, Casters.Take(3), "Demotion", Casters[3].Address, Tip + 1);
+            var carrier = NextBlock(Casters.Take(3), new List<CasterMembershipRecord> { demotion });
+            var readsInTheGap = 0;
+            MembershipChain.AfterRowWrittenForTests = b =>
+            {
+                if (b.Height != carrier.Height) return;
+                readsInTheGap++;
+                MembershipChain.ResetForTests();
+                Assert.Equal(_anchor.RecordHash, MembershipChain.RecordFor(b.Height + 1)!.RecordHash); // the block is not stored yet
+            };
+            try
+            {
+                Assert.True(await BlockValidatorService.ValidateBlock(Relayed(carrier), false));
+            }
+            finally { MembershipChain.AfterRowWrittenForTests = null; }
+
+            Assert.Equal(1, readsInTheGap);
+            MembershipChain.ResetForTests();
+            Assert.Equal(demotion.RecordHash, MembershipChain.RecordFor(Tip + 1)!.RecordHash);
+        }
+
         /// <summary>A row written for a block the store never got is not read, and the block written at that height decides.</summary>
         [Fact]
         public async Task ARowForABlockNeverWritten_IsNotRead()

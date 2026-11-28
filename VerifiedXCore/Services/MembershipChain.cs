@@ -19,7 +19,7 @@ namespace VerifiedXCore.Services
     ///
     /// What the chain carried is kept in a small collection next to the blocks, one row per carrying block. A row is
     /// believed only while the block store holds the block it names, so a rollback, a reorg or a restore needs no step of
-    /// its own here: a row for a block that is gone is dropped when it is next read, and a block written at that height
+    /// its own here: a row for a block that is gone is not read, and a block written at that height
     /// replaces it.
     /// </summary>
     public static class MembershipChain
@@ -157,13 +157,16 @@ namespace VerifiedXCore.Services
             return started ? records : null;
         }
 
-        /// <summary>Whether the block store still holds the block a row names. A row for a block that is gone is dropped.</summary>
+        /// <summary>
+        /// Whether the block store holds the block a row names. A row for a block that is not there (rolled back, replaced,
+        /// or not written yet: its row is written first) is not read, and a read never removes it: a read between a row's
+        /// write and its block's would otherwise take the row away from the block about to be stored. Only the write at a
+        /// height replaces or removes the row there (<see cref="WriteRow"/>).
+        /// </summary>
         private static bool Holds(ChainRow row)
         {
             var block = BlockchainData.GetBlockByHeight(row.Id);
-            if (block != null && string.Equals(block.Hash, row.BlockHash, StringComparison.Ordinal)) return true;
-            try { Collection()?.Delete(row.Id); } catch { }
-            return false;
+            return block != null && string.Equals(block.Hash, row.BlockHash, StringComparison.Ordinal);
         }
 
         /// <summary>
@@ -359,6 +362,9 @@ namespace VerifiedXCore.Services
         /// <summary>Tests only: makes the next row writes fail, as a full disk or a closed store would.</summary>
         internal static Func<bool>? FailRowWriteForTests;
 
+        /// <summary>Tests only: runs once a block's row is written, before the block is (another reader in that gap).</summary>
+        internal static Action<Block>? AfterRowWrittenForTests;
+
         /// <summary>
         /// Called before a block is written to the store, which only follows if this returns: the records the block carries
         /// are noted for its height, or a row left at that height by a block no longer there is dropped. Written first, so a
@@ -387,6 +393,7 @@ namespace VerifiedXCore.Services
                 throw new RowWriteException(block.Height, ex);
             }
             finally { _cache.Clear(); }
+            AfterRowWrittenForTests?.Invoke(block);
         }
 
         /// <summary>
