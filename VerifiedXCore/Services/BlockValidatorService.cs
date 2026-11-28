@@ -623,6 +623,12 @@ namespace VerifiedXCore.Services
         private sealed class CommitteeRefusal
         {
             public bool Noted;
+            /// <summary>
+            /// The record this node held just before the committee was read for the refused verdict (<see cref="HeldRecord"/>).
+            /// Null when the block's own record replaced others for the attempt and was put back after it: what the node
+            /// holds once the attempt is over is then the record to start from.
+            /// </summary>
+            public string? JudgedWith;
         }
 
         /// <summary>
@@ -631,11 +637,16 @@ namespace VerifiedXCore.Services
         /// newer one, they judged the block by another committee. The next pull of the record is brought forward, as it
         /// is for a node with no record.
         /// </summary>
-        private static void NoteCommitteeRefusal(CommitteeRefusal? refusal)
+        private static void NoteCommitteeRefusal(CommitteeRefusal? refusal, string? judgedWith)
         {
             ValidatorMembershipPull.RequestSoon();
-            if (refusal != null) refusal.Noted = true;
+            if (refusal == null) return;
+            refusal.Noted = true;
+            refusal.JudgedWith = judgedWith;
         }
+
+        /// <summary>Tests only: runs once a block's first verdict is in, before the wrapper looks at the record this node holds.</summary>
+        internal static Action? AfterFirstVerdictForTests;
 
         /// <summary>The membership record this node holds: its sequence and hash, or empty without one.</summary>
         private static string HeldRecord()
@@ -658,9 +669,15 @@ namespace VerifiedXCore.Services
             if (result || !refusal.Noted || validateOnly)
                 return result;
 
-            var held = HeldRecord();
-            await ValidatorMembershipPull.PullForRefusedBlockAsync();
-            if (HeldRecord() == held)
+            AfterFirstVerdictForTests?.Invoke();
+
+            // Compared against the record the refused verdict was reached with, read before its committee was: a record
+            // that arrived after that (an announcement, the minute pull) while the block was still being judged is a
+            // newer one too, and needs no pull to be waited for.
+            var judgedWith = refusal.JudgedWith ?? HeldRecord();
+            if (HeldRecord() == judgedWith)
+                await ValidatorMembershipPull.PullForRefusedBlockAsync();
+            if (HeldRecord() == judgedWith)
                 return false;
 
             // The first verdict was reached under a record this node has since replaced: it says nothing about the block's
@@ -888,12 +905,13 @@ namespace VerifiedXCore.Services
                 // Except for the next block on a synced node (AtSyncedTip), whatever the path and however long the chain
                 // has stalled: there the certificate exists (ValidateBlocks tops it up first) and is required.
                 // A block carrying an election record has no such exemption: it is the record's first block, and its certificate is what ties the two.
+                var heldBeforeCertificate = HeldRecord(); // before the committee is read: a record that arrives after this is a newer one
                 if (!validateOnly && (!blockDownloads || AtSyncedTip(block) || block.MembershipRecord != null) && !ConsensusCertificateVerifier.VerifyOrNotRequired(block))
                 {
                     // The next block's certificate, refused on who may attest or how many must: the committee is this
                     // node's record's. A missing certificate, or one for another block, is refused under any record.
                     if (block.Height == Globals.LastBlock.Height + 1 && ConsensusCertificateVerifier.RefusalDependsOnCommittee(block))
-                        NoteCommitteeRefusal(committeeRefusal);
+                        NoteCommitteeRefusal(committeeRefusal, heldBeforeCertificate);
                     DbContext.Rollback("BlockValidatorService.ValidateBlock()-cert");
                     return result;
                 }
@@ -1314,6 +1332,7 @@ namespace VerifiedXCore.Services
                             return known;
                         }
 
+                        var heldBeforeTransactions = HeldRecord(); // before any transaction's committee is read
                         foreach (Transaction blkTransaction in orderedTransactions)
                         {
                             if (blkTransaction.FromAddress != "Coinbase_TrxFees" && blkTransaction.FromAddress != "Coinbase_BlkRwd")
@@ -1720,8 +1739,9 @@ namespace VerifiedXCore.Services
 
                         if (rejectBlock)
                         {
+                            // A record the block carried that replaced others here is put back when this attempt ends.
                             if (Bitcoin.Services.BridgeCasterConsensus.IsCommitteeRefusal(rejectBlockReason))
-                                NoteCommitteeRefusal(committeeRefusal);
+                                NoteCommitteeRefusal(committeeRefusal, undoCarriedRecord == null ? heldBeforeTransactions : null);
 
                             // FORK-FIX: Track consecutive TX-validation failures across ALL heights.
                             // When the state trie is corrupted/wiped, EVERY block fails TX validation

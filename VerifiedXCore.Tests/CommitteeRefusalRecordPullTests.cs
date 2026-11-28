@@ -375,6 +375,39 @@ namespace VerifiedXCore.Tests
         }
 
         /// <summary>
+        /// The record can arrive on its own while the block is being judged or just after (an announcement, the minute
+        /// pull). The block is then judged once more without a pull being waited for, and the note of a fault in its
+        /// contents goes: the newer record is told from the one the refused verdict was reached with, not from what the
+        /// node holds once that verdict is in.
+        /// </summary>
+        [Fact]
+        public async Task ARecordThatArrivesAsTheBlockIsRefused_StillGetsItItsSecondLook()
+        {
+            await StartWithTheRecordBeforeTheChange();
+            PeersOnlyClaimANewerRecord();                                   // a pull would bring nothing
+            var block = NextBlock(_casters.Take(3), Unlock(_casters.Take(2)));
+            var arrived = 0;
+            BlockValidatorService.AfterFirstVerdictForTests = () =>
+            {
+                if (Interlocked.Increment(ref arrived) == 1)
+                    Assert.True(CasterMembershipStore.TryAppend(_new, out var why, fromSync: true), why);
+            };
+            var since = DateTime.UtcNow;
+            try
+            {
+                var taken = await BlockValidatorService.ValidateBlock(block, false);
+
+                Assert.Equal(new[] { TxStep }, StepsSince(since));           // refused once, under the record before the change
+                Assert.Equal(1, arrived);
+                Assert.True(taken);
+                Assert.Equal(block.Height, Tip);
+                Assert.Equal(0, _pulls);                                     // the record was already here: no pull was waited for
+                Assert.False(BlockValidatorService.WasRefusedForItsContents(block.Height, block.Hash));
+            }
+            finally { BlockValidatorService.AfterFirstVerdictForTests = null; }
+        }
+
+        /// <summary>
         /// The wait for the pull has an end. Peers that never answer keep block validation for the wait and no longer, and
         /// the blocks refused while that pull is still out do not wait for it again.
         /// </summary>
