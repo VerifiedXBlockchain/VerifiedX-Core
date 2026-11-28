@@ -1154,6 +1154,28 @@ namespace VerifiedXCore.Tests
         }
 
         /// <summary>
+        /// The policy keeps what a scan found together with the block it was made at, and the veto loop and signing
+        /// requests read and replace that at the same time, across a tip change. Every field it keeps between calls is one
+        /// reference, read and written whole (a class, volatile): kept as a struct of several words it could be read half
+        /// old and half new, one block's height and hash beside another block's list. The shape is checked rather than the
+        /// race run: the window is a few instructions inside a call that takes milliseconds of store reads, so readers
+        /// racing for seconds meet it rarely, and a test that fails one run in thousands shows nothing either way.
+        /// </summary>
+        [Fact]
+        public void WhatThePolicyKeepsBetweenCalls_IsReadAndReplacedAsOneReference()
+        {
+            var kept = typeof(BaseSignerSetPolicy)
+                .GetFields(System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Public)
+                .Where(f => !f.IsLiteral && !f.IsInitOnly).ToList();
+            Assert.NotEmpty(kept);
+            Assert.All(kept, f =>
+            {
+                Assert.False(f.FieldType.IsValueType, $"{f.Name} is a {f.FieldType.Name}: read and written in parts");
+                Assert.True(f.GetRequiredCustomModifiers().Contains(typeof(System.Runtime.CompilerServices.IsVolatile)), $"{f.Name} is not volatile");
+            });
+        }
+
+        /// <summary>
         /// A signed change counts as done only once the contract shows it, not when anything else moves the admin nonce:
         /// anyone can have a member sign the epoch's removal, and a caster change sent first must not make that member refuse
         /// the removal itself for the rest of the epoch.
