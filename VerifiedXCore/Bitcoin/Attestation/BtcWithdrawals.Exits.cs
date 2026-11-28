@@ -397,6 +397,9 @@ namespace VerifiedXCore.Bitcoin.Attestation
             {
                 if (parts.Any(p => VoidingSpendNotBuried(p, db))) return;
                 if (TryPinExit(anyPart, vfxHeight, db)) return; // buried: fixed again on its vault's free coins if it can be
+                // The attempt can settle a part by a payment already seen and still pin nothing: judge the parts as they are now.
+                parts = BtcAttestStore.ExitParts(exitTxHash, anyPart.RequestVfxHeight, db).OrderBy(p => p.Ref, StringComparer.Ordinal).ToList();
+                if (parts.Any(p => p.State != VaultWithdrawalState.Waiting)) return;
             }
 
             var why = $"it could not be pinned within {VBTCWithdrawalRequest.EXPIRY_BLOCKS} blocks ({string.Join("; ", parts.Select(p => $"{p.SmartContractUID}: {p.WaitingReason}"))})";

@@ -87,9 +87,12 @@ namespace VerifiedXCore.Bitcoin.Attestation
             var newest = row.Pins.LastOrDefault(p => !p.Dead);
             if (newest == null) return false;
             var pays = newest.FeeRate > 0 ? newest.FeeRate : row.FeeRate;
+            // Every coin it spends is there and held (none orphaned by a Bitcoin reorganisation, which also leaves no raise
+            // to build): only then does "no raise" mean it can never be raised again.
             if (row.IsBridgeExit)
                 return vfxHeight >= Globals.ExitPartTakeoverHeight && vfxHeight >= newest.PinnedAtVfxHeight + BtcAttestRules.StuckPinBlocks
-                    && pays < feeRate && NextExitRaise(row, db) == null;
+                    && pays < feeRate && newest.Inputs.All(o => BtcAttestStore.Coin(o, db)?.Status == VaultCoinStatus.Pinned)
+                    && NextExitRaise(row, db) == null;
             return vfxHeight >= MovingSince(row) + BtcAttestRules.StuckPinBlocks && pays < feeRate;
         }
 
