@@ -2465,6 +2465,150 @@ namespace VerifiedXCore.Tests
             Assert.True(ok, why);
         }
 
+        /// <summary>Sets the locks' queue order (oldest first) as given.</summary>
+        private static void InQueueOrder(params string[] lockIds)
+        {
+            long t = VBTCBridgeLockState.GetByLockId(lockIds[0])!.LockTimestamp;
+            for (var i = 0; i < lockIds.Length; i++)
+            {
+                var rec = VBTCBridgeLockState.GetByLockId(lockIds[i])!;
+                rec.LockTimestamp = t + i;
+                VBTCBridgeLockState.GetCollection().Update(rec);
+            }
+        }
+
+        private static long Sats(IEnumerable<PoolUnlockAllocation> plan, string vault) =>
+            (long)(plan.Where(a => a.SmartContractUID == vault).Sum(a => a.UnlockAmount) * 100_000_000M);
+
+        /// <summary>
+        /// The auditors' case: 20,000 sats left in vault B first in the queue, then locks of 30,000 and 10,000 in vault A,
+        /// and an exit of 33,000. Every candidate gave B a part under the minimum, the planner then left out both vaults by
+        /// the shares that plan gave them, and returned nothing, although A's two locks pay the exit by themselves. B holds
+        /// less than any part altogether, and A can pay it all: the plan is A's.
+        /// </summary>
+        [Fact]
+        public async Task AnExitOneVaultCanPay_IsPlannedOnIt_EvenWhenAVaultTooSmallForAnyPartIsAheadInTheQueue()
+        {
+            await Start();
+            var a = await CreateVault(H1 + 1);
+            var b = await CreateVault(H1 + 2);
+            await Deposit(a.Script, 1_000_000);
+            await Deposit(b.Script, 1_000_000);
+            var b1 = await Lock(b.Uid, 0.0002M);
+            var a1 = await Lock(a.Uid, 0.0003M);
+            var a2 = await Lock(a.Uid, 0.0001M);
+            InQueueOrder(b1, a1, a2);
+
+            var plan = BridgePoolUnlockService.ComputeExitAllocationPlan(0.00033M, null, Tip + 1);
+            Assert.NotNull(plan);
+            Assert.All(plan!, x => Assert.Equal(a.Uid, x.SmartContractUID));
+            Assert.Equal(33_000, Sats(plan, a.Uid));
+            var (ok, why) = await Verify(Exit(NewBurn(), BtcDest, plan.Select(x => (x.LockId, x.SmartContractUID, x.UnlockAmount)).ToArray()), Tip + 1);
+            Assert.True(ok, why);
+        }
+
+        /// <summary>
+        /// A vault short of the minimum in a split is lifted from its own next lock, not only from the locks the plan had
+        /// already taken from it: 20,000 in vault A first, 100,000 in vault B, then 10,000 more in A, and an exit of
+        /// 110,000 that neither vault pays alone. A takes 25,186 of its two locks and B the rest.
+        /// </summary>
+        [Fact]
+        public async Task AVaultsPartUnderTheMinimum_IsLiftedFromItsOwnNextLock()
+        {
+            await Start();
+            var a = await CreateVault(H1 + 1);
+            var b = await CreateVault(H1 + 2);
+            await Deposit(a.Script, 1_000_000);
+            await Deposit(b.Script, 1_000_000);
+            var a1 = await Lock(a.Uid, 0.0002M);
+            var b1 = await Lock(b.Uid, 0.001M);
+            var a2 = await Lock(a.Uid, 0.0001M);
+            InQueueOrder(a1, b1, a2);
+
+            var plan = BridgePoolUnlockService.ComputeExitAllocationPlan(0.0011M, null, Tip + 1);
+            Assert.NotNull(plan);
+            Assert.Equal(110_000, Sats(plan!, a.Uid) + Sats(plan!, b.Uid));
+            Assert.True(Sats(plan!, a.Uid) >= BtcWithdrawals.MinExitPartSats);
+            Assert.True(Sats(plan!, b.Uid) >= BtcWithdrawals.MinExitPartSats);
+            Assert.Contains(plan!, x => x.LockId == a2);
+            var (ok, why) = await Verify(Exit(NewBurn(), BtcDest, plan!.Select(x => (x.LockId, x.SmartContractUID, x.UnlockAmount)).ToArray()), Tip + 1);
+            Assert.True(ok, why);
+        }
+
+        /// <summary>
+        /// Each vault an exit draws on pays its own miner fee out of the holder's Bitcoin. Two earlier locks of 30,000 in
+        /// vaults X and Y were drawn for a 60,000 exit although a later lock of vault Z could pay it alone; the plan is Z's.
+        /// An unlock back to VFX is planned on one vault as well, leaving its recipient one position.
+        /// </summary>
+        [Fact]
+        public async Task AnExitOrUnlockOneVaultCanPay_IsNotSplitAcrossVaultsAheadOfIt()
+        {
+            await Start();
+            var x = await CreateVault(H1 + 1);
+            var y = await CreateVault(H1 + 2);
+            var z = await CreateVault(H1 + 3);
+            foreach (var v in new[] { x, y, z }) await Deposit(v.Script, 1_000_000);
+            var x1 = await Lock(x.Uid, 0.0003M);
+            var y1 = await Lock(y.Uid, 0.0003M);
+            var z1 = await Lock(z.Uid, 0.0006M);
+            InQueueOrder(x1, y1, z1);
+
+            Assert.Equal(z1, Assert.Single(BridgePoolUnlockService.ComputeExitAllocationPlan(0.0006M, null, Tip + 1)!).LockId);
+            Assert.Equal(z1, Assert.Single(BridgePoolUnlockService.ComputeUnlockAllocationPlan(0.0006M, Tip + 1)!).LockId);
+            Assert.Equal(z1, Assert.Single(BridgePoolUnlockService.ComputeUnlockAllocationPlan(0.0006M, Tip + 1, _holder.Address)!).LockId);
+            // Where no vault can pay alone, as few as can: Z and the first of the others, not all three.
+            var split = BridgePoolUnlockService.ComputeExitAllocationPlan(0.0009M, null, Tip + 1)!;
+            Assert.Equal(new[] { x1, z1 }, split.Select(s => s.LockId).ToArray());
+        }
+
+        /// <summary>
+        /// A short vault is lifted from as many other vaults as it takes, each kept at its own minimum: three vaults of
+        /// 30,000 sats and an exit of 80,000 left the third vault 5,186 short, more than any one vault could spare.
+        /// </summary>
+        [Fact]
+        public async Task AShortVault_IsLiftedFromSeveralVaults_WhenNoOneCanSpareItAll()
+        {
+            await Start();
+            var vaults = new[] { await CreateVault(H1 + 1), await CreateVault(H1 + 2), await CreateVault(H1 + 3) };
+            foreach (var v in vaults) await Deposit(v.Script, 1_000_000);
+            var locks = new List<string>();
+            foreach (var v in vaults) locks.Add(await Lock(v.Uid, 0.0003M));
+            InQueueOrder(locks.ToArray());
+
+            var plan = BridgePoolUnlockService.ComputeExitAllocationPlan(0.0008M, null, Tip + 1);
+            Assert.NotNull(plan);
+            Assert.Equal(80_000, vaults.Sum(v => Sats(plan!, v.Uid)));
+            Assert.All(vaults, v => Assert.True(Sats(plan!, v.Uid) >= BtcWithdrawals.MinExitPartSats));
+            var (ok, why) = await Verify(Exit(NewBurn(), BtcDest, plan!.Select(x => (x.LockId, x.SmartContractUID, x.UnlockAmount)).ToArray()), Tip + 1);
+            Assert.True(ok, why);
+        }
+
+        /// <summary>
+        /// Where no vault pays alone, the plan draws on as few vaults as can: 30,000 in X and Y first in the queue, 50,000
+        /// in Z and W later, and an exit of 95,000 is paid by Z and W (two miner fees), not X, Y and Z (three).
+        /// </summary>
+        [Fact]
+        public async Task AnExitNoVaultPaysAlone_DrawsOnAsFewVaultsAsCanPay()
+        {
+            await Start();
+            var x = await CreateVault(H1 + 1);
+            var y = await CreateVault(H1 + 2);
+            var z = await CreateVault(H1 + 3);
+            var w = await CreateVault(H1 + 4);
+            foreach (var v in new[] { x, y, z, w }) await Deposit(v.Script, 1_000_000);
+            var x1 = await Lock(x.Uid, 0.0003M);
+            var y1 = await Lock(y.Uid, 0.0003M);
+            var z1 = await Lock(z.Uid, 0.0005M);
+            var w1 = await Lock(w.Uid, 0.0005M);
+            InQueueOrder(x1, y1, z1, w1);
+
+            var plan = BridgePoolUnlockService.ComputeExitAllocationPlan(0.00095M, null, Tip + 1)!;
+            Assert.Equal(new[] { w.Uid, z.Uid }.OrderBy(u => u, StringComparer.Ordinal), plan.Select(a => a.SmartContractUID).Distinct().OrderBy(u => u, StringComparer.Ordinal));
+            Assert.Equal(95_000, Sats(plan, z.Uid) + Sats(plan, w.Uid));
+            var (ok, why) = await Verify(Exit(NewBurn(), BtcDest, plan.Select(a => (a.LockId, a.SmartContractUID, a.UnlockAmount)).ToArray()), Tip + 1);
+            Assert.True(ok, why);
+        }
+
         /// <summary>A plan is measured as it is carried (escapes included) and one over the room is not offered (round 29).</summary>
         [Fact]
         public async Task APlanTooLargeToCarry_IsNotOffered()
@@ -2689,6 +2833,48 @@ namespace VerifiedXCore.Tests
                 // More than the two hold, or a burn no split can give the minimum, is not planned.
                 Assert.Null(BridgePoolUnlockService.ComputeUnlockAllocationPlan(0.00031M, Tip + 1, fresh.Address));
                 Assert.Null(BridgePoolUnlockService.ComputeUnlockAllocationPlan(0.00005M, Tip + 1, fresh.Address));
+            }
+            finally { Globals.VaultMinimumPositionHeight = gate; }
+        }
+
+        /// <summary>
+        /// An unlock's minimum share differs by vault: none where the recipient already keeps a position, a whole position
+        /// elsewhere. Queue C 6,000 and D 6,000 (the recipient holds on both), then A 15,000 and B 14,000, and an unlock of
+        /// 18,000: A and B, the two largest, cannot both reach 10,000, and the queue gave C 2,000, D 6,000 and A 10,000,
+        /// three positions. A and C pay it as two.
+        /// </summary>
+        [Fact]
+        public async Task APoolUnlock_IsPlannedOnAnotherPair_WhenTheTwoLargestVaultsCannotBothReachTheirMinimum()
+        {
+            var gate = Globals.VaultMinimumPositionHeight;
+            try
+            {
+                Globals.VaultMinimumPositionHeight = H1;
+                await Start();
+                var c = await CreateVault(H1 + 1);
+                var d = await CreateVault(H1 + 2);
+                var a = await CreateVault(H1 + 3);
+                var b = await CreateVault(H1 + 4);
+                foreach (var v in new[] { c, d, a, b }) await Deposit(v.Script, 1_000_000);
+                await Mine(Transfer(c.Uid, 0.0002M));                                          // the recipient keeps a position on C and D
+                await Mine(Transfer(d.Uid, 0.0002M));
+                var c1 = await Lock(c.Uid, 0.00006M);
+                var d1 = await Lock(d.Uid, 0.00006M);
+                var a1 = await Lock(a.Uid, 0.00015M);
+                var b1 = await Lock(b.Uid, 0.00014M);
+                InQueueOrder(c1, d1, a1, b1);
+
+                var plan = BridgePoolUnlockService.ComputeUnlockAllocationPlan(0.00018M, Tip + 1, _holder.Address);
+                Assert.NotNull(plan);
+                Assert.Equal(18_000, new[] { a, b, c, d }.Sum(v => Sats(plan!, v.Uid)));
+                Assert.Equal(2, plan!.Select(x => x.SmartContractUID).Distinct().Count());
+                var unlock = SignedBy(Caster, Caster.Address, TransactionType.VBTC_V2_BRIDGE_POOL_UNLOCK, new
+                {
+                    Function = "VBTCBridgePoolUnlock()", ExitBurnTxHash = NewBurn(), VfxDestinationAddress = _holder.Address,
+                    TotalAmount = 0.00018M, TotalAmountSats = 18_000L, Allocations = plan,
+                }, free: true);
+                var (ok, why) = await Verify(unlock, Tip + 1);
+                Assert.True(ok, why);
             }
             finally { Globals.VaultMinimumPositionHeight = gate; }
         }
