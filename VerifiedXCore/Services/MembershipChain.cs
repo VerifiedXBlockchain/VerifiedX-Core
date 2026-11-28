@@ -350,18 +350,30 @@ namespace VerifiedXCore.Services
 
         // ── Writes ───────────────────────────────────────────────────────────────────────────────
 
+        /// <summary>A block's records could not be noted: the block is not written (BlockchainData.AddBlock).</summary>
+        public sealed class RowWriteException : Exception
+        {
+            public RowWriteException(long height, Exception inner) : base($"the membership records of block {height} could not be noted: {inner.Message}", inner) { }
+        }
+
+        /// <summary>Tests only: makes the next row writes fail, as a full disk or a closed store would.</summary>
+        internal static Func<bool>? FailRowWriteForTests;
+
         /// <summary>
-        /// Called when a block is written to the store: the records it carries are noted for its height, or a row left at
-        /// that height by a block no longer there is dropped. The block was judged first (<see cref="RunRefusal"/>,
+        /// Called before a block is written to the store, which only follows if this returns: the records the block carries
+        /// are noted for its height, or a row left at that height by a block no longer there is dropped. Written first, so a
+        /// stored block always has its row. A crash between the two leaves a row naming a block the store does not hold,
+        /// which is never read (<see cref="Holds"/>). Throws <see cref="RowWriteException"/> when the row cannot be written:
+        /// the block is then not written either and is judged again. The block was judged first (<see cref="RunRefusal"/>,
         /// VreeElection.PrepareBlockRecord).
         /// </summary>
-        public static void NoteCommitted(Block block)
+        public static void WriteRow(Block block)
         {
             if (block == null || block.Height < Globals.MembershipChainHeight || !Configured) return;
-            var col = Collection();
-            if (col == null) return;
             try
             {
+                if (FailRowWriteForTests?.Invoke() == true) throw new IOException("row write failed (test)");
+                var col = Collection() ?? throw new InvalidOperationException("the block store is not open");
                 if (block.MembershipRun is { Count: > 0 } run)
                     col.Upsert(new ChainRow { Id = block.Height, BlockHash = block.Hash, IsRun = true, Records = run.ToList() });
                 else if (block.MembershipRecord != null && ActiveAt(block.Height) && VreeElection.JudgeCarried(block) == VreeElection.CarriedVerdict.Valid)
@@ -371,12 +383,21 @@ namespace VerifiedXCore.Services
             }
             catch (Exception ex)
             {
-                ErrorLogUtility.LogError($"Could not note the membership records of block {block.Height}: {ex.Message}", "MembershipChain.NoteCommitted()");
+                ErrorLogUtility.LogError($"Could not note the membership records of block {block.Height}: {ex.Message}; the block is not written.", "MembershipChain.WriteRow()");
+                throw new RowWriteException(block.Height, ex);
             }
-            _cache.Clear();
+            finally { _cache.Clear(); }
+        }
 
-            // This node's records follow what the chain now holds, and the casters it works with follow the committee the
-            // block's run puts in force from the next block.
+        /// <summary>
+        /// Called once a block is written to the store: this node's own records follow what the chain now holds, and the
+        /// casters it works with follow the committee the block's run puts in force from the next block. Both are brought
+        /// to the chain again after every block, so a crash before this runs leaves nothing the next block does not fix.
+        /// </summary>
+        public static void AfterCommit(Block block)
+        {
+            if (block == null || block.Height < Globals.MembershipChainHeight || !Configured) return;
+            _cache.Clear();
             try
             {
                 if (ChainAt(block.Height + 1) is { } chain)
@@ -388,7 +409,7 @@ namespace VerifiedXCore.Services
             }
             catch (Exception ex)
             {
-                ErrorLogUtility.LogError($"Could not bring this node's membership records to the chain at block {block.Height}: {ex.Message}", "MembershipChain.NoteCommitted()");
+                ErrorLogUtility.LogError($"Could not bring this node's membership records to the chain at block {block.Height}: {ex.Message}", "MembershipChain.AfterCommit()");
             }
         }
 

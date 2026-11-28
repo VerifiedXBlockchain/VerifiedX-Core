@@ -183,7 +183,7 @@ namespace VerifiedXCore.Services
         /// and updates IsBlockCaster for self.
         /// From the membership chain's start the pool follows the committee the chain has in force for the next block, not
         /// a record this node holds that no block has carried yet: a member a pending demotion removes keeps casting, and a
-        /// caster it promotes is not one, until the block that carries it is written (MembershipChain.NoteCommitted).
+        /// caster it promotes is not one, until the block that carries it is written (MembershipChain.AfterCommit).
         /// </summary>
         public static void ReconcileBlockCastersToRecord(CasterMembershipRecord record)
         {

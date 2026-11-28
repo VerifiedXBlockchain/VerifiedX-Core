@@ -763,6 +763,10 @@ namespace VerifiedXCore.Data
                 var blockCheck = blocks.Find(Query.All(Query.Descending)).Take(100).Where(x => x.Height == block.Height).FirstOrDefault();
                 if (blockCheck == null)
                 {
+                    // The membership records it carries are noted first: a block is never stored without them, and a failure
+                    // here leaves the block unwritten and the tip where it was (MembershipChain.WriteRow).
+                    Services.MembershipChain.WriteRow(block);
+
                     //Update in memory block.
                     Globals.LastBlock = block;
                     Globals.LastBlockProducedTick = Environment.TickCount64;
@@ -780,7 +784,7 @@ namespace VerifiedXCore.Data
 
                     //insert block to db
                     await blocks.InsertSafeAsync(block);
-                    Services.MembershipChain.NoteCommitted(block); // the records it carries, read for the heights above it
+                    Services.MembershipChain.AfterCommit(block); // this node's records and caster pool follow the chain
 
                     if (notifyCLI)
                     {
@@ -794,6 +798,10 @@ namespace VerifiedXCore.Data
                         }
                     }
                 }
+            }
+            catch (Services.MembershipChain.RowWriteException)
+            {
+                throw; // the block was not written: its validation must not go on as if it had been
             }
             catch (Exception ex)
             {
