@@ -43,14 +43,7 @@ namespace VerifiedXCore.BrowserWalletServices
                     // deposit address balance) are cancelled out.
                     ledgerBalance = Bitcoin.Services.VBTCService.GetOwnerLedgerBalance(scState, address, Globals.LastBlock?.Height ?? 0);
                 }
-                else if (scState.SCStateTreiTokenizationTXes != null && scState.SCStateTreiTokenizationTXes.Any())
-                {
-                    var txList = scState.SCStateTreiTokenizationTXes
-                        .Where(x => x.FromAddress == address || x.ToAddress == address)
-                        .ToList();
-                    if (txList.Any())
-                        ledgerBalance = txList.Sum(x => x.Amount);
-                }
+                else ledgerBalance = VerifiedXCore.Bitcoin.Attestation.VaultLedgerStore.Balance(scState, address);
 
                 decimal totalBalance = ledgerBalance;
                 string depositAddress = "";

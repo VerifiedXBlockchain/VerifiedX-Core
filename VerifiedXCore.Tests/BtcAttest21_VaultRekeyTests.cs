@@ -54,6 +54,7 @@ namespace VerifiedXCore.Tests
         {
             Globals.BTCNetwork = _priorNetwork;
             BtcVaultKeyService.ForgetAttempts();
+            BtcAttestRules.ExitReopenBurialBlocksOverride = null;
             base.Dispose();
         }
 
@@ -645,9 +646,66 @@ namespace VerifiedXCore.Tests
                 var row = Row(request, vault);
                 Assert.Equal(VaultWithdrawalState.Pinned, row.State);
                 Assert.Equal(new[] { moved }, row.Pins[0].Inputs);
-                Assert.All(BtcTx.Parse(row.Pins[0].TxHex, Network.Main).Outputs, o => Assert.Equal(newKey, o.ScriptPubKey));
+                var pinned = BtcTx.Parse(row.Pins[0].TxHex, Network.Main);
+                Assert.All(pinned.Outputs, o => Assert.Equal(newKey, o.ScriptPubKey));
+                // The signers read the pinned transaction as it was built (the payment first, then the change), so they no
+                // longer take the change for a second payment, and the coin is not held for good.
+                var keyUid = BtcAttestStore.ScriptRow(newKey.ToHex())?.KeyUID ?? vault;
+                var (ok, why) = FrostSigningAuthorization.Authorize(Announce(keyUid, newKey, request.Hash, pinned, Signers[0].Address));
+                Assert.True(ok, why);
             }
             finally { Globals.WithdrawalDestinationRecheckHeight = prior; }
+        }
+
+        private VfxTx Bump(string vault, string requestHash, long feeRate) =>
+            SignedBy(Minter, Minter.Address, TransactionType.VBTC_V2_COIN_PIN,
+                new { Function = BtcWithdrawals.FeeBumpFunction, ContractUID = vault, WithdrawalRequestHash = requestHash, FeeRate = feeRate, Nonce = Guid.NewGuid().ToString("N") });
+
+        private VfxTx Release(string vault, string requestHash, long feeRate) =>
+            SignedBy(Minter, Minter.Address, TransactionType.VBTC_V2_COIN_PIN,
+                new { Function = BtcWithdrawals.ReleaseFunction, ContractUID = vault, WithdrawalRequestHash = requestHash, FeeRate = feeRate, Nonce = Guid.NewGuid().ToString("N") });
+
+        /// <summary>
+        /// A withdrawal asked for before a re-key, to the address the re-key gives the vault, is fixed on the old key's coin
+        /// (the address is nobody's yet): it pays that address and returns the change to the old key. Once the re-key is in,
+        /// a fee raise returns the change, and a release the whole coin, to the vault's current key, which is the
+        /// destination. Read by script, the signers took both for a payment beyond the amount and refused, the signers
+        /// lead only a withdrawal's newest transaction, and the coin was held for good. Read as built, both are signed.
+        /// </summary>
+        [Fact]
+        public async Task AWithdrawalToTheNextKeysAddress_FixedBeforeTheReKey_IsSignedWhenRaisedOrReleasedAfterIt()
+        {
+            await Start();
+            var vault = await CreateVault(H1 + 1, keyHolders: Signers);
+            await Deposit(vault.Script, 200_000);
+            var stillHere = Signers.Take(3).ToList();
+            await ToNextEpoch(stillHere, leaving: Signers.Skip(3));
+            var ceremony = Ceremony(vault.Uid, stillHere, 2, Signers[0].Address);
+            var request = await Mine(SignedBy(Minter, Minter.Address, TransactionType.VBTC_V2_WITHDRAWAL_REQUEST,
+                new { Function = "VBTCWithdrawalRequest()", ContractUID = vault.Uid, BTCAddress = ceremony.Address, Amount = 0.0002M, FeeRate = 10, UniqueId = Guid.NewGuid().ToString("N") }));
+            var first = BtcTx.Parse(Assert.Single(Row(request, vault.Uid).Pins).TxHex, Network.Main);
+            Assert.Equal(ceremony.Script, first.Outputs[0].ScriptPubKey);                     // the payment, to the next key
+            Assert.Equal(vault.Script, first.Outputs[1].ScriptPubKey);                        // the change, to the old one
+            await Mine(RekeyTx(vault.Uid, ceremony.Proof));
+
+            await Mine(Bump(vault.Uid, request.Hash, 20));
+            var raised = BtcTx.Parse(Row(request, vault.Uid).Pins[^1].TxHex, Network.Main);
+            Assert.All(raised.Outputs, o => Assert.Equal(ceremony.Script, o.ScriptPubKey));    // change to the current key: the destination
+            var (ok, why) = FrostSigningAuthorization.Authorize(Announce(vault.Uid, vault.Script, request.Hash, raised, Signers[0].Address));
+            Assert.True(ok, why);
+
+            await Mine(Release(vault.Uid, request.Hash, 30));
+            var released = BtcTx.Parse(Row(request, vault.Uid).Pins[^1].TxHex, Network.Main);
+            Assert.Equal(ceremony.Script, Assert.Single(released.Outputs).ScriptPubKey);      // the coins back to the current key
+            (ok, why) = FrostSigningAuthorization.Authorize(Announce(vault.Uid, vault.Script, request.Hash, released, Signers[0].Address));
+            Assert.True(ok, why);
+
+            // Still refused: a pinned payment whose first output is not the destination.
+            var swapped = raised.Clone();
+            swapped.Outputs.Clear();
+            swapped.Outputs.Add(raised.Outputs[0].Value, vault.Script);
+            Assert.Contains("first output is not the authorized destination",
+                FrostSigningAuthorization.ReadPinnedOutputs(swapped, ceremony.Script, new[] { vault.Script, ceremony.Script }, release: false).Reason);
         }
 
         /// <summary>
@@ -750,6 +808,425 @@ namespace VerifiedXCore.Tests
                 (Globals.WithdrawalDestinationRecheckHeight, Globals.BridgeIntraBlockGuardHeight) = prior;
             }
         }
+
+        private VfxTx RequestTo(string vault, string btcAddress, decimal amount, int feeRate = 10) =>
+            SignedBy(Minter, Minter.Address, TransactionType.VBTC_V2_WITHDRAWAL_REQUEST,
+                new { Function = "VBTCWithdrawalRequest()", ContractUID = vault, BTCAddress = btcAddress, Amount = amount, FeeRate = feeRate, UniqueId = Guid.NewGuid().ToString("N") });
+
+        /// <summary>
+        /// A release returns a withdrawal's coins to the vault's current key. With two coins, the first closes the released
+        /// withdrawal and the second is looked at with no withdrawal holding it. Below the height its output, paying the
+        /// address another withdrawal asked for before the re-key gave it to the vault, was taken for that withdrawal's
+        /// payment: settled, while the Bitcoin never left the vault. From the height an output to the vault's own key pays
+        /// nobody: the withdrawal stays open, does not claim the release kept as a payment either, and is refunded when its
+        /// window runs out.
+        /// </summary>
+        [Theory]
+        [InlineData(true)]
+        [InlineData(false)]
+        public async Task AReleaseToTheNewKey_DoesNotPayAWithdrawalAskedForToThatAddress_FromTheHeight(bool fromTheHeight)
+        {
+            var prior = (Globals.VreeActivationHeight, Globals.WithdrawalOwnScriptAttributionHeight, Globals.WithdrawalDestinationRecheckHeight);
+            Globals.VreeActivationHeight = 1;                       // payments are attributed by destination
+            Globals.WithdrawalDestinationRecheckHeight = H1;        // and a withdrawal to the vault's own address is never fixed
+            Globals.WithdrawalOwnScriptAttributionHeight = fromTheHeight ? H1 : long.MaxValue;
+            try
+            {
+                await Start();
+                var vault = await CreateVault(H1 + 1, keyHolders: Signers);
+                await Deposit(vault.Script, 30_000);
+                await Deposit(vault.Script, 30_000);
+                var released = await Mine(Request(vault.Uid, 0.0005M));
+                Assert.Equal(2, Assert.Single(Row(released, vault.Uid).Pins).Inputs.Count);
+                await Deposit(vault.Script, 55_000); // free, and too little for the next withdrawal
+
+                var stillHere = Signers.Take(3).ToList();
+                await ToNextEpoch(stillHere, leaving: Signers.Skip(3));
+                var ceremony = Ceremony(vault.Uid, stillHere, 2, Signers[0].Address);
+                // Asked for before the re-key, to the address the re-key gives the vault, for what the release's two coins hold.
+                var toNextKey = await Mine(RequestTo(vault.Uid, ceremony.Address, 0.0006M));
+                Assert.Equal(VaultWithdrawalState.Waiting, Row(toNextKey, vault.Uid).State);
+                await Mine(RekeyTx(vault.Uid, ceremony.Proof));
+                var sweep = Assert.Single(BtcAttestStore.WithdrawalsOf(vault.Uid, VaultWithdrawalState.Pinned).Where(w => w.IsSweep));
+                await SignAndConfirm(sweep.Pins[0]);
+
+                await Mine(Release(vault.Uid, released.Hash, 30));
+                var release = Row(released, vault.Uid).Pins[^1];
+                Assert.True(release.IsRelease);
+                Assert.Equal(2, release.Inputs.Count);
+                var releaseTx = await SignAndConfirm(release);
+                Assert.Equal(ceremony.Script, Assert.Single(releaseTx.Outputs).ScriptPubKey);
+                Assert.Equal(VaultWithdrawalState.Released, Row(released, vault.Uid).State);
+
+                var row = Row(toNextKey, vault.Uid);
+                if (!fromTheHeight)
+                {
+                    // Settled by the release, whose Bitcoin is back in the vault.
+                    Assert.Equal(VaultWithdrawalState.Settled, row.State);
+                    Assert.Equal(release.Txid, row.SettledTxid);
+                    return;
+                }
+                Assert.Equal(VaultWithdrawalState.Waiting, row.State);
+                Assert.Null(row.SettledTxid);
+                Assert.Empty(row.Pins);
+                // Kept as a payment nothing was open for; the withdrawal, tried again on the vault's changed coins, did not claim it.
+                var kept = BtcAttestStore.Payment(release.Txid, vault.Uid);
+                Assert.NotNull(kept);
+                Assert.Null(kept!.ClaimedByRef);
+
+                var before = await Spendable(vault.Uid, Minter);
+                await AdvanceTo(BtcWithdrawals.ExpiresAtVfxHeight(row));
+                Assert.Equal(VaultWithdrawalState.Expired, Row(toNextKey, vault.Uid).State);
+                Assert.Equal(before + 0.0006M, await Spendable(vault.Uid, Minter));
+                Assert.Null(BtcAttestStore.Payment(release.Txid, vault.Uid)!.ClaimedByRef);
+            }
+            finally { (Globals.VreeActivationHeight, Globals.WithdrawalOwnScriptAttributionHeight, Globals.WithdrawalDestinationRecheckHeight) = prior; }
+        }
+
+        /// <summary>
+        /// A withdrawal fixed on the old key's coin before the re-key, to the address the re-key gives the vault, that never
+        /// confirms: a sweep takes its coin once it has stopped moving, and pays the new key. Below the height the sweep was
+        /// taken for the withdrawal's payment: the withdrawal was settled with nothing paid, and the sweep was void. From the
+        /// height the sweep is the sweep: settled, and the withdrawal is void and refunded.
+        /// </summary>
+        [Theory]
+        [InlineData(true)]
+        [InlineData(false)]
+        public async Task ASweepOfAStoppedWithdrawalsCoin_DoesNotPayItsDestinationWhenThatIsTheNewKey_FromTheHeight(bool fromTheHeight)
+        {
+            var prior = (Globals.VreeActivationHeight, Globals.WithdrawalOwnScriptAttributionHeight);
+            Globals.VreeActivationHeight = 1;
+            Globals.WithdrawalOwnScriptAttributionHeight = fromTheHeight ? H1 : long.MaxValue;
+            try
+            {
+                await Start();
+                var vault = await CreateVault(H1 + 1, keyHolders: Signers);
+                await Deposit(vault.Script, 200_000);
+                var stillHere = Signers.Take(3).ToList();
+                await ToNextEpoch(stillHere, leaving: Signers.Skip(3));
+                var ceremony = Ceremony(vault.Uid, stillHere, 2, Signers[0].Address);
+                var request = await Mine(RequestTo(vault.Uid, ceremony.Address, 0.002M, feeRate: 40));
+                var oldPin = Assert.Single(Row(request, vault.Uid).Pins);
+                await Mine(RekeyTx(vault.Uid, ceremony.Proof));
+                var before = await Spendable(vault.Uid, Minter);
+
+                var stopped = BtcWithdrawals.MovingSince(Row(request, vault.Uid)) + BtcAttestRules.StuckPinBlocks;
+                await AdvanceTo(stopped % BtcAttestRules.TakeRetryBlocks == 0 ? stopped : stopped + BtcAttestRules.TakeRetryBlocks - stopped % BtcAttestRules.TakeRetryBlocks);
+                var sweep = Assert.Single(BtcAttestStore.WithdrawalsOf(vault.Uid, VaultWithdrawalState.Pinned).Where(w => w.IsSweep));
+                Assert.Equal(oldPin.Inputs, sweep.Pins[0].Inputs);
+                Assert.Equal(ceremony.Script.ToHex(), sweep.DestinationScriptHex);
+                await SignAndConfirm(sweep.Pins[0]);
+
+                var row = Row(request, vault.Uid);
+                var swept = BtcAttestStore.Withdrawal(sweep.Ref)!;
+                if (!fromTheHeight)
+                {
+                    Assert.Equal(VaultWithdrawalState.Settled, row.State);
+                    Assert.Equal(sweep.Pins[0].Txid, row.SettledTxid);
+                    Assert.Equal(VaultWithdrawalState.Void, swept.State);
+                    return;
+                }
+                Assert.Equal(VaultWithdrawalState.Void, row.State);
+                Assert.Equal(VaultWithdrawalState.Settled, swept.State);
+                Assert.Equal(sweep.Pins[0].Txid, swept.SettledTxid);
+                Assert.True(await Spendable(vault.Uid, Minter) > before); // refunded (less the sweep's fee, which falls on the owner)
+            }
+            finally { (Globals.VreeActivationHeight, Globals.WithdrawalOwnScriptAttributionHeight) = prior; }
+        }
+
+        /// <summary>
+        /// A holder's withdrawal fixed on the old key's coin before the re-key, to the address the re-key gives the vault.
+        /// Its own transaction confirms after the re-key: the payment output is now a coin of the vault. Below the height
+        /// the withdrawal was settled, the holder's vBTC spent and the owner's figure grown by it, with nothing paid out.
+        /// From the height it is closed unpaid as a release is: the holder has the amount back less the Bitcoin fee that
+        /// transaction cost, that fee is added back to the owner, and the vault's coins are exactly what Bitcoin shows.
+        /// </summary>
+        [Theory]
+        [InlineData(true)]
+        [InlineData(false)]
+        public async Task AWithdrawalFixedToTheNextKeysAddress_IsNotPaidByItsOwnTransactionAfterTheReKey_FromTheHeight(bool fromTheHeight)
+        {
+            var prior = Globals.WithdrawalOwnScriptAttributionHeight;
+            Globals.WithdrawalOwnScriptAttributionHeight = fromTheHeight ? H1 : long.MaxValue;
+            try
+            {
+                await Start();
+                var holder = NewKey();
+                StateData.GetAccountStateTrei().InsertSafe(new AccountStateTrei { Key = holder.Address, Balance = 100M, Nonce = 0 });
+                var vault = await CreateVault(H1 + 1, keyHolders: Signers);
+                await Deposit(vault.Script, 200_000);
+                await Mine(SignedBy(Minter, holder.Address, TransactionType.VBTC_V2_TRANSFER,
+                    new { Function = "TransferVBTCV2()", ContractUID = vault.Uid, FromAddress = Minter.Address, ToAddress = holder.Address, Amount = 0.0005M }));
+                var stillHere = Signers.Take(3).ToList();
+                await ToNextEpoch(stillHere, leaving: Signers.Skip(3));
+                var ceremony = Ceremony(vault.Uid, stillHere, 2, Signers[0].Address);
+                var request = await Mine(SignedBy(holder, holder.Address, TransactionType.VBTC_V2_WITHDRAWAL_REQUEST,
+                    new { Function = "VBTCWithdrawalRequest()", ContractUID = vault.Uid, BTCAddress = ceremony.Address, Amount = 0.0003M, FeeRate = 10, UniqueId = Guid.NewGuid().ToString("N") }));
+                var pin = Assert.Single(Row(request, vault.Uid).Pins);
+                Assert.Equal(ceremony.Script, BtcTx.Parse(pin.TxHex, Network.Main).Outputs[0].ScriptPubKey); // fixed while the address was nobody's
+                await Mine(RekeyTx(vault.Uid, ceremony.Proof));
+                var holderBefore = await Spendable(vault.Uid, holder);
+                var ownerBefore = await Spendable(vault.Uid, Minter);
+                var heldBefore = BtcAttestStore.Total(vault.Uid).HeldSats;
+
+                await SignAndConfirm(pin);
+                var row = Row(request, vault.Uid);
+                // What it paid is the vault's: a coin under the new key. The vault holds what Bitcoin shows, less the fee only.
+                var paidOut = BtcAttestStore.Coin(BtcAttestStore.OutpointKey(pin.Txid, 0))!;
+                Assert.Equal(ceremony.Script.ToHex(), paidOut.ScriptHex);
+                Assert.Equal(pin.DestinationSats, paidOut.ValueSats);
+                Assert.Equal(heldBefore - pin.FeeSats, BtcAttestStore.Total(vault.Uid).HeldSats);
+                var fee = pin.FeeSats / BtcAttestBalance.SatsPerBtc;
+                if (!fromTheHeight)
+                {
+                    // Settled: the holder's 0.0003 is spent, and the owner is credited with Bitcoin that never left.
+                    Assert.Equal(VaultWithdrawalState.Settled, row.State);
+                    Assert.Equal(holderBefore, await Spendable(vault.Uid, holder));
+                    Assert.Equal(ownerBefore + 0.0003M - fee, await Spendable(vault.Uid, Minter));
+                    return;
+                }
+                Assert.Equal(VaultWithdrawalState.Released, row.State);
+                Assert.Equal(pin.Txid, row.SettledTxid);
+                Assert.Contains("an address of vault", row.WaitingReason);
+                var mined = VBTCWithdrawalRequest.GetByTransactionHash(request.Hash, vault.Uid)!;
+                Assert.Equal(VBTCWithdrawalStatus.Cancelled, mined.Status);
+                Assert.True(mined.IsCompleted);
+                Assert.Equal(holderBefore + 0.0003M - fee, await Spendable(vault.Uid, holder));
+                Assert.Equal(ownerBefore, await Spendable(vault.Uid, Minter)); // the fee is the requester's, as for a release
+                Assert.Equal(pin.FeeSats, BtcAttestStore.Total(vault.Uid).ReleaseFeeSats);
+            }
+            finally { Globals.WithdrawalOwnScriptAttributionHeight = prior; }
+        }
+
+        /// <summary>
+        /// As for a withdrawal, a bridge exit's part fixed before the re-key to the address the re-key gives its vault is not
+        /// paid by its own transaction confirming after it. Below the height the exit completed with nothing paid out; from
+        /// the height the part is void, the exit fails by rule and its lock is restored.
+        /// </summary>
+        [Theory]
+        [InlineData(true)]
+        [InlineData(false)]
+        public async Task AnExitPartFixedToTheNextKeysAddress_IsNotPaidByItsOwnTransactionAfterTheReKey_FromTheHeight(bool fromTheHeight)
+        {
+            var prior = (Globals.WithdrawalOwnScriptAttributionHeight, Globals.BridgeIntraBlockGuardHeight, Globals.BridgeVoidKeepsLocksHeight);
+            var caster = Signers[0];
+            Globals.WithdrawalOwnScriptAttributionHeight = fromTheHeight ? H1 : long.MaxValue;
+            Globals.BridgeIntraBlockGuardHeight = 1;
+            Globals.BridgeVoidKeepsLocksHeight = 1;
+            Globals.BootstrapCasterAddresses.Add(caster.Address);
+            try
+            {
+                await Start();
+                var vault = await CreateVault(H1 + 1, keyHolders: Signers);
+                await Deposit(vault.Script, 1_000_000);
+                var lockId = Guid.NewGuid().ToString("N");
+                await Mine(SignedBy(Minter, Minter.Address, TransactionType.VBTC_V2_BRIDGE_LOCK,
+                    new { Function = "VBTCBridgeLock()", ContractUID = vault.Uid, LockId = lockId, Amount = 0.004M, AmountSats = 400_000L, EvmDestination = "0x" + new string('a', 40) }));
+                var stillHere = Signers.Take(3).ToList();
+                await ToNextEpoch(stillHere, leaving: Signers.Skip(3));
+                var ceremony = Ceremony(vault.Uid, stillHere, 2, caster.Address);
+                var burn = "0x" + Guid.NewGuid().ToString("N") + Guid.NewGuid().ToString("N");
+                var exit = SignedBy(caster, caster.Address, TransactionType.VBTC_V2_BRIDGE_EXIT_TO_BTC, new
+                {
+                    Function = "VBTCBridgeExitToBTC()", ContractUID = vault.Uid, LockId = lockId,
+                    Amount = 0.004M, AmountSats = 400_000L, TotalAmount = 0.004M, TotalAmountSats = 400_000L,
+                    BtcDestination = ceremony.Address, BaseBurnTxHash = burn,
+                    Allocations = new List<PoolUnlockAllocation> { new() { LockId = lockId, SmartContractUID = vault.Uid, UnlockAmount = 0.004M } },
+                });
+                exit.Fee = 0; exit.Build(); exit.Signature = VerifiedXCore.Services.SignatureService.CreateSignature(exit.Hash, caster.Key, caster.Pub);
+                await Mine(exit);
+                var partRef = BtcWithdrawals.ExitRefOf(VBTCBridgeBtcExitState.GetByBurnHash(burn)!, vault.Uid);
+                var pin = Assert.Single(BtcAttestStore.Withdrawal(partRef)!.Pins);
+                await Mine(RekeyTx(vault.Uid, ceremony.Proof));
+                var heldBefore = BtcAttestStore.Total(vault.Uid).HeldSats;
+
+                await SignAndConfirm(pin);
+                var part = BtcAttestStore.Withdrawal(partRef)!;
+                var record = VBTCBridgeBtcExitState.GetByBurnHash(burn)!;
+                Assert.Equal(ceremony.Script.ToHex(), BtcAttestStore.Coin(BtcAttestStore.OutpointKey(pin.Txid, 0))!.ScriptHex);
+                Assert.Equal(heldBefore - pin.FeeSats, BtcAttestStore.Total(vault.Uid).HeldSats);
+                Assert.True(record.IsComplete);
+                if (!fromTheHeight)
+                {
+                    Assert.Equal(VaultWithdrawalState.Settled, part.State);
+                    Assert.False(record.IsFailedRecord);
+                    Assert.Equal(400_000, BtcAttestStore.Total(vault.Uid).SettledExitSats);
+                    return;
+                }
+                Assert.Equal(VaultWithdrawalState.Void, part.State);
+                Assert.Contains("an address of vault", part.WaitingReason);
+                Assert.True(record.IsFailedRecord);
+                Assert.False(VBTCBridgeLockState.GetByLockId(lockId)!.IsUnlocked); // restored
+                Assert.Equal(0, BtcAttestStore.Total(vault.Uid).SettledExitSats);
+            }
+            finally
+            {
+                Globals.BootstrapCasterAddresses.Remove(caster.Address);
+                (Globals.WithdrawalOwnScriptAttributionHeight, Globals.BridgeIntraBlockGuardHeight, Globals.BridgeVoidKeepsLocksHeight) = prior;
+            }
+        }
+
+        // ── An exit over two vaults, to the address one of them is re-keyed to ───────
+
+        private sealed record TwoVaultExit(string X, string Y, string XLock, string YLock, string Burn, string XRef, string YRef, VaultPin XPin, VaultPin YPin, NBitcoin.Script XNewKey);
+
+        /// <summary>
+        /// Runs <paramref name="body"/> on an exit drawing 0.002 from each of two vaults, X and Y, recorded and pinned on both
+        /// before X's re-key, to the address that re-key gives X; X is then re-keyed. Withdrawal destinations are re-checked
+        /// from the start, as on the custom testnet; <see cref="Globals.WithdrawalOwnScriptAttributionHeight"/> as given.
+        /// </summary>
+        private async Task WithATwoVaultExitToTheNextKey(bool fromTheHeight, Func<TwoVaultExit, Task> body)
+        {
+            var prior = (Globals.WithdrawalOwnScriptAttributionHeight, Globals.WithdrawalDestinationRecheckHeight, Globals.BridgeIntraBlockGuardHeight, Globals.BridgeVoidKeepsLocksHeight);
+            var caster = Signers[0];
+            Globals.WithdrawalOwnScriptAttributionHeight = fromTheHeight ? H1 : long.MaxValue;
+            Globals.WithdrawalDestinationRecheckHeight = H1;
+            Globals.BridgeIntraBlockGuardHeight = 1;
+            Globals.BridgeVoidKeepsLocksHeight = 1;
+            Globals.BootstrapCasterAddresses.Add(caster.Address);
+            try
+            {
+                await Start();
+                var x = await CreateVault(H1 + 1, keyHolders: Signers);
+                var y = await CreateVault(H1 + 2, keyHolders: Signers);
+                await Deposit(x.Script, 1_000_000);
+                await Deposit(y.Script, 1_000_000);
+                async Task<string> LockOn(string vault)
+                {
+                    var lockId = Guid.NewGuid().ToString("N");
+                    await Mine(SignedBy(Minter, Minter.Address, TransactionType.VBTC_V2_BRIDGE_LOCK,
+                        new { Function = "VBTCBridgeLock()", ContractUID = vault, LockId = lockId, Amount = 0.002M, AmountSats = 200_000L, EvmDestination = "0x" + new string('a', 40) }));
+                    return lockId;
+                }
+                var xLock = await LockOn(x.Uid);
+                var yLock = await LockOn(y.Uid);
+
+                var stillHere = Signers.Take(3).ToList();
+                await ToNextEpoch(stillHere, leaving: Signers.Skip(3));
+                var ceremony = Ceremony(x.Uid, stillHere, 2, caster.Address);
+                var burn = "0x" + Guid.NewGuid().ToString("N") + Guid.NewGuid().ToString("N");
+                var exit = SignedBy(caster, caster.Address, TransactionType.VBTC_V2_BRIDGE_EXIT_TO_BTC, new
+                {
+                    Function = "VBTCBridgeExitToBTC()", ContractUID = x.Uid, LockId = xLock,
+                    Amount = 0.004M, AmountSats = 400_000L, TotalAmount = 0.004M, TotalAmountSats = 400_000L,
+                    BtcDestination = ceremony.Address, BaseBurnTxHash = burn,
+                    Allocations = new List<PoolUnlockAllocation>
+                    {
+                        new() { LockId = xLock, SmartContractUID = x.Uid, UnlockAmount = 0.002M },
+                        new() { LockId = yLock, SmartContractUID = y.Uid, UnlockAmount = 0.002M },
+                    },
+                });
+                exit.Fee = 0; exit.Build(); exit.Signature = VerifiedXCore.Services.SignatureService.CreateSignature(exit.Hash, caster.Key, caster.Pub);
+                await Mine(exit);
+                var record = VBTCBridgeBtcExitState.GetByBurnHash(burn)!;
+                var xRef = BtcWithdrawals.ExitRefOf(record, x.Uid);
+                var yRef = BtcWithdrawals.ExitRefOf(record, y.Uid);
+                var xPin = Assert.Single(BtcAttestStore.Withdrawal(xRef)!.Pins);
+                var yPin = Assert.Single(BtcAttestStore.Withdrawal(yRef)!.Pins);
+                await Mine(RekeyTx(x.Uid, ceremony.Proof));
+                Assert.Equal(200_000, VBTCBridgeLockState.GetByLockId(xLock)!.UnlockedAmountSats); // drawn by the exit
+                await body(new TwoVaultExit(x.Uid, y.Uid, xLock, yLock, burn, xRef, yRef, xPin, yPin, ceremony.Script));
+            }
+            finally
+            {
+                Globals.BootstrapCasterAddresses.Remove(caster.Address);
+                (Globals.WithdrawalOwnScriptAttributionHeight, Globals.WithdrawalDestinationRecheckHeight, Globals.BridgeIntraBlockGuardHeight, Globals.BridgeVoidKeepsLocksHeight) = prior;
+            }
+        }
+
+        private static VaultWithdrawalRow Part(string reference) => BtcAttestStore.Withdrawal(reference)!;
+
+        /// <summary>
+        /// Y's part is paid, then X's own transaction confirms, paying X's new key. Below the height X's part was settled and
+        /// its owner credited with Bitcoin that never left. From the height it would have been reopened and waited for good
+        /// (no transaction to an address of its own vault is fixed, and an exit being paid never expires); instead it stays
+        /// void, its lock is restored, and the exit is complete, paid in Y's part.
+        /// </summary>
+        [Theory]
+        [InlineData(true)]
+        [InlineData(false)]
+        public async Task ATwoVaultExit_WhoseOtherPartIsPaid_EndsWhenItsPartToItsOwnVaultCannotBe_FromTheHeight(bool fromTheHeight) =>
+            await WithATwoVaultExitToTheNextKey(fromTheHeight, async e =>
+            {
+                await SignAndConfirm(e.YPin);
+                Assert.Equal(VaultWithdrawalState.Settled, Part(e.YRef).State);
+                Assert.False(VBTCBridgeBtcExitState.GetByBurnHash(e.Burn)!.IsComplete);
+
+                await SignAndConfirm(e.XPin);
+                var record = VBTCBridgeBtcExitState.GetByBurnHash(e.Burn)!;
+                Assert.True(record.IsComplete);
+                Assert.False(record.IsFailedRecord);
+                Assert.Equal(200_000, BtcAttestStore.Total(e.Y).SettledExitSats);
+                if (!fromTheHeight)
+                {
+                    Assert.Equal(VaultWithdrawalState.Settled, Part(e.XRef).State);
+                    Assert.Equal(200_000, BtcAttestStore.Total(e.X).SettledExitSats);
+                    return;
+                }
+                Assert.Equal(VaultWithdrawalState.Void, Part(e.XRef).State);
+                Assert.Equal(0, BtcAttestStore.Total(e.X).SettledExitSats);
+                Assert.Equal(0, VBTCBridgeLockState.GetByLockId(e.XLock)!.UnlockedAmountSats); // restored
+                Assert.Equal(200_000, VBTCBridgeLockState.GetByLockId(e.YLock)!.UnlockedAmountSats); // paid out
+                Assert.Equal(e.YPin.Txid, record.BtcTxHash);
+            });
+
+        /// <summary>As above, X's own transaction confirming first, while Y's part is still pinned: the exit completes when Y's is paid.</summary>
+        [Theory]
+        [InlineData(true)]
+        [InlineData(false)]
+        public async Task ATwoVaultExit_WhosePartToItsOwnVaultConfirmsFirst_CompletesWhenTheOtherPartIsPaid_FromTheHeight(bool fromTheHeight) =>
+            await WithATwoVaultExitToTheNextKey(fromTheHeight, async e =>
+            {
+                await SignAndConfirm(e.XPin);
+                Assert.Equal(fromTheHeight ? VaultWithdrawalState.Void : VaultWithdrawalState.Settled, Part(e.XRef).State);
+                Assert.Equal(VaultWithdrawalState.Pinned, Part(e.YRef).State);
+                Assert.False(VBTCBridgeBtcExitState.GetByBurnHash(e.Burn)!.IsComplete);
+                if (fromTheHeight) Assert.Equal(0, VBTCBridgeLockState.GetByLockId(e.XLock)!.UnlockedAmountSats);
+
+                await SignAndConfirm(e.YPin);
+                var record = VBTCBridgeBtcExitState.GetByBurnHash(e.Burn)!;
+                Assert.True(record.IsComplete);
+                Assert.False(record.IsFailedRecord);
+                Assert.Equal(fromTheHeight ? e.YPin.Txid : string.Join(",", new[] { (e.XRef, e.XPin.Txid), (e.YRef, e.YPin.Txid) }.OrderBy(p => p.Item1, StringComparer.Ordinal).Select(p => p.Item2)),
+                    record.BtcTxHash);
+                Assert.Equal(fromTheHeight ? 0 : 200_000, BtcAttestStore.Total(e.X).SettledExitSats);
+            });
+
+        /// <summary>
+        /// Y's part is paid, then X's coin is spent by a transaction of X's key that the chain had not fixed. Below the height
+        /// X's part is reopened, is refused every coin (its destination is now X's own address) and never expires: the share
+        /// and its lock are held for good. From the height it stays void, its lock is restored, and the exit is complete.
+        /// </summary>
+        [Theory]
+        [InlineData(true)]
+        [InlineData(false)]
+        public async Task ATwoVaultExit_WhosePartToItsOwnVaultIsVoidedElsewhere_DoesNotWaitForever_FromTheHeight(bool fromTheHeight) =>
+            await WithATwoVaultExitToTheNextKey(fromTheHeight, async e =>
+            {
+                BtcAttestRules.ExitReopenBurialBlocksOverride = 0; // a reopened part is tried again at once (reset in Dispose)
+                await SignAndConfirm(e.YPin);
+                var coin = e.XPin.Inputs.Single();
+                var elsewhere = Pay(new[] { new OutPoint(uint256.Parse(coin[..64]), uint.Parse(coin[65..])) }, (e.XNewKey, 1_000_000 - 5_000));
+                await Report(_btc.Mine(elsewhere));
+                if (!fromTheHeight)
+                {
+                    var part = Part(e.XRef);
+                    Assert.Equal(VaultWithdrawalState.Waiting, part.State);
+                    // Past the exit's window, tried again on every retry (no wait for the voiding spend's burial here): refused.
+                    await AdvanceTo(part.RequestVfxHeight + VBTCWithdrawalRequest.EXPIRY_BLOCKS + 2 * BtcAttestRules.TakeRetryBlocks);
+                    Assert.Equal(VaultWithdrawalState.Waiting, Part(e.XRef).State);
+                    Assert.Contains("is an address of vault", Part(e.XRef).WaitingReason);
+                    Assert.False(VBTCBridgeBtcExitState.GetByBurnHash(e.Burn)!.IsComplete);
+                    Assert.Equal(200_000, VBTCBridgeLockState.GetByLockId(e.XLock)!.UnlockedAmountSats); // still drawn
+                    return;
+                }
+                Assert.Equal(VaultWithdrawalState.Void, Part(e.XRef).State);
+                Assert.Equal(0, VBTCBridgeLockState.GetByLockId(e.XLock)!.UnlockedAmountSats);
+                var record = VBTCBridgeBtcExitState.GetByBurnHash(e.Burn)!;
+                Assert.True(record.IsComplete);
+                Assert.False(record.IsFailedRecord);
+                Assert.Equal(e.YPin.Txid, record.BtcTxHash);
+            });
 
         /// <summary>
         /// A re-key among three validators made a key that all three had to sign (67% of three): with no holder to spare

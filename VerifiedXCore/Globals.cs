@@ -422,6 +422,17 @@ namespace VerifiedXCore
         public const long WithdrawalDestinationRecheckTestnetHeight = 205_615L;
 
         /// <summary>
+        /// From this height a Bitcoin output that pays a script of a withdrawal's or bridge-exit part's own vault (any key
+        /// the vault has had) is never taken for that row's payment: not when a transaction the chain had not fixed for it
+        /// confirms, and not when it claims a payment kept for a later request. Such an output leaves the Bitcoin in the
+        /// vault, so it pays nobody: a release, or a sweep, to the vault's current key settled a withdrawal asked for to
+        /// that address before the re-key gave it to the vault. Below it they are matched by script as before. Unset
+        /// (long.MaxValue) on mainnet and testnet until the release that activates it. Testnet value in GlobalsNetworkHeights.
+        /// </summary>
+        public static long WithdrawalOwnScriptAttributionHeight = long.MaxValue;
+        public const long WithdrawalOwnScriptAttributionTestnetHeight = long.MaxValue;
+
+        /// <summary>
         /// From this height a voided part of a bridge exit gives its locks back for use, as an expired exit does, instead
         /// of blacklisting them: a void is proven on Bitcoin (every pinned transaction's coins spent elsewhere or never
         /// to exist), so the exit was not paid and the locks' value is intact, and a blacklisted lock left its owner, and
@@ -498,6 +509,17 @@ namespace VerifiedXCore
         public const long BridgeLockMinimumTestnetHeight = ReleaseRulesTestnetHeight;
 
         /// <summary>
+        /// From this height a contract's vBTC ledger is kept as one entry per (contract, holder) in a collection of its own,
+        /// not as a list of rows inside the contract's state document: every ledger in state moves there at the start of the
+        /// block at this height (Bitcoin.Attestation.VaultLedgerStore.MoveAll). A balance is then one read, a write touches
+        /// only the entries it changes, and no ledger can outgrow what one document holds. The holder limit counts entries
+        /// that hold a balance (or are claimed by an open withdrawal or lock). Unset (long.MaxValue) on mainnet and testnet
+        /// until the release that activates it. Testnet value in GlobalsNetworkHeights.
+        /// </summary>
+        public static long VaultLedgerHeight = long.MaxValue;
+        public const long VaultLedgerTestnetHeight = long.MaxValue;
+
+        /// <summary>
         /// From this height a vBTC V2 bridge pool unlock credits its VfxCreditAddress, a VFX address, and a block refuses one
         /// whose VfxCreditAddress is missing, is not a VFX address, or is not the address its VfxDestinationAddress (the
         /// destination burned on Base, an address or a registered name) names. Below it the unlock credits
@@ -507,6 +529,25 @@ namespace VerifiedXCore
         /// </summary>
         public static long PoolUnlockCreditsAddressHeight = long.MaxValue;
         public const long PoolUnlockCreditsAddressTestnetHeight = long.MaxValue;
+
+        /// <summary>
+        /// From this height a block refuses a bridge exit or pool unlock that draws on a lock of a vault whose Bitcoin key
+        /// had fewer holders that count than it needs to sign at the last look (BtcVaultKeys.CannotSignRefusal): an exit
+        /// part on it could not be paid, and vBTC unlocked on it could be neither withdrawn nor bridged again. Bridge locks
+        /// and withdrawals on such a vault were already refused. A tightening rule. Unset (long.MaxValue) on mainnet and
+        /// testnet until the release that activates it. Testnet value in GlobalsNetworkHeights.
+        /// </summary>
+        public static long BridgeAllocationsSignableHeight = long.MaxValue;
+        public const long BridgeAllocationsSignableTestnetHeight = long.MaxValue;
+
+        /// <summary>
+        /// From this height a block refuses a vBTC V2 bridge lock whose EvmDestination is not "0x" and 40 hex digits, or is
+        /// the zero address: Base mints to neither, and the lock debited vBTC that could never be minted. Admission refuses
+        /// one at every height. A tightening rule. Unset (long.MaxValue) on mainnet and testnet until the release that
+        /// activates it. Testnet value in GlobalsNetworkHeights.
+        /// </summary>
+        public static long BridgeLockEvmAddressHeight = long.MaxValue;
+        public const long BridgeLockEvmAddressTestnetHeight = long.MaxValue;
 
         /// <summary>
         /// From this height a vBTC V2 bridge lock is at least VBTCService.MinBridgeLockPartSats, the smallest part a vault
@@ -793,6 +834,21 @@ namespace VerifiedXCore
         public const long BridgeExitCarriesTotalsTestnetHeight = 205_615L;
 
         /// <summary>
+        /// From this height the committee votes a pool unlock or a bridge exit to Bitcoin carries count only for the caster
+        /// they elected and only for the attempt they were given for. Each counted vote carries the handler its caster
+        /// agreed to, signed by that caster (the confirmation's handler signature), and that handler is the transaction's
+        /// sender. Each counted vote is timestamped no earlier than BridgeCasterConsensus.VoteMaxAgeSeconds before the
+        /// block and no later than the block's allowance for clock skew, and, when the burn has an earlier exit that
+        /// failed, after the latest time the block that holds that exit allowed a vote to be stamped. At admission the
+        /// same rules are judged against this node's clock with a margin (BridgeCasterConsensus.AttemptFor). The vote
+        /// message itself is unchanged.
+        /// Unset (long.MaxValue) on both networks until the release that activates it.
+        /// </summary>
+        public static long BridgeVotesBoundToAttemptHeight = long.MaxValue;
+        /// <summary>The same height on testnet (GlobalsNetworkHeights).</summary>
+        public const long BridgeVotesBoundToAttemptTestnetHeight = long.MaxValue;
+
+        /// <summary>
         /// From this height a transaction's Amount and Fee each have one accepted spelling, the shortest decimal with at
         /// least one digit after the point ("1.0", "1.5", "0.00002", "0.0"), on admission and in blocks
         /// (LedgerIntegrityRules.CanonicalAmountAndFee), and its carried hash is the hash of the values it carries, with no
@@ -866,6 +922,16 @@ namespace VerifiedXCore
         /// </summary>
         public static long PlonkCurrentRulesHeight = long.MaxValue;
         public const long PlonkCurrentRulesTestnetHeight = 205_615L;
+
+        /// <summary>
+        /// From this height a private transaction's proofs are judged under the PLONK library's key-bound rules
+        /// (<c>plonk_verify3</c>): every Fiat-Shamir challenge depends on the whole verifier key the proof is checked
+        /// against, lookup selector and tables included. Below it under the rules of <see cref="PlonkCurrentRulesHeight"/>.
+        /// The wallet proves under the rules of the block it would mine into. Set to the tip at release. Testnet value in
+        /// GlobalsNetworkHeights.
+        /// </summary>
+        public static long PlonkKeyBoundRulesHeight = long.MaxValue;
+        public const long PlonkKeyBoundRulesTestnetHeight = long.MaxValue;
 
         /// <summary>
         /// From this height a transaction's Data is read by one strict reader, Utilities.ConsensusData: a name used twice
@@ -1336,7 +1402,7 @@ namespace VerifiedXCore
         public static bool ProofVerifierReady =>
             !Privacy.PrivacyEpoch.ProofRulesActive((LastBlock?.Height ?? 0) + 1)
             || Privacy.PlonkProofVerifier.VerifierAvailable()
-                && (!Privacy.PlonkProofVerifier.UsesCurrentRules((LastBlock?.Height ?? 0) + 1) || Privacy.PlonkProofVerifier.CurrentRulesAvailable());
+                && Privacy.PlonkProofVerifier.RulesAvailable(Privacy.PlonkProofVerifier.RulesAt((LastBlock?.Height ?? 0) + 1));
 
         /// <summary>Legacy proofs, GET block fallback, optional cert skip, and seed peer injection apply only for seed casters when the tip looks stopped. Other nodes always use normal snapshot/signed paths and discovery.
         /// Phase E: additionally requires a signed ≥2-of-3 seed agreement (<see cref="Services.BootstrapCoordinationService.AgreementActive"/>) — bootstrap is never entered unilaterally.</summary>

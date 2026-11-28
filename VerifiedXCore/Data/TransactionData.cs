@@ -328,6 +328,32 @@ namespace VerifiedXCore.Data
 
         /// <summary>Puts this node's own transaction in the mempool. False when it was not put there: it conflicts with a
         /// pooled one, it would take its sender past a per-sender limit, or the insert failed.</summary>
+        /// <summary>The start of every reason <see cref="SubmitOwnTransaction"/> gives for a transaction its mempool did not take.</summary>
+        public const string MempoolRefusedPrefix = "This node's mempool did not take the transaction";
+
+        /// <summary>Whether a failure reason is this node's mempool refusing a transaction (a conflict that can clear), not a rule.</summary>
+        public static bool IsMempoolRefusal(string? reason) => reason != null && reason.StartsWith(MempoolRefusedPrefix, StringComparison.Ordinal);
+
+        /// <summary>
+        /// Sends a transaction this node made and signed: into its own mempool first, and only once the mempool takes it into
+        /// its wallet, its local balance (less <paramref name="debit"/> on <paramref name="balanceAddress"/>) and out to its
+        /// peers. A sender that did those whatever the mempool said reported a transaction as sent that its own node had
+        /// refused, so the work behind it (a bridge burn, say) was marked done and not tried again. Null when it was sent;
+        /// otherwise why not, starting with <see cref="MempoolRefusedPrefix"/>.
+        /// </summary>
+        public static async Task<string?> SubmitOwnTransaction(Transaction transaction, string balanceAddress, decimal debit)
+        {
+            if (!await AddToPool(transaction))
+            {
+                var limit = MempoolEvictionUtility.SenderLimitRefusal(transaction);
+                return limit == null ? $"{MempoolRefusedPrefix} (it conflicts with one already waiting)." : $"{MempoolRefusedPrefix}: {limit}";
+            }
+            await AddTxToWallet(transaction, true);
+            await AccountData.UpdateLocalBalance(balanceAddress, debit);
+            await VerifiedXCore.P2P.P2PClient.SendTXMempool(transaction);
+            return null;
+        }
+
         public static async Task<bool> AddToPool(Transaction transaction)
         {
             var TransactionPool = GetPool();
@@ -1046,14 +1072,10 @@ namespace VerifiedXCore.Data
                                             if (scState != null)
                                             {
                                                 bool isOwner = tx.FromAddress == scState.OwnerAddress;
-                                                if (!isOwner && scState.SCStateTreiTokenizationTXes != null)
+                                                if (!isOwner && VerifiedXCore.Bitcoin.Attestation.VaultLedgerStore.HasLedger(scState))
                                                 {
-                                                    var tokenTxs = scState.SCStateTreiTokenizationTXes
-                                                        .Where(x => x.FromAddress == tx.FromAddress || x.ToAddress == tx.FromAddress)
-                                                        .ToList();
-                                                    var received = tokenTxs.Where(x => x.ToAddress == tx.FromAddress).Sum(x => x.Amount);
-                                                    var sent = tokenTxs.Where(x => x.FromAddress == tx.FromAddress).Sum(x => x.Amount);
-                                                    decimal vbtcBalance = received + sent;
+                                                    var receivedPlusSent = VerifiedXCore.Bitcoin.Attestation.VaultLedgerStore.ReceivedPlusSent(scState, tx.FromAddress);
+                                                    decimal vbtcBalance = receivedPlusSent;
 
                                                     if (pendingTotal > vbtcBalance)
                                                         reject = true; // Overspend detected
@@ -1628,16 +1650,13 @@ namespace VerifiedXCore.Data
                             if (scState != null)
                             {
                                 bool isOwner = tx.FromAddress == scState.OwnerAddress;
-                                if (!isOwner && scState.SCStateTreiTokenizationTXes != null)
+                                if (!isOwner && VerifiedXCore.Bitcoin.Attestation.VaultLedgerStore.HasLedger(scState))
                                 {
-                                    var tokenTxs = scState.SCStateTreiTokenizationTXes
-                                        .Where(x => x.FromAddress == tx.FromAddress || x.ToAddress == tx.FromAddress).ToList();
-                                    var received = tokenTxs.Where(x => x.ToAddress == tx.FromAddress).Sum(x => x.Amount);
-                                    var sent = tokenTxs.Where(x => x.FromAddress == tx.FromAddress).Sum(x => x.Amount);
+                                    var receivedPlusSent = VerifiedXCore.Bitcoin.Attestation.VaultLedgerStore.ReceivedPlusSent(scState, tx.FromAddress);
                                     // Debit rows carry NEGATIVE amounts, so balance = received + sent.
                                     // (The old "received - sent" ADDED historical outflows back in,
                                     // inflating the balance and disabling this guard.)
-                                    if (pendingTotal > (received + sent))
+                                    if (pendingTotal > receivedPlusSent)
                                         return true; // vBTC overspend detected
                                 }
                             }

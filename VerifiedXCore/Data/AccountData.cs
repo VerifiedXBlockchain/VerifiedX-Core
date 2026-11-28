@@ -323,9 +323,8 @@ namespace VerifiedXCore.Data
 			// Check for smart contracts where this address has a tokenization balance
 			var allContracts = scStateTrei.Query().ToEnumerable();
 			var contractsWithBalance = allContracts.Where(contract =>
-				contract.SCStateTreiTokenizationTXes != null &&
-				contract.SCStateTreiTokenizationTXes.Any(tx =>
-					tx.ToAddress == address || tx.FromAddress == address));
+				VerifiedXCore.Bitcoin.Attestation.VaultLedgerStore.HasLedger(contract) &&
+				VerifiedXCore.Bitcoin.Attestation.VaultLedgerStore.Names(contract, address));
 
 			if (contractsWithBalance.Any())
 			{
@@ -338,10 +337,10 @@ namespace VerifiedXCore.Data
 
 					try
 					{
-						if (sc.SCStateTreiTokenizationTXes == null)
+						if (!VerifiedXCore.Bitcoin.Attestation.VaultLedgerStore.HasLedger(sc))
 							continue;
 						// Calculate balance for this address
-						var transactions = sc.SCStateTreiTokenizationTXes.Where(tx =>
+						var transactions = VerifiedXCore.Bitcoin.Attestation.VaultLedgerStore.Rows(sc).Where(tx =>
 							tx.ToAddress == address || tx.FromAddress == address).ToList();
 						var balance = transactions.Sum(x => x.Amount);
 

@@ -452,7 +452,7 @@ namespace VerifiedXCore.Services
             foreach (var (key, _) in SameBlockDebitGuard.GetDebits(tx))
             {
                 if (key.Kind != SameBlockDebitGuard.LedgerKind.VbtcV2 || key.Holder != tx.FromAddress) continue;
-                var contract = SmartContractStateTrei.GetSmartContractState(key.ContractUid);
+                var contract = SmartContractStateTrei.GetSmartContractHeader(key.ContractUid);
                 if (contract == null || contract.OwnerAddress != tx.FromAddress || (contract.NextOwner == null && !contract.IsLocked)) continue;
                 if (!VerifiedXCore.Bitcoin.Attestation.BtcAttestBalance.IsAttestedVault(contract.SmartContractUID)) continue;
                 return $"Vault {contract.SmartContractUID} is being transferred or sold. Its owner moves no vBTC out of it until that is completed or called back.";
@@ -1299,7 +1299,7 @@ namespace VerifiedXCore.Services
             var payload = SmartContractDeployBinding.ReadPayload(tx.Data, height);
             if (payload.Function != null && VbtcV1OnlyFunctions.Contains(payload.Function))
                 return VbtcV1RetiredMessage;
-            if (!string.IsNullOrEmpty(payload.ContractUID) && VBTCService.IsVbtcV1Contract(SmartContractStateTrei.GetSmartContractState(payload.ContractUID)))
+            if (!string.IsNullOrEmpty(payload.ContractUID) && VBTCService.IsVbtcV1ContractHeader(SmartContractStateTrei.GetSmartContractHeader(payload.ContractUID)))
                 return VbtcV1RetiredMessage;
             return null;
         }
@@ -1637,7 +1637,7 @@ namespace VerifiedXCore.Services
         /// characters), or null when it is exact or names no contract.</summary>
         public static string? InexactReference(string uid)
         {
-            var record = SmartContractStateTrei.GetSmartContractState(uid);
+            var record = SmartContractStateTrei.GetSmartContractHeader(uid);
             return record != null && !string.Equals(record.SmartContractUID, uid, StringComparison.Ordinal)
                 ? $"Contract UID '{uid}' does not match the stored contract '{record.SmartContractUID}' exactly."
                 : null;
@@ -1654,7 +1654,7 @@ namespace VerifiedXCore.Services
             var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             foreach (var uid in uids)
             {
-                var resolved = string.IsNullOrEmpty(uid) ? "" : SmartContractStateTrei.GetSmartContractState(uid)?.SmartContractUID ?? uid;
+                var resolved = string.IsNullOrEmpty(uid) ? "" : SmartContractStateTrei.GetSmartContractHeader(uid)?.SmartContractUID ?? uid;
                 if (!seen.Add(resolved))
                     return true;
             }

@@ -49,8 +49,12 @@ namespace VerifiedXCore
             Globals.ContractBodyKeySpellingHeight = Globals.IsTestNet ? Globals.ContractBodyKeySpellingTestnetHeight : Globals.ContractBodyKeySpellingHeight;
             Globals.ContractRunLimitsHeight = Globals.IsTestNet ? Globals.ContractRunLimitsTestnetHeight : Globals.ContractRunLimitsHeight;
             Globals.BridgeLockMinimumHeight = Globals.IsTestNet ? Globals.BridgeLockMinimumTestnetHeight : Globals.BridgeLockMinimumHeight;
+            Globals.VaultLedgerHeight = Globals.IsTestNet ? Globals.VaultLedgerTestnetHeight : Globals.VaultLedgerHeight;
             Globals.BridgeAllocationsArrayHeight = Globals.IsTestNet ? Globals.BridgeAllocationsArrayTestnetHeight : Globals.BridgeAllocationsArrayHeight;
             Globals.PoolUnlockCreditsAddressHeight = Globals.IsTestNet ? Globals.PoolUnlockCreditsAddressTestnetHeight : Globals.PoolUnlockCreditsAddressHeight;
+            Globals.BridgeLockEvmAddressHeight = Globals.IsTestNet ? Globals.BridgeLockEvmAddressTestnetHeight : Globals.BridgeLockEvmAddressHeight;
+            Globals.WithdrawalOwnScriptAttributionHeight = Globals.IsTestNet ? Globals.WithdrawalOwnScriptAttributionTestnetHeight : Globals.WithdrawalOwnScriptAttributionHeight;
+            Globals.BridgeAllocationsSignableHeight = Globals.IsTestNet ? Globals.BridgeAllocationsSignableTestnetHeight : Globals.BridgeAllocationsSignableHeight;
             Globals.BridgeLockPartMinimumHeight = Globals.IsTestNet ? Globals.BridgeLockPartMinimumTestnetHeight : Globals.BridgeLockPartMinimumHeight;
             Globals.VrfMixHeight = Globals.IsTestNet ? Globals.VrfMixTestnetHeight : Globals.VrfMixHeight;
             Globals.ReserveRecoverReadsEveryRowHeight = Globals.IsTestNet ? Globals.LedgerRulesBatchTestnetHeight : Globals.ReserveRecoverReadsEveryRowHeight;
@@ -82,6 +86,7 @@ namespace VerifiedXCore
             Globals.SalePaymentSharesHeight = Globals.IsTestNet ? Globals.SalePaymentSharesTestnetHeight : Globals.SalePaymentSharesHeight;
             Globals.BridgeVoteOncePerCasterHeight = Globals.IsTestNet ? Globals.BridgeVoteOncePerCasterTestnetHeight : Globals.BridgeVoteOncePerCasterHeight;
             Globals.BridgeExitCarriesTotalsHeight = Globals.IsTestNet ? Globals.BridgeExitCarriesTotalsTestnetHeight : Globals.BridgeExitCarriesTotalsHeight;
+            Globals.BridgeVotesBoundToAttemptHeight = Globals.IsTestNet ? Globals.BridgeVotesBoundToAttemptTestnetHeight : Globals.BridgeVotesBoundToAttemptHeight;
             Globals.CanonicalInputHeight = Globals.IsTestNet ? Globals.CanonicalInputTestnetHeight : Globals.CanonicalInputHeight;
             Globals.WithdrawalUniqueIdRulesHeight = Globals.IsTestNet ? Globals.FundLossAuditTestnetHeight : Globals.WithdrawalUniqueIdRulesHeight;
             Globals.RoyaltyRewriteRulesHeight = Globals.IsTestNet ? Globals.FundLossAuditTestnetHeight : Globals.RoyaltyRewriteRulesHeight;
@@ -91,6 +96,7 @@ namespace VerifiedXCore
             // Privacy stage 2 on testnet: with the fund-loss rules (reset 2026-10-13 from 1,099,400, which had passed).
             Globals.PrivateTxProofRulesHeight = Globals.IsTestNet ? Globals.FundLossAuditTestnetHeight : Globals.PrivateTxProofRulesHeight;
             Globals.PlonkCurrentRulesHeight = Globals.IsTestNet ? Globals.PlonkCurrentRulesTestnetHeight : Globals.PlonkCurrentRulesHeight;
+            Globals.PlonkKeyBoundRulesHeight = Globals.IsTestNet ? Globals.PlonkKeyBoundRulesTestnetHeight : Globals.PlonkKeyBoundRulesHeight;
             Globals.StrictDataReaderHeight = Globals.IsTestNet ? Globals.StrictDataReaderTestnetHeight : Globals.StrictDataReaderHeight;
             // Bitcoin attestation (plan 8.4): observe from the tip of 2026-10-13, record with the fund-loss rules, enforce three days later.
             Globals.BitcoinAttestationObserveHeight = Globals.IsTestNet ? Globals.BitcoinAttestationObserveTestnetHeight : Globals.BitcoinAttestationObserveHeight;
@@ -119,6 +125,14 @@ namespace VerifiedXCore
         /// upgrade every Marigold node first.
         /// </summary>
         public const long CustomTestNetInputRulesHeight = 8500;
+
+        /// <summary>
+        /// Rules added once Marigold had passed <see cref="CustomTestNetInputRulesHeight"/> take effect from this block: dated
+        /// 8,500 they would judge blocks Marigold mined before its nodes ran them, and a node syncing from block 0 would
+        /// refuse, or apply differently, its own history. Set on 2026-11-27 with Marigold's tip about 25,000, room to
+        /// upgrade every Marigold node first.
+        /// </summary>
+        public const long CustomTestNetLateRulesHeight = 30_000;
 
         /// <summary>
         /// The custom testnet's heights, over the testnet ones. Config.ProcessConfig selects a custom testnet after
@@ -175,10 +189,16 @@ namespace VerifiedXCore
             Globals.ContractBodyKeySpellingHeight = CustomTestNetInputRulesHeight;
             Globals.ContractRunLimitsHeight = CustomTestNetInputRulesHeight;
             Globals.VrfMixHeight = CustomTestNetInputRulesHeight;
-            Globals.BridgeLockMinimumHeight = CustomTestNetInputRulesHeight;
-            Globals.BridgeAllocationsArrayHeight = CustomTestNetInputRulesHeight;
-            Globals.PoolUnlockCreditsAddressHeight = CustomTestNetInputRulesHeight;
-            Globals.BridgeLockPartMinimumHeight = CustomTestNetInputRulesHeight;
+            Globals.BridgeLockMinimumHeight = CustomTestNetLateRulesHeight;
+            Globals.BridgeAllocationsArrayHeight = CustomTestNetLateRulesHeight;
+            Globals.PoolUnlockCreditsAddressHeight = CustomTestNetLateRulesHeight;
+            Globals.BridgeLockEvmAddressHeight = CustomTestNetLateRulesHeight;
+            Globals.WithdrawalOwnScriptAttributionHeight = CustomTestNetLateRulesHeight;
+            Globals.VaultLedgerHeight = CustomTestNetLateRulesHeight;
+            Globals.PlonkKeyBoundRulesHeight = CustomTestNetLateRulesHeight;
+            Globals.BridgeVotesBoundToAttemptHeight = CustomTestNetLateRulesHeight;
+            Globals.BridgeAllocationsSignableHeight = CustomTestNetLateRulesHeight;
+            Globals.BridgeLockPartMinimumHeight = CustomTestNetLateRulesHeight;
         }
     }
 }
