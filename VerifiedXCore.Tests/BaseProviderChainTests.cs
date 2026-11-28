@@ -44,6 +44,36 @@ namespace VerifiedXCore.Tests
             Assert.Equal(1, onBase.CallsTo("eth_getTransactionReceipt"));
         }
 
+        [Fact]
+        public async Task AtStart_TheOperatorIsWarned_WhenFewerThanTwoProvidersCanBeReadFrom()
+        {
+            var onBase = Provider();
+            var elsewhere = Provider(OtherChain);
+            var down = Provider();
+            down.Down = true;
+
+            // One of three serves Base: the node could give no vote on a bridge exit, and says so.
+            Configure(elsewhere, down, onBase);
+            await BaseRpc.CheckProvidersAtStartAsync();
+            Assert.NotNull(BaseRpc.StartWarning);
+            Assert.Contains("Only 1 of the 3 configured Base providers", BaseRpc.StartWarning);
+            Assert.Contains("BaseBridgeRpcUrl2", BaseRpc.StartWarning);
+
+            // The same provider written twice is one provider.
+            BaseRpc.ForgetChainChecksForTests();
+            BaseBridgeService.BaseRpcUrl = onBase.Url;
+            BaseBridgeService.BaseRpcUrl2 = onBase.Url + "?key=another";
+            BaseBridgeService.BaseRpcUrl3 = "";
+            await BaseRpc.CheckProvidersAtStartAsync();
+            Assert.Contains("Only 1 of the 2 configured Base providers", BaseRpc.StartWarning);
+
+            // Two that serve Base: nothing to warn of.
+            BaseRpc.ForgetChainChecksForTests();
+            Configure(onBase, Provider(), down);
+            await BaseRpc.CheckProvidersAtStartAsync();
+            Assert.Null(BaseRpc.StartWarning);
+        }
+
         // ── The casters' burn watch ──────────────────────────────────────────────────────
 
         [Fact]

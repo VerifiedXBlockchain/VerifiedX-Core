@@ -114,6 +114,46 @@ namespace VerifiedXCore.Bitcoin.Services
 
         private static readonly ConcurrentDictionary<string, ChainCheck> ChainChecks = new(StringComparer.Ordinal);
 
+        /// <summary>
+        /// The providers of Base mainnet a node asks where its configuration names none: three public endpoints run by
+        /// three different parties, since what decides something of value needs <see cref="RequiredAgreement"/> providers
+        /// that give the same answer. An operator's own providers, set in config.txt, take their place.
+        /// </summary>
+        public static readonly IReadOnlyList<string> MainnetDefaultProviders = new[]
+        {
+            "https://mainnet.base.org", "https://base-rpc.publicnode.com", "https://base.drpc.org",
+        };
+
+        /// <summary>The same for Base Sepolia, the testnets' Base chain.</summary>
+        public static readonly IReadOnlyList<string> TestnetDefaultProviders = new[]
+        {
+            "https://sepolia.base.org", "https://base-sepolia-rpc.publicnode.com", "https://base-sepolia.drpc.org",
+        };
+
+        /// <summary>The default providers of this network's Base chain.</summary>
+        public static IReadOnlyList<string> DefaultProviders => Globals.IsTestNet ? TestnetDefaultProviders : MainnetDefaultProviders;
+
+        /// <summary>
+        /// The three provider settings with the ones the configuration left out filled from <see cref="DefaultProviders"/>:
+        /// each takes the next default whose address no setting holds yet. A setting the operator wrote is kept as it is.
+        /// </summary>
+        public static string[] WithDefaults(IReadOnlyList<string?> configured)
+        {
+            var filled = configured.Select(c => string.IsNullOrWhiteSpace(c) ? "" : c!.Trim()).ToArray();
+            var held = new HashSet<string>(filled.Where(f => f.Length > 0).Select(AddressOf), StringComparer.OrdinalIgnoreCase);
+            var spare = new Queue<string>(DefaultProviders.Where(d => !held.Contains(AddressOf(d))));
+            for (var i = 0; i < filled.Length; i++)
+                if (filled[i].Length == 0 && spare.Count > 0)
+                    filled[i] = spare.Dequeue();
+            return filled;
+        }
+
+        /// <summary>
+        /// What the start check found when fewer than <see cref="RequiredAgreement"/> providers serve this network's
+        /// Base chain; null when enough do, and before the check has run.
+        /// </summary>
+        public static string? StartWarning { get; private set; }
+
         /// <summary>The configured providers, in the order they are asked.</summary>
         public static IReadOnlyList<string> Providers() => BaseBridgeService.RpcUrlCandidates().ToList();
 
@@ -210,6 +250,18 @@ namespace VerifiedXCore.Bitcoin.Services
                     LogUtility.Log($"[BaseBridge] Provider {NameOf(url)} serves Base chain {Globals.BaseEvmChainId}.", "BaseRpc.CheckProvidersAtStartAsync");
                 else if (check == BaseProviderCheck.NoAnswer)
                     LogUtility.Log($"[BaseBridge] Provider {NameOf(url)} was not reached at start ({reason}); it is asked again when Base is next read.", "BaseRpc.CheckProvidersAtStartAsync");
+            }
+            // What decides something of value needs RequiredAgreement providers, at different addresses, that give the
+            // same answer. With fewer usable the node reads nothing of that kind, and its operator is told at once.
+            var usable = results.Where(r => r.Check == BaseProviderCheck.OnBase).Select(r => AddressOf(r.Url)).Distinct(StringComparer.OrdinalIgnoreCase).Count();
+            StartWarning = usable >= RequiredAgreement ? null
+                : $"[BaseBridge] Only {usable} of the {results.Count} configured Base providers can be read from, and {RequiredAgreement} that agree are needed. "
+                  + "Until then this node gives no vote on bridge exits, admits none, and signs nothing that rests on the Base contract. "
+                  + "Set BaseBridgeRpcUrl, BaseBridgeRpcUrl2 and BaseBridgeRpcUrl3 in config.txt to three providers of Base run by different parties.";
+            if (StartWarning != null)
+            {
+                ErrorLogUtility.LogError(StartWarning, "BaseRpc.CheckProvidersAtStartAsync");
+                Console.WriteLine(StartWarning);
             }
             return results;
         }

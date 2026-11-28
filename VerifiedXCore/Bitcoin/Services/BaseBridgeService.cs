@@ -24,6 +24,13 @@ namespace VerifiedXCore.Bitcoin.Services
         public static string BaseRpcUrl2 { get; set; } = "";
         public static string BaseRpcUrl3 { get; set; } = "";
 
+        /// <summary>
+        /// Which of the three provider settings config.txt left out (Config.ProcessConfig). <see cref="LoadConfig"/> fills
+        /// those from the network's default providers; a setting the operator wrote is not touched. All false until a
+        /// configuration has been read.
+        /// </summary>
+        internal static bool[] ProvidersLeftOut { get; set; } = new bool[3];
+
         private static string _contractAddress = "";
         /// <summary>VBTCb proxy contract on Base (multi-sig mint). Set via BaseBridgeContract in config.txt.</summary>
         public static string ContractAddress
@@ -159,13 +166,22 @@ namespace VerifiedXCore.Bitcoin.Services
         public static void LoadConfig()
         {
             Globals.VBTCbContractAddress = ContractAddress.Trim();
+            // A provider setting the configuration left out takes one of the network's default providers, so a node
+            // whose config.txt names one provider (or none) still has three to ask. Nothing is written to config.txt.
+            var providers = BaseRpc.WithDefaults(new[]
+            {
+                ProvidersLeftOut[0] ? null : BaseRpcUrl, ProvidersLeftOut[1] ? null : BaseRpcUrl2, ProvidersLeftOut[2] ? null : BaseRpcUrl3,
+            });
+            if (ProvidersLeftOut[0]) BaseRpcUrl = providers[0];
+            if (ProvidersLeftOut[1]) BaseRpcUrl2 = providers[1];
+            if (ProvidersLeftOut[2]) BaseRpcUrl3 = providers[2];
             // The network decides which Base chain its bridge is on; a configured id that differs was refused
             // (Config.ProcessConfig, BaseRpc.AcceptsConfiguredChainId).
             BaseChainId = (int)Globals.BaseEvmChainId;
 
             if (IsBridgeConfigured)
             {
-                LogUtility.Log($"[BaseBridge] Bridge configured. RPC: {BaseRpcUrl}, Contract: {ContractAddress}, ChainId: {BaseChainId}, Network: {BaseNetworkDisplayName}",
+                LogUtility.Log($"[BaseBridge] Bridge configured. Providers: {string.Join(", ", BaseRpc.Providers().Select(BaseRpc.NameOf))}, Contract: {ContractAddress}, ChainId: {BaseChainId}, Network: {BaseNetworkDisplayName}",
                     "BaseBridgeService.LoadConfig");
             }
             else if (CanReadEth)
