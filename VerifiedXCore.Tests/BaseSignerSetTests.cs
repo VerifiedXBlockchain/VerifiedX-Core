@@ -1032,6 +1032,149 @@ namespace VerifiedXCore.Tests
             }
         }
 
+        /// <summary>The operator's own request for a signature on a contract change, through the validator API from loopback.</summary>
+        private static async Task<(HttpStatusCode Code, JObject Body)> OperatorSign(object request, string from = "127.0.0.1")
+        {
+            using var server = new TestServer(new WebHostBuilder().UseStartup<StartupP2PCaster>());
+            var ctx = await server.SendAsync(c =>
+            {
+                c.Request.Method = "POST";
+                c.Request.Path = "/valapi/validator/SignBaseAdminAction";
+                c.Request.ContentType = "application/json";
+                c.Request.Body = new MemoryStream(Encoding.UTF8.GetBytes(JsonConvert.SerializeObject(request)));
+                c.Connection.RemoteIpAddress = IPAddress.Parse(from);
+            });
+            using var reader = new StreamReader(ctx.Response.Body);
+            var text = await reader.ReadToEndAsync();
+            var json = text.Trim().StartsWith("\"") ? JsonConvert.DeserializeObject<string>(text)! : text;
+            return ((HttpStatusCode)ctx.Response.StatusCode, JObject.Parse(json));
+        }
+
+        private static Transaction Lifecycle(TransactionType type, V v, string ip, bool s3c = false) => new()
+        {
+            TransactionType = type, FromAddress = v.Address, ToAddress = v.Address, Hash = $"{type}-{v.Address}",
+            Data = JsonConvert.SerializeObject(new { ValidatorAddress = v.Address, IPAddress = ip, FrostPublicKey = v.Pub, IsS3C = s3c }),
+        };
+
+        /// <summary>
+        /// One rule says whether a validator named by a removal proposal is live, for the operator's signature on the
+        /// proposal and for the members' veto of it: a node never cancels a proposal it signs at the same tip. Every
+        /// combination of when the validator was last seen (counted back from the tip, around both the registry's 1,000
+        /// blocks and the removal rule's own window, on either side of the epoch boundary), whether it holds the validator
+        /// balance, whether it is S3C and whether it exited is asked both ways.
+        /// </summary>
+        [Fact]
+        public async Task WhateverTheOperatorSignsARemovalProposalFor_TheSameNodeDoesNotVeto_AndTheReverse()
+        {
+            const long boundary = 5 * BaseSignerSetPolicy.EpochBlocks;
+            const long tip = boundary + 3_000;
+            const int window = BaseSignerSetPolicy.RemovalLiveBlocks;
+            var blocks = new Dictionary<long, List<Transaction>>();
+            void At(long height, Transaction tx) { if (!blocks.TryGetValue(height, out var txs)) blocks[height] = txs = new List<Transaction>(); txs.Add(tx); }
+
+            // This node and the two other members, heard from just now.
+            var members = new[] { _me, _seed2, _seed3 };
+            for (var i = 0; i < members.Length; i++) At(tip - 10, Lifecycle(TransactionType.VBTC_V2_VALIDATOR_HEARTBEAT, members[i], $"10.0.0.{i + 1}"));
+
+            var cells = new List<(V Key, string What, bool Live)>();
+            var lastSeen = new long?[] { null, 0, 500, 999, 1_001, 2_999, 3_001, 10_000, window - 1, window, window + 1, 3_000 + window - 1, 3_000 + window + 1, 25_000 };
+            foreach (var seen in lastSeen)
+                foreach (var funded in new[] { true, false })
+                    foreach (var s3c in new[] { false, true })
+                        foreach (var exited in new[] { false, true })
+                        {
+                            if (seen == null && (s3c || exited)) continue;         // never registered: nothing to mark
+                            if (exited && (seen < 100 || !funded || s3c)) continue; // the exit follows 100 blocks after; one that is otherwise live
+                            var key = NewKey();
+                            if (funded) StateData.GetAccountStateTrei().InsertSafe(new AccountStateTrei { Key = key.Address, Balance = 5_000M, Nonce = 0 });
+                            if (seen is long ago)
+                            {
+                                At(tip - ago, Lifecycle(TransactionType.VBTC_V2_VALIDATOR_REGISTER, key, "10.0.9.9", s3c));
+                                if (exited) At(tip - ago + 100, Lifecycle(TransactionType.VBTC_V2_VALIDATOR_EXIT, key, "10.0.9.9", s3c));
+                            }
+                            cells.Add((key, $"last seen {(seen is long n ? $"{n} blocks back" : "never")}, {(funded ? "funded" : "not funded")}{(s3c ? ", S3C" : "")}{(exited ? ", exited" : "")}",
+                                seen is long back && back <= window && funded && !s3c && !exited));
+                        }
+            foreach (var (height, txs) in blocks)
+                BlockchainData.GetBlocks().InsertSafe(new Block { Height = height, Hash = $"b{height}-{Guid.NewGuid():N}", Transactions = txs });
+            if (!blocks.ContainsKey(tip)) BlockchainData.GetBlocks().InsertSafe(new Block { Height = tip, Hash = $"tip-{Guid.NewGuid():N}", Transactions = new List<Transaction>() });
+            Globals.LastBlock = new Block { Height = tip, Timestamp = TimeUtil.GetTime() };
+            VBTCValidatorRegistry.InvalidateCache();
+
+            Contract(21, members.Concat(cells.Select(c => c.Key)).ToArray(), members);
+            foreach (var (key, what, live) in cells)
+            {
+                var (signCode, signBody) = await OperatorSign(new { Action = "PROPOSE_REMOVAL", Validators = new[] { key.Base }, VfxBlockHeight = tip });
+                var signed = signCode == HttpStatusCode.OK && signBody.Value<bool>("Success");
+                if (!signed) Assert.Contains("still a registered vBTC validator", signBody.Value<string>("Error"));
+
+                BaseValidatorSyncService.PendingCache = null;                      // another proposal is pending now
+                BaseBridgeService.ReadPendingRemovalForTests = () => Task.FromResult<BaseBridgeService.PendingRemoval?>(
+                    new BaseBridgeService.PendingRemoval(new[] { key.Base }, Array.Empty<string>(), 1_900_000_000));
+                var veto = await Ask("CANCEL", Array.Empty<string>(), boundary, 21);
+                var vetoed = veto.Code == HttpStatusCode.OK;
+                if (!vetoed) Assert.Contains("No pending removal names", Refusal(veto));
+
+                Assert.True(signed != vetoed, $"A validator {what}: the operator's signature {(signed ? "given" : "refused")}, the veto {(vetoed ? "given" : "refused")}.");
+                Assert.True(live == vetoed, $"A validator {what} is {(live ? "" : "not ")}live for a removal.");
+            }
+
+            // The loop that sends the veto judges the same way: a validator seen since the registry's 1,000 blocks ran out is
+            // vetoed for (and not signed for above); one last seen before the removal rule's window, or without the
+            // balance, is left to be removed.
+            var priorFactory = Globals.HttpClientFactory;
+            Globals.HttpClientFactory = new ValidatorNetwork(members.Select((v, i) => (v, ip: $"10.0.0.{i + 1}")).ToDictionary(x => x.ip, x => x.v));
+            var sent = new List<string>();
+            BaseValidatorSyncService.SubmitForTests = (f, _) => { sent.Add(f); return Task.FromResult<string?>("0xtx"); };
+            var t0 = DateTime.UtcNow;
+            try
+            {
+                async Task<List<string>> LoopFor(string what)
+                {
+                    var key = cells.Single(c => c.What == what).Key;
+                    sent.Clear();
+                    Contract(22, members.Append(key).ToArray(), members);
+                    var pending = new BaseBridgeService.PendingRemoval(new[] { key.Base }, Array.Empty<string>(), new System.Numerics.BigInteger(Random.Shared.NextInt64(1, long.MaxValue)));
+                    BaseBridgeService.ReadPendingRemovalForTests = () => Task.FromResult<BaseBridgeService.PendingRemoval?>(pending);
+                    BaseValidatorSyncService.Clock = () => t0;
+                    await BaseValidatorSyncService.CancelHostileRemovalAsync();
+                    BaseValidatorSyncService.Clock = () => t0.AddDays(1);        // every member's turn has come
+                    if (sent.Count == 0) await BaseValidatorSyncService.CancelHostileRemovalAsync();
+                    return sent.ToList();
+                }
+                Assert.Equal(new[] { "cancelPending" }, await LoopFor("last seen 10000 blocks back, funded"));
+                Assert.Empty(await LoopFor($"last seen {3_000 + window - 1} blocks back, funded"));   // inside the window of the boundary, not of the tip
+                Assert.Empty(await LoopFor("last seen 500 blocks back, not funded"));
+            }
+            finally
+            {
+                BaseValidatorSyncService.SubmitForTests = null;
+                Globals.HttpClientFactory = priorFactory;
+            }
+        }
+
+        /// <summary>
+        /// The policy keeps what a scan found together with the block it was made at, and the veto loop and signing
+        /// requests read and replace that at the same time, across a tip change. Every field it keeps between calls is one
+        /// reference, read and written whole (a class, volatile): kept as a struct of several words it could be read half
+        /// old and half new, one block's height and hash beside another block's list. The shape is checked rather than the
+        /// race run: the window is a few instructions inside a call that takes milliseconds of store reads, so readers
+        /// racing for seconds meet it rarely, and a test that fails one run in thousands shows nothing either way.
+        /// </summary>
+        [Fact]
+        public void WhatThePolicyKeepsBetweenCalls_IsReadAndReplacedAsOneReference()
+        {
+            var kept = typeof(BaseSignerSetPolicy)
+                .GetFields(System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Public)
+                .Where(f => !f.IsLiteral && !f.IsInitOnly).ToList();
+            Assert.NotEmpty(kept);
+            Assert.All(kept, f =>
+            {
+                Assert.False(f.FieldType.IsValueType, $"{f.Name} is a {f.FieldType.Name}: read and written in parts");
+                Assert.True(f.GetRequiredCustomModifiers().Contains(typeof(System.Runtime.CompilerServices.IsVolatile)), $"{f.Name} is not volatile");
+            });
+        }
+
         /// <summary>
         /// A signed change counts as done only once the contract shows it, not when anything else moves the admin nonce:
         /// anyone can have a member sign the epoch's removal, and a caster change sent first must not make that member refuse
