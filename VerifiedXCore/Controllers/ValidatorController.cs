@@ -91,7 +91,10 @@ namespace VerifiedXCore.Controllers
         /// <summary>
         /// The node operator signs a vBTCb contract change with this validator's Base key: UPGRADE (V3), or on V4
         /// PROPOSE_UPGRADE, PROPOSE_UPGRADE_DELAY, PROPOSE_REMOVAL, CANCEL_PENDING (BaseAdminSigningService). Localhost only:
-        /// these signatures change the contract's code and validator set, so only the operator asks for them.
+        /// these signatures change the contract's code and validator set, so only the operator asks for them. That holds
+        /// for PROPOSE_REMOVAL's NotSigningOnBase too (a validator still seen on VFX that the operator names as not signing
+        /// on Base): it is read here and nowhere else, so no other caller can have this node sign for, or stop vetoing for,
+        /// a live validator.
         /// </summary>
         [HttpPost]
         [Route("SignBaseAdminAction")]
@@ -1518,6 +1521,10 @@ namespace VerifiedXCore.Controllers
                 TipHash = lastBlock?.Hash ?? "",
                 IsChainSynced = Globals.IsChainSynced,
                 IsValidator = !string.IsNullOrEmpty(Globals.ValidatorAddress),
+                // Whether this node would sign a Base mint for a lock right now (BaseBridgeAttestationService.NotReadyToAttest:
+                // at the network's height with a recent tip, not stalled, not on another chain than its peers). A node about
+                // to make a bridge lock asks this of the contract's signers; only the signer knows how old its own tip is.
+                ReadyToAttest = Bitcoin.Services.BaseBridgeAttestationService.NotReadyToAttest() == null,
                 IsBlockCaster = Globals.IsBlockCaster,
                 // SEAT-HEAL: casting right now (resumed, record current). Peers time a member's absence by this.
                 Casting = CasterSeatService.CastingNow,

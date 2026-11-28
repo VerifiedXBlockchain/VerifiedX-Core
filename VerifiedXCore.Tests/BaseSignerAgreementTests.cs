@@ -115,6 +115,7 @@ namespace VerifiedXCore.Tests
                 [Selector("pendingRemovalEta()")] = Encoded("uint256", new BigInteger(removing.Count == 0 ? 0 : 1_900_000_000)),
                 [Selector("getPendingRemovals()")] = Encoded("address[]", removing),
                 [Selector("getPendingCasterRemovals()")] = Encoded("address[]", new List<string>()),
+                [Selector("pendingRemovalHeight()")] = Encoded("uint256", new BigInteger(removing.Count == 0 ? 0 : Epoch)),
             };
             p.On = (method, args) =>
             {
