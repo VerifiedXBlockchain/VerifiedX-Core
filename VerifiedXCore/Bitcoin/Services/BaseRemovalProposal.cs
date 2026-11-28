@@ -27,6 +27,13 @@ namespace VerifiedXCore.Bitcoin.Services
     /// Only blocks up to the block the layer reads at are read. An event found at the likely place is taken once the
     /// blocks above it are read too (none, while the delay is the least the contract allows): a later one would be there.
     ///
+    /// The nonce decides whether this node vetoes, so it is not taken on one provider's word. Every provider is asked,
+    /// each searching for itself (what one provider says a range holds, or does not hold, is not taken for another's
+    /// search), and what a provider's search comes to is that provider's sighting: the event's block, its place in the
+    /// block and its nonce. The nonce is known once BaseRpc.RequiredAgreement providers, at different addresses, have
+    /// the same sighting. A provider that makes an event up, or leaves the last one out, has a sighting no other
+    /// shares; until two agree the nonce is not known yet (<see cref="ProposedUnder"/> is null).
+    ///
     /// Attempts are made by the member's own veto loop, once a pass. A signing request reads only what is kept here
     /// (<see cref="ProposedUnder"/>): it never makes this node read Base for the event.
     /// </summary>
@@ -69,12 +76,19 @@ namespace VerifiedXCore.Bitcoin.Services
             {""inputs"":[],""name"":""upgradeDelay"",""outputs"":[{""internalType"":""uint256"",""name"":"""",""type"":""uint256""}],""stateMutability"":""view"",""type"":""function""}
         ]";
 
-        /// <summary>How far the search for one removal's event has come. Touched by the loop only.</summary>
+        /// <summary>
+        /// The pending removal's event as one provider has it: the block it is in, its place in the block, and the admin
+        /// nonce it carries (it carries what the contract shows of the removal, or it would not be this removal's).
+        /// <paramref name="At"/> is when the provider's search came to it.
+        /// </summary>
+        private sealed record Sighting(BigInteger Block, BigInteger LogIndex, BigInteger Nonce, long At = 0);
+
+        /// <summary>How far one provider's search for one removal's event has come. Touched by that provider's attempts only.</summary>
         private sealed class Search
         {
             public bool LikelyRead;
-            /// <summary>The nonce of the event found at the likely place; the pending removal's unless a later one lies above it.</summary>
-            public BigInteger? Candidate;
+            /// <summary>The event found at the likely place; the pending removal's unless a later one lies above it.</summary>
+            public Sighting? Candidate;
             /// <summary>The window's first block, and its last once that one can be read.</summary>
             public BigInteger? Low, Top;
             /// <summary>The blocks of the window read so far, both ends included.</summary>
@@ -82,13 +96,16 @@ namespace VerifiedXCore.Bitcoin.Services
             public int Span = MaxSpan, Refused = int.MaxValue;
             /// <summary>When the whole window had been read without the event (0: not so).</summary>
             public long ReadWholeAt;
-            public int Attempts;
         }
 
         /// <summary>By removal (<see cref="IdentityOf"/>): the nonce it was proposed under.</summary>
         private static readonly ConcurrentDictionary<string, BigInteger> Found = new(StringComparer.Ordinal);
-        /// <summary>By removal (<see cref="IdentityOf"/>): how far the search for its event has come.</summary>
+        /// <summary>By removal (<see cref="IdentityOf"/>) and provider: how far that provider's search for its event has come.</summary>
         private static readonly ConcurrentDictionary<string, Search> Searches = new(StringComparer.Ordinal);
+        /// <summary>By removal and provider: what that provider's search came to.</summary>
+        private static readonly ConcurrentDictionary<string, Sighting> Sightings = new(StringComparer.Ordinal);
+        /// <summary>By removal: how many attempts asked a provider for it.</summary>
+        private static readonly ConcurrentDictionary<string, int> Attempts = new(StringComparer.Ordinal);
 
         /// <summary>The clock a window read whole is timed by (seconds).</summary>
         internal static Func<long> Clock = () => VerifiedXCore.Utilities.TimeUtil.GetTime();
@@ -115,18 +132,24 @@ namespace VerifiedXCore.Bitcoin.Services
         internal static BigInteger? ProposedUnder(BaseBridgeService.PendingRemoval pending) => Found.TryGetValue(KeyOf(pending), out var nonce) ? nonce : null;
 
         /// <summary>How many attempts were made for this pending removal (tests).</summary>
-        internal static int AttemptsFor(BaseBridgeService.PendingRemoval pending) => Searches.TryGetValue(KeyOf(pending), out var search) ? search.Attempts : 0;
+        internal static int AttemptsFor(BaseBridgeService.PendingRemoval pending) => Attempts.TryGetValue(KeyOf(pending), out var attempts) ? attempts : 0;
 
         /// <summary>Test seam: forget what was found and how far every search came.</summary>
         internal static void ForgetForTests()
         {
             Found.Clear();
             Searches.Clear();
+            Sightings.Clear();
+            Attempts.Clear();
         }
 
         /// <summary>
-        /// One attempt to find the pending removal's event, asked of the providers in their order until one could be read.
-        /// Nothing is thrown; what was found, or how far the search came, is kept.
+        /// One attempt to find the pending removal's event: every provider is asked, each going on with its own search.
+        /// The nonce is kept once BaseRpc.RequiredAgreement providers have the same sighting of the event (the same
+        /// block, the same place in it, the same nonce); one provider's sighting alone is kept as that and no more.
+        /// A provider whose search is done is not asked again while its sighting, or its finding of no event, is younger
+        /// than <see cref="ReadAgainSeconds"/>; after that it searches afresh, so a sighting no other provider came to
+        /// share does not stand for good. Nothing is thrown.
         /// </summary>
         internal static async Task SearchAsync(BaseBridgeService.PendingRemoval pending)
         {
@@ -134,44 +157,59 @@ namespace VerifiedXCore.Bitcoin.Services
             var key = KeyOf(pending);
             if (Found.ContainsKey(key)) return;
             if (Found.Count >= 64) Found.Clear();
-            if (Searches.Count >= 64) Searches.Clear();
-            var search = Searches.GetOrAdd(key, _ => new Search());
-            if (search.ReadWholeAt != 0)
+            if (Searches.Count >= 256 || Sightings.Count >= 256 || Attempts.Count >= 64)
             {
-                if (Math.Abs(Clock() - search.ReadWholeAt) < ReadAgainSeconds) return;
-                Searches[key] = search = new Search { Attempts = search.Attempts };
+                Searches.Clear();
+                Sightings.Clear();
+                Attempts.Clear();
             }
-            search.Attempts++;
 
             if (AttemptForTests != null)
             {
+                Attempts.AddOrUpdate(key, 1, (_, n) => n + 1);
                 if (await AttemptForTests(pending) is { } told) Found[key] = told;
                 return;
             }
-            foreach (var provider in BaseRpc.Providers())
+
+            var now = Clock();
+            var asked = new int[1];
+            await Task.WhenAll(BaseRpc.DistinctProviders().Select(async provider =>
             {
-                var (span, refused) = (search.Span, search.Refused);
+                var mine = key + "|" + provider;
+                if (Sightings.TryGetValue(mine, out var seen))
+                {
+                    if (Math.Abs(now - seen.At) < ReadAgainSeconds) return;       // it has said what it has
+                    Sightings.TryRemove(mine, out _);
+                    Searches.TryRemove(mine, out _);
+                }
+                var search = Searches.GetOrAdd(mine, _ => new Search());
+                if (search.ReadWholeAt != 0)
+                {
+                    if (Math.Abs(now - search.ReadWholeAt) < ReadAgainSeconds) return;
+                    Searches[mine] = search = new Search();
+                }
+                System.Threading.Interlocked.Exchange(ref asked[0], 1);
                 try
                 {
-                    if (await BaseRpc.AuthorizingAtAsync(provider, (web3, at) => AttemptAsync(web3, at, search, pending)) is { } nonce)
-                        Found[key] = nonce;
-                    return;                                                   // this provider was read: found, or the search moved on
+                    if (await BaseRpc.AuthorizingAtAsync(provider, (web3, at) => AttemptAsync(web3, at, search, pending)) is { } sighting)
+                        Sightings[mine] = sighting with { At = now };
                 }
-                catch
-                {
-                    // Not this provider: the next one goes on from the blocks already read, at the range that was in use
-                    // before this one failed (its failures say nothing of another provider's limit).
-                    (search.Span, search.Refused) = (span, refused);
-                }
-            }
+                catch { }   // this provider could not be read: its search goes on from where it is at the next attempt
+            }));
+            if (asked[0] != 0) Attempts.AddOrUpdate(key, 1, (_, n) => n + 1);
+
+            var agreed = Sightings.Where(s => s.Key.StartsWith(key + "|", StringComparison.Ordinal))
+                .GroupBy(s => (s.Value.Block, s.Value.LogIndex, s.Value.Nonce))
+                .FirstOrDefault(g => g.Count() >= BaseRpc.RequiredAgreement);
+            if (agreed != null) Found[key] = agreed.Key.Nonce;
         }
 
         /// <summary>
-        /// One provider's part of an attempt: the nonce when it has the pending removal's event, null when the blocks it
-        /// read hold none (<paramref name="search"/> then says how far the window is read). Throws when the provider could
-        /// not be read.
+        /// One provider's part of an attempt: its sighting of the pending removal's event when it has it, null when the
+        /// blocks it read hold none (<paramref name="search"/> then says how far the window is read). Throws when the
+        /// provider could not be read.
         /// </summary>
-        private static async Task<BigInteger?> AttemptAsync(Web3 web3, BlockParameter at, Search search, BaseBridgeService.PendingRemoval pending)
+        private static async Task<Sighting?> AttemptAsync(Web3 web3, BlockParameter at, Search search, BaseBridgeService.PendingRemoval pending)
         {
             var eta = pending.Eta;
             var (validators, casters) = (Lower(pending.Validators).ToList(), Lower(pending.Casters).ToList());
@@ -184,14 +222,15 @@ namespace VerifiedXCore.Bitcoin.Services
                     ?? throw new InvalidOperationException($"the provider gave no block {number}")).Timestamp.Value;
             var proposed = web3.Eth.GetEvent<RemovalProposedEventDTO>(contract);
             // The last event in these blocks, by block and place in it, that carries what the contract shows of the pending removal.
-            async Task<BigInteger?> EventIn(BigInteger from, BigInteger to)
+            async Task<Sighting?> EventIn(BigInteger from, BigInteger to)
             {
                 var logs = await proposed.GetAllChangesAsync(proposed.CreateFilterInput(new BlockParameter(new HexBigInteger(from)), new BlockParameter(new HexBigInteger(to))));
-                return logs
+                var last = logs
                     .Where(l => l.Event.Eta == eta && pending.VfxBlockHeight == l.Event.VfxBlockHeight
                         && Lower(l.Event.Validators).SequenceEqual(validators) && Lower(l.Event.Casters).SequenceEqual(casters))
                     .OrderByDescending(l => l.Log.BlockNumber.Value).ThenByDescending(l => l.Log.LogIndex.Value)
-                    .FirstOrDefault()?.Event.AdminNonce;
+                    .FirstOrDefault();
+                return last == null ? null : new Sighting(last.Log.BlockNumber.Value, last.Log.LogIndex.Value, last.Event.AdminNonce);
             }
             var pages = PagesPerAttempt;
 
@@ -238,7 +277,7 @@ namespace VerifiedXCore.Bitcoin.Services
                 else break;                                                   // the window is read
                 pages--;
 
-                BigInteger? found;
+                Sighting? found;
                 try { found = await EventIn(from, to); }
                 catch when (search.Span > 1)
                 {
@@ -247,7 +286,7 @@ namespace VerifiedXCore.Bitcoin.Services
                     search.Span = Math.Max(1, search.Span / 4);
                     continue;
                 }
-                if (found is { } nonce) return nonce;
+                if (found != null) return found;
                 search.ReadTo = search.ReadTo == null ? to : BigInteger.Max(search.ReadTo.Value, to);
                 search.ReadFrom = search.ReadFrom == null ? from : BigInteger.Min(search.ReadFrom.Value, from);
                 if (search.Span < MaxSpan && search.Span * 2 < search.Refused) search.Span = Math.Min(MaxSpan, search.Span * 2);
