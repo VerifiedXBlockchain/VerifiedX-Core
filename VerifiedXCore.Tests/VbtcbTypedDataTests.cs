@@ -81,10 +81,12 @@ namespace VerifiedXCore.Tests
             Assert.Equal(Hex("0xed134b040f69c6615fa7f104421ea6ad6b00a99dcc136e51db6c6714a471aadf"), VbtcbTypedData.CancelPendingDigest(7, 8453, Proxy));
             Assert.Equal(Hex("0x3ac46ce13dc71113270dc8dd2152fbce97140867e8917ae198d59850e0c70fad"),
                 VbtcbTypedData.CancelPendingKindsDigest(VbtcbTypedData.PendingRemoval, 7, 8453, Proxy));
-            // burnId: keccak256("burn-tx"), standing in for a Base transaction hash.
-            Assert.Equal(Hex("0xe2d9ce929bc6be8968596e184cf98f2c441710d9c465cff809c4f19ed166be80"), VbtcbTypedData.RefundDigest(
-                "0x1111111111111111111111111111111111111111", 25_000, "0xb80dd397372defb854c53f02b1b9bf28f7ce79d1225ea82ad3369cd1ff2f5a6b", 8453, Proxy));
-            Assert.Throws<ArgumentException>(() => VbtcbTypedData.RefundDigest("0x1111111111111111111111111111111111111111", 25_000, "0xb80d", 8453, Proxy));
+            // A burn named by its transaction hash, and the second burn of a transaction that holds several ("hash:1").
+            const string burnTx = "0xb80dd397372defb854c53f02b1b9bf28f7ce79d1225ea82ad3369cd1ff2f5a6b";
+            Assert.Equal(Hex("0xf4b76f61875d88d3a2409cbb14422f6f90b713cde9b78a8ca57c7cb2e764588f"),
+                VbtcbTypedData.RefundDigest("0x1111111111111111111111111111111111111111", 25_000, burnTx, 8453, Proxy));
+            Assert.Equal(Hex("0x2394f227f1fd726c7517059368f7e11870232fb79c997f018802550a0ddcc915"),
+                VbtcbTypedData.RefundDigest("0x1111111111111111111111111111111111111111", 25_000, burnTx + ":1", 8453, Proxy));
         }
 
         [Fact]

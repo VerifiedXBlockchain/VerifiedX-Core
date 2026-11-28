@@ -137,13 +137,16 @@ The upgraded proxy has no casters yet. On V5 nothing is approved until it has 3:
 not an upgrade. The one thing that passes is `updateCasters` adding casters (no removals) on 2/3 of the validators,
 each new caster signing its own seat. The casters are added from `BaseBridgeV4Height` by the validators' own sync,
 which sends the caster change first, so mints pause from the upgrade until that change goes through. Collect the
-bootstrap signatures in advance to keep the pause short. After that nothing passes without the casters, and the list
+bootstrap signatures in advance to keep the pause short. The bootstrap is only as honest as the validators who sign it:
+2/3 of them choose the first three casters (as on V3, where they mint alone). After that nothing passes without the casters, and the list
 can no longer drop below 3.
 
 ### Upgrading to V5
 
 - **Base Sepolia (V4)**: `proposeUpgrade` (both groups), wait 48 hours, `executeUpgrade`. No call data is passed.
   Don't propose a removal while it waits: a node's automatic veto uses `cancelPending`, which also drops the upgrade.
+  Run or cancel any removal still pending before `executeUpgrade`: V4 kept no seat nonces, so a member removed and
+  admitted again under V4 is still removed by a V4 proposal that runs after the upgrade.
 - **Base mainnet (V3)**: straight to V5 with `upgradeWithValidatorApproval`, then the caster bootstrap above.
 - Core's `CONTRACT_ABI` (`VerifiedXCore/Bitcoin/Services/BaseBridgeService.cs`) is this build's ABI; a test checks it.
 

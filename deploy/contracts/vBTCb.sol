@@ -109,7 +109,7 @@ contract vBTCb is ERC20Upgradeable, UUPSUpgradeable {
     bytes32 private constant CANCEL_PENDING_KINDS_TYPEHASH =
         keccak256("CancelPendingKinds(uint256 kinds,uint256 adminNonce)");
     bytes32 private constant REFUND_TYPEHASH =
-        keccak256("Refund(address to,uint256 amount,bytes32 burnId)");
+        keccak256("Refund(address to,uint256 amount,string burnId)");
 
     mapping(bytes32 => bool) public usedLockIds;
     uint256 public adminNonce;
@@ -128,7 +128,7 @@ contract vBTCb is ERC20Upgradeable, UUPSUpgradeable {
     event PendingCancelled(address implementation, uint256 upgradeDelay, uint256 removals, uint256 adminNonce);
     /// @notice Emitted after BTCExitBurned by burnForBTCExitWithMinPayout: the least the holder accepts after Bitcoin fees.
     event BTCExitMinPayout(address indexed burner, uint256 minPayoutSats);
-    event BurnRefunded(address indexed to, uint256 amount, bytes32 indexed burnId);
+    event BurnRefunded(address indexed to, uint256 amount, string burnId);
 
     bool private _upgradeAuthorized;
 
@@ -152,7 +152,7 @@ contract vBTCb is ERC20Upgradeable, UUPSUpgradeable {
     mapping(address => uint256) public casterSince;
     /// @notice The adminNonce the pending removal was proposed at; a seat given after it is left out of that removal.
     uint256 public pendingRemovalNonce;
-    /// @notice Burns already refunded, by the burn's id (its Base transaction hash).
+    /// @notice Burns already refunded, by keccak256 of the burn's id as VFX names it (isBurnRefunded reads it by the id).
     mapping(bytes32 => bool) public refundedBurns;
 
     /// @custom:oz-upgrades-unsafe-allow constructor
@@ -266,19 +266,25 @@ contract vBTCb is ERC20Upgradeable, UUPSUpgradeable {
     /**
      * @notice Mints back a burn VFX recorded it cannot pay (an exit below what it can pay, or one that ran out of ways to
      *         be paid), once per burn, with the mint approval: 2/3 of the validators and a majority of the casters.
-     * @param burnId the burn's Base transaction hash, as VFX keys the exit
+     * @param burnId the burn's id as VFX names it: its Base transaction hash, with ":n" for the n-th burn of a transaction
+     *        that holds several
      */
-    function refundBurn(address to, uint256 amount, bytes32 burnId, bytes[] calldata signatures) external onlyProxy {
+    function refundBurn(address to, uint256 amount, string calldata burnId, bytes[] calldata signatures) external onlyProxy {
         require(to != address(0), "Invalid recipient");
         require(amount > 0, "Amount must be > 0");
-        require(!refundedBurns[burnId], "Burn already refunded");
+        bytes32 burnIdHash = keccak256(bytes(burnId));
+        require(!refundedBurns[burnIdHash], "Burn already refunded");
 
-        bytes32 digest = _hashTypedData(keccak256(abi.encode(REFUND_TYPEHASH, to, amount, burnId)));
+        bytes32 digest = _hashTypedData(keccak256(abi.encode(REFUND_TYPEHASH, to, amount, burnIdHash)));
         _requireApproval(digest, signatures, "Insufficient valid signatures");
 
-        refundedBurns[burnId] = true;
+        refundedBurns[burnIdHash] = true;
         _mint(to, amount);
         emit BurnRefunded(to, amount, burnId);
+    }
+
+    function isBurnRefunded(string calldata burnId) external view returns (bool) {
+        return refundedBurns[keccak256(bytes(burnId))];
     }
 
     /**

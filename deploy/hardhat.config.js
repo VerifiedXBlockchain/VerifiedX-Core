@@ -14,6 +14,11 @@ module.exports = {
     }
   },
   networks: {
+    // The test harness (contracts/test) adds code to vBTCb and may pass the size limit; vBTCb itself is held under it by
+    // a test ("fits in a Base contract").
+    hardhat: {
+      allowUnlimitedContractSize: true
+    },
     baseSepolia: {
       url: "https://sepolia.base.org",
       chainId: 84532,

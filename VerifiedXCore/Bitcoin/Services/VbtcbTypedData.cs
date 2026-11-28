@@ -38,7 +38,7 @@ namespace VerifiedXCore.Bitcoin.Services
         private static readonly byte[] AddValidatorsTypeHash = Keccak("AddValidators(address[] validators,uint256 vfxBlockHeight,uint256 adminNonce)");
         private static readonly byte[] RemoveValidatorsTypeHash = Keccak("RemoveValidators(address[] validators,uint256 vfxBlockHeight,uint256 adminNonce)");
         private static readonly byte[] CancelPendingKindsTypeHash = Keccak("CancelPendingKinds(uint256 kinds,uint256 adminNonce)");
-        private static readonly byte[] RefundTypeHash = Keccak("Refund(address to,uint256 amount,bytes32 burnId)");
+        private static readonly byte[] RefundTypeHash = Keccak("Refund(address to,uint256 amount,string burnId)");
 
         /// <summary>The V5 contract's cancelPendingKinds bits: PENDING_UPGRADE, PENDING_UPGRADE_DELAY, PENDING_REMOVAL.</summary>
         public const int PendingUpgrade = 1, PendingUpgradeDelay = 2, PendingRemoval = 4;
@@ -68,19 +68,12 @@ namespace VerifiedXCore.Bitcoin.Services
         public static byte[] CancelPendingKindsDigest(int kinds, BigInteger adminNonce, long chainId, string contractAddress) =>
             Digest(chainId, contractAddress, Keccak(Concat(CancelPendingKindsTypeHash, Uint(kinds), Uint(adminNonce))));
 
-        /// <summary>V5's refundBurn: mints `amountSats` back to `to` for the burn whose Base transaction hash is `burnTxHash`.</summary>
-        public static byte[] RefundDigest(string to, long amountSats, string burnTxHash, long chainId, string contractAddress) =>
-            Digest(chainId, contractAddress, Keccak(Concat(RefundTypeHash, Address(to), Uint(amountSats), Bytes32(burnTxHash))));
-
-        /// <summary>A 32-byte hex value (a transaction hash) as one word.</summary>
-        internal static byte[] Bytes32(string? hex)
-        {
-            var h = (hex ?? "").Trim();
-            if (h.StartsWith("0x", StringComparison.OrdinalIgnoreCase)) h = h[2..];
-            var b = Convert.FromHexString(h);
-            if (b.Length != 32) throw new ArgumentException("Invalid 32-byte value length");
-            return b;
-        }
+        /// <summary>
+        /// V5's refundBurn: mints `amountSats` back to `to` for one burn, named as Core names it (BaseBridgeService.BurnId:
+        /// the Base transaction hash, with ":n" for the n-th burn of a transaction that holds several).
+        /// </summary>
+        public static byte[] RefundDigest(string to, long amountSats, string burnId, long chainId, string contractAddress) =>
+            Digest(chainId, contractAddress, Keccak(Concat(RefundTypeHash, Address(to), Uint(amountSats), Keccak(burnId ?? ""))));
 
         /// <summary>An address[] field: keccak256 of the 32-byte words in order (the contract's keccak256(abi.encodePacked(list))).</summary>
         internal static byte[] AddressList(IEnumerable<string> addresses) => Keccak(Concat(addresses.Select(Address).ToArray()));

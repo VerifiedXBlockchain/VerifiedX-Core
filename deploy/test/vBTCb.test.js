@@ -47,7 +47,7 @@ const TYPES = {
     Refund: [
         { name: "to", type: "address" },
         { name: "amount", type: "uint256" },
-        { name: "burnId", type: "bytes32" },
+        { name: "burnId", type: "string" },
     ],
     UpdateCasters: [
         { name: "add", type: "address[]" },
@@ -989,6 +989,25 @@ describe("vBTCb V4", function () {
             );
         });
 
+        it("the caster bootstrap takes 2/3 of the validators, not a majority, and at most 10 casters", async function () {
+            const vals = wallets(5);
+            const V3 = await ethers.getContractFactory("vBTCbV3");
+            const token = await upgrades.deployProxy(V3, ["n", "s", vals.map((v) => v.address)], { initializer: "initialize", kind: "uups" });
+            const self = await token.getAddress();
+            const { chainId } = await ethers.provider.getNetwork();
+            const V5 = await ethers.getContractFactory("vBTCb");
+            const impl = await upgrades.prepareUpgrade(self, V5, { kind: "uups" });
+            const h = ethers.solidityPackedKeccak256(["string", "address", "uint256", "uint256", "address"], ["UPGRADE", impl, 0n, chainId, self]);
+            await token.upgradeWithValidatorApproval(impl, await Promise.all(vals.slice(0, 4).map((v) => v.signMessage(ethers.getBytes(h)))));
+            const v5 = V5.attach(self);
+            expect(await v5.requiredMintSignatures()).to.equal(4n);                  // 2/3 of 5; a majority would be 3
+
+            await expect(updateCasters(v5, vals.slice(0, 3), wallets(3))).to.be.revertedWith("Insufficient valid admin signatures");
+            await expect(updateCasters(v5, vals.slice(0, 4), wallets(11))).to.be.revertedWith("Caster count out of range");
+            await expect(updateCasters(v5, vals.slice(0, 4), wallets(10))).to.emit(v5, "CastersUpdated");
+            expect(await v5.casterCount()).to.equal(10n);
+        });
+
         it("a V3 proxy with 4 validators needs a strict majority (3) for a removal proposal after the upgrade, not V3's 2", async function () {
             const vals = wallets(4);
             const V3 = await ethers.getContractFactory("vBTCbV3");
@@ -1156,6 +1175,32 @@ describe("vBTCb V4", function () {
             await token.executeUpgrade();
             expect(await upgrades.erc1967.getImplementationAddress(await token.getAddress())).to.equal(impl);
         });
+
+        it("an upgrade veto leaves a pending removal to run, and the delay kind leaves both", async function () {
+            const { token, vals, casters } = await loadFixture(deploySplitFixture);
+            const more = wallets(4);
+            await addBatch(token, [...vals, ...casters], more);
+            const seven = [...vals, ...more];
+            const both = [...seven.slice(0, 5), ...casters.slice(0, 2)];
+            const impl = await newImplementation();
+            await token.proposeUpgrade(impl, await signTyped(token, both, "ProposeUpgrade", { implementation: impl, adminNonce: await token.adminNonce() }));
+            const value = { validators: [more[3].address], casters: [], vfxBlockHeight: 9n, adminNonce: await token.adminNonce() };
+            await token.proposeRemoval(value.validators, [], 9n, await signTyped(token, both, "ProposeRemoval", value));
+            const delay = BigInt(3 * DAY);
+            await token.proposeUpgradeDelay(delay, await signTyped(token, both, "ProposeUpgradeDelay", { delay, adminNonce: await token.adminNonce() }));
+
+            const kinds = async (k) =>
+                token.cancelPendingKinds(k, await signTyped(token, seven.slice(4), "CancelPendingKinds", { kinds: k, adminNonce: await token.adminNonce() }));
+            await kinds(await token.PENDING_UPGRADE_DELAY());
+            expect(await token.pendingUpgradeDelayEta()).to.equal(0n);
+            expect(await token.pendingImplementation()).to.equal(impl);
+            await kinds(await token.PENDING_UPGRADE());
+            expect(await token.pendingImplementation()).to.equal(ethers.ZeroAddress);
+            expect(await token.getPendingRemovals()).to.deep.equal([more[3].address]);
+            await time.increase(48 * HOUR);
+            await token.executeRemoval();
+            expect(await token.isValidator(more[3].address)).to.equal(false);
+        });
     });
 
     describe("V5: exits to Bitcoin and refunds", function () {
@@ -1184,9 +1229,9 @@ describe("vBTCb V4", function () {
             expect(names).to.deep.equal(["BTCExitBurned", "BTCExitMinPayout"]);
         });
 
-        it("refundBurn mints a burn back once, with both groups' approval", async function () {
+        it("refundBurn mints a burn back once, with both groups' approval, each burn of a transaction on its own", async function () {
             const { token, vals, casters, user } = await loadFixture(deploySplitFixture);
-            const burnId = ethers.keccak256(ethers.toUtf8Bytes("burn-tx"));
+            const burnId = ethers.keccak256(ethers.toUtf8Bytes("burn-tx"));                      // a Base transaction hash
             const both = [...vals.slice(0, 2), ...casters.slice(0, 2)];
             const refund = async (signers, value) => token.refundBurn(value.to, value.amount, value.burnId, await signTyped(token, signers, "Refund", value));
             const value = { to: user.address, amount: 25_000n, burnId };
@@ -1201,8 +1246,15 @@ describe("vBTCb V4", function () {
 
             await expect(token.refundBurn(user.address, 25_000n, burnId, sigs)).to.emit(token, "BurnRefunded").withArgs(user.address, 25_000n, burnId);
             expect(await token.balanceOf(user.address)).to.equal(25_000n);
-            expect(await token.refundedBurns(burnId)).to.equal(true);
+            expect(await token.isBurnRefunded(burnId)).to.equal(true);
+            expect(await token.refundedBurns(ethers.keccak256(ethers.toUtf8Bytes(burnId)))).to.equal(true);
             await expect(token.refundBurn(user.address, 25_000n, burnId, sigs)).to.be.revertedWith("Burn already refunded");
+
+            // The second burn of the same transaction, as VFX names it, is refunded on its own.
+            const second = { to: user.address, amount: 30_000n, burnId: burnId + ":1" };
+            expect(await token.isBurnRefunded(second.burnId)).to.equal(false);
+            await refund(both, second);
+            expect(await token.balanceOf(user.address)).to.equal(55_000n);
         });
     });
 
@@ -1269,6 +1321,11 @@ describe("vBTCb V4", function () {
             expect(v4, "the V4 implementation behind the Base Sepolia proxy").to.not.equal(undefined);
             expectSlotsKept(v4.layout.storage, await currentLayout());
         });
+    });
+
+    it("fits in a Base contract: deployed code under 24,576 bytes", async function () {
+        const { deployedBytecode } = await artifacts.readArtifact("contracts/vBTCb.sol:vBTCb");
+        expect((deployedBytecode.length - 2) / 2).to.be.lessThan(24_576);
     });
 
     it("Core's CONTRACT_ABI (BaseBridgeService.cs) is this contract's ABI", async function () {
