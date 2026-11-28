@@ -481,6 +481,7 @@ namespace VerifiedXCore.Bitcoin.Attestation
                         ExpireExit(row, vfxHeight, db); // an exit is failed as a whole, once
                 }
                 RetryWaitingForTakeover(vfxHeight, db);
+                RefundUnpaidExitParts(vfxHeight, db); // from Globals.ExitPartRefundHeight
                 RaiseStuckExitFees(vfxHeight, db); // and sweeps' (plan 8.8)
                 PlanAllSweeps(vfxHeight, db);
             }

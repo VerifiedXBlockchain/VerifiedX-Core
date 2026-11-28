@@ -514,7 +514,8 @@ namespace VerifiedXCore.Services
                 && txRequest.TransactionType != TransactionType.VBTC_V2_BRIDGE_POOL_UNLOCK
                 && txRequest.TransactionType != TransactionType.VBTC_V2_BRIDGE_EXIT_TO_BTC
                 && txRequest.TransactionType != TransactionType.VBTC_V2_BRIDGE_EXIT_TO_BTC_COMPLETE
-                && txRequest.TransactionType != TransactionType.VBTC_V2_BRIDGE_EXIT_TO_BTC_FAIL)
+                && txRequest.TransactionType != TransactionType.VBTC_V2_BRIDGE_EXIT_TO_BTC_FAIL
+                && !(txRequest.TransactionType == TransactionType.VBTC_V2_BRIDGE_BURN_REFUND && (blockHeight ?? (Globals.LastBlock.Height + 1)) >= Globals.BridgeBurnRefundHeight))
             {
                 return (txResult, "Fee cannot be less than or equal to zero.");
             }
@@ -532,7 +533,8 @@ namespace VerifiedXCore.Services
                     && txRequest.TransactionType != TransactionType.VBTC_V2_BRIDGE_POOL_UNLOCK
                     && txRequest.TransactionType != TransactionType.VBTC_V2_BRIDGE_EXIT_TO_BTC
                     && txRequest.TransactionType != TransactionType.VBTC_V2_BRIDGE_EXIT_TO_BTC_COMPLETE
-                    && txRequest.TransactionType != TransactionType.VBTC_V2_BRIDGE_EXIT_TO_BTC_FAIL)
+                    && txRequest.TransactionType != TransactionType.VBTC_V2_BRIDGE_EXIT_TO_BTC_FAIL
+                    && !(txRequest.TransactionType == TransactionType.VBTC_V2_BRIDGE_BURN_REFUND && (blockHeight ?? (Globals.LastBlock.Height + 1)) >= Globals.BridgeBurnRefundHeight))
                 {
                     return (txResult, "Fee cannot be less than 0.000003 VFX");
                 }
@@ -4464,6 +4466,27 @@ namespace VerifiedXCore.Services
                         && jobj["Allocations"] is not JArray { HasValues: true })
                         return (txResult, "A bridge exit to BTC carries its Allocations as a JSON array of at least one allocation.");
 
+                    // From Globals.ExitMinPayoutHeight the holder's least payout it carries is a whole number of satoshis no
+                    // larger than the exit (none carried: 0).
+                    long exitMinPayout = 0;
+                    if (exitGateHeight >= Globals.ExitMinPayoutHeight && jobj["MinPayoutSats"] is { } exitMinToken)
+                    {
+                        if (exitMinToken is not JValue { Type: JTokenType.Integer, Value: long exitMinValue })
+                            return (txResult, "A bridge exit's MinPayoutSats is a whole number of satoshis.");
+                        exitMinPayout = exitMinValue;
+                        if (exitMinPayout < 0 || exitMinPayout > (jobj["TotalAmountSats"]?.ToObject<long?>() ?? amountSats.Value))
+                            return (txResult, "A bridge exit's MinPayoutSats is at least 0 and at most its amount.");
+                    }
+
+                    // From Globals.ExitPartRefundHeight the Base address that burned, when carried, is written as a refund names it.
+                    var exitBurner = "";
+                    if (exitGateHeight >= Globals.ExitPartRefundHeight && jobj["BaseBurner"] is { } exitBurnerToken)
+                    {
+                        if (exitBurnerToken.Type != JTokenType.String || !BridgeBurnRefundRules.IsBurnerAddress(exitBurnerToken.ToObject<string>()))
+                            return (txResult, "A bridge exit's BaseBurner is a Base address (\"0x\" and 40 lower-case hex digits).");
+                        exitBurner = exitBurnerToken.ToObject<string>()!;
+                    }
+
                     if (exitStrict)
                     {
                         // Submitter tightening (gated by BridgeIntraBlockGuardHeight): only the handler caster.
@@ -4488,9 +4511,14 @@ namespace VerifiedXCore.Services
                         var (exitAttempt, exitAttemptRefusal) = BridgeCasterConsensus.AttemptFor(txRequest.FromAddress, exitBurnHash, exitGateHeight, blockHeight, blockTime);
                         if (exitAttemptRefusal != null)
                             return (txResult, exitAttemptRefusal);
+                        // From Globals.ExitPartRefundHeight the votes are bound to the burner, from Globals.ExitMinPayoutHeight to the
+                        // holder's least payout.
                         var (votesOk, votesReason) = BridgeCasterConsensus.VerifyBoundVotes(votes, exitBurnHash, "BTC_EXIT", exitTotalSats, btcDestination, exitGateHeight,
                             eachCasterOnce: (blockHeight == null && !blockVerify && !blockDownloads) || exitGateHeight >= Globals.BridgeVoteOncePerCasterHeight,
-                            attempt: exitAttempt);
+                            attempt: exitAttempt,
+                            voteMessage: exitGateHeight >= Globals.ExitMinPayoutHeight || exitGateHeight >= Globals.ExitPartRefundHeight
+                                ? v => BridgeCasterConsensus.BuildExitVoteMessage(v.BaseBurnTxHash, exitTotalSats, btcDestination, exitMinPayout, exitGateHeight, v.Timestamp, exitBurner)
+                                : null);
                         if (!votesOk)
                             return (txResult, $"{BridgeCasterConsensus.VotesRejectedPrefix}exit to BTC: {votesReason}");
 
@@ -4513,6 +4541,10 @@ namespace VerifiedXCore.Services
                                 return (txResult, "Base burn amount does not match the exit amount.");
                             if (!string.Equals(ev.Destination, btcDestination.Trim(), StringComparison.Ordinal))
                                 return (txResult, "Base burn destination does not match BtcDestination.");
+                            if (exitGateHeight >= Globals.ExitMinPayoutHeight && ev.MinPayoutSats != exitMinPayout)
+                                return (txResult, "Base burn's minimum payout does not match the exit's MinPayoutSats.");
+                            if (exitGateHeight >= Globals.ExitPartRefundHeight && !string.Equals((ev.Burner ?? "").Trim(), exitBurner, StringComparison.OrdinalIgnoreCase))
+                                return (txResult, "Base burn's burner does not match the exit's BaseBurner.");
                         }
                     }
                     else if (BaseBridgeService.IsBridgeConfigured)
@@ -4533,6 +4565,14 @@ namespace VerifiedXCore.Services
                     ErrorLogUtility.LogError($"Failed to validate VBTC_V2_BRIDGE_EXIT_TO_BTC: {ex}", "TransactionValidatorService.VerifyTX()");
                     return (txResult, "Failed to validate bridge exit to BTC transaction.");
                 }
+            }
+
+            // A refund of a Base burn VFX cannot pay (Globals.BridgeBurnRefundHeight; not a transaction type before it).
+            if (txRequest.TransactionType == TransactionType.VBTC_V2_BRIDGE_BURN_REFUND)
+            {
+                var refundRefusal = await BridgeBurnRefundRules.RefusalAsync(txRequest, blockHeight ?? (Globals.LastBlock.Height + 1), blockHeight, blockTime);
+                if (refundRefusal != null)
+                    return (txResult, refundRefusal);
             }
 
             if (txRequest.TransactionType == TransactionType.VBTC_V2_BRIDGE_EXIT_TO_BTC_COMPLETE
@@ -5047,7 +5087,7 @@ namespace VerifiedXCore.Services
         /// "{hash}:{position}" for one of several burns in that transaction (BaseBridgeService.BurnId; #277). The position is
         /// written plainly (digits, no leading zero), so a burn has one spelling of it.
         /// </summary>
-        private static bool IsValidBurnId(string? id, long height)
+        internal static bool IsValidBurnId(string? id, long height)
         {
             if (IsValidEvmTxHash32(id)) return true;
             if (id == null || height < Globals.PathAuditRulesHeight) return false;

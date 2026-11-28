@@ -25,6 +25,30 @@ namespace VerifiedXCore.Bitcoin.Services
             $"VFX_BRIDGE_BURN_V2|{baseBurnTxHash}|{burnType}|{amountSats}|{(destination ?? string.Empty).Trim()}|{timestamp}";
 
         /// <summary>
+        /// The bound vote for a Bitcoin exit judged at <paramref name="height"/>: the plain bound vote; from
+        /// Globals.ExitPartRefundHeight also the Base address that burned ("|burner=0x..." in lower case, empty for none), and
+        /// from Globals.ExitMinPayoutHeight the holder's least payout ("|min=N", 0 for none), both before the timestamp, so an
+        /// exit carrying another burner or minimum than the casters read on Base has no votes.
+        /// </summary>
+        public static string BuildExitVoteMessage(string baseBurnTxHash, long amountSats, string destination, long minPayoutSats, long height, long timestamp, string? burner = null)
+        {
+            var extras = height >= Globals.ExitPartRefundHeight ? $"|burner={(burner ?? string.Empty).Trim().ToLowerInvariant()}" : "";
+            if (height >= Globals.ExitMinPayoutHeight) extras += $"|min={minPayoutSats}";
+            return $"VFX_BRIDGE_BURN_V2|{baseBurnTxHash}|BTC_EXIT|{amountSats}|{(destination ?? string.Empty).Trim()}{extras}|{timestamp}";
+        }
+
+        /// <summary>The vote type of a refund round (Globals.BridgeBurnRefundHeight): its votes are refund votes, never exit votes.</summary>
+        public const string RefundBurnType = "BTC_REFUND";
+
+        /// <summary>
+        /// The message a caster signs to agree that a burn is refunded (from Globals.BridgeBurnRefundHeight): the burn, the
+        /// refunded satoshis and the Base address that burned and is refunded, so a vote for one refund counts for no other
+        /// amount or recipient, and never as an exit vote.
+        /// </summary>
+        public static string BuildRefundVoteMessage(string baseBurnTxHash, long amountSats, string burner, long timestamp) =>
+            $"VFX_BRIDGE_BURN_REFUND|{baseBurnTxHash}|{amountSats}|{(burner ?? string.Empty).Trim().ToLowerInvariant()}|{timestamp}";
+
+        /// <summary>
         /// The caster set whose votes count for <paramref name="height"/>. This feeds CONSENSUS
         /// validation, so it must be identical on every node: the signed, hash-chained membership
         /// record governing that height, or — for heights the record era does not cover — the
@@ -86,11 +110,12 @@ namespace VerifiedXCore.Bitcoin.Services
         /// bound vote (burn, type, amount, destination) for the burn as THIS caster recorded it.
         /// </summary>
         public static (bool Ok, string Reason) VerifyConfirmation(string confirmingCaster, string baseBurnTxHash, string burnType,
-            long amountSats, string destination, long timestamp, string signature, HashSet<string> committee)
+            long amountSats, string destination, long timestamp, string signature, HashSet<string> committee, string? voteMessage = null)
         {
             if (string.IsNullOrWhiteSpace(confirmingCaster) || string.IsNullOrWhiteSpace(signature)) return (false, "caster and signature required");
             if (committee == null || !committee.Contains(confirmingCaster)) return (false, "confirming caster is not a committee member");
-            var msg = BuildBoundVoteMessage(baseBurnTxHash, burnType, amountSats, destination, timestamp);
+            // voteMessage: the message the round's votes sign when it is not the plain bound vote (a refund round's).
+            var msg = voteMessage ?? BuildBoundVoteMessage(baseBurnTxHash, burnType, amountSats, destination, timestamp);
             if (!VerifiedXCore.Services.SignatureService.VerifySignature(confirmingCaster, msg, signature)) return (false, "invalid confirmation signature");
             return (true, "");
         }
@@ -359,7 +384,8 @@ namespace VerifiedXCore.Bitcoin.Services
         /// the attempt's bounds and names the attempt's submitter as its handler under its caster's handler signature.
         /// </summary>
         public static (bool Ok, string Reason) VerifyBoundVotes(IEnumerable<CasterConsensusVote>? votes, string baseBurnTxHash, string burnType,
-            long amountSats, string destination, long height, bool eachCasterOnce = false, VoteAttempt? attempt = null)
+            long amountSats, string destination, long height, bool eachCasterOnce = false, VoteAttempt? attempt = null,
+            Func<CasterConsensusVote, string>? voteMessage = null)
         {
             if (votes == null) return (false, "no votes");
             if (amountSats <= 0) return (false, "amount must be positive");
@@ -386,7 +412,8 @@ namespace VerifiedXCore.Bitcoin.Services
                     if (v.Timestamp < attempt.NotBefore || v.Timestamp > attempt.NotAfter) { outsideTime++; continue; }
                     if (string.IsNullOrEmpty(v.HandlerSignature) || !string.Equals(v.AgreedHandler, attempt.Submitter, StringComparison.Ordinal)) { otherHandler++; continue; }
                 }
-                var msg = BuildBoundVoteMessage(v.BaseBurnTxHash, v.BurnType, amountSats, destination, v.Timestamp);
+                // voteMessage: what the transaction's votes sign when it is not the plain bound vote (a refund's).
+                var msg = voteMessage?.Invoke(v) ?? BuildBoundVoteMessage(v.BaseBurnTxHash, v.BurnType, amountSats, destination, v.Timestamp);
                 Interlocked.Increment(ref VoteSignatureChecksForTests);
                 if (!VerifiedXCore.Services.SignatureService.VerifySignature(v.CasterAddress, msg, v.Signature)) continue;
                 if (attempt != null
