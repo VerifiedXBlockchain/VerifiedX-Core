@@ -268,6 +268,17 @@ namespace VerifiedXCore.Tests
                 Assert.Null(BurnExitConsensusService.RefundReasonFor(payable, 500));
                 Assert.Equal(BridgeCasterConsensus.BuildBoundVoteMessage(payable.BaseBurnTxHash, "BTC_EXIT", min, "bc1qdest", 7), BurnExitConsensusService.RoundVoteMessage(payable, 7, 500));
 
+                // From Globals.ExitMinPayoutHeight an exit round's vote carries the holder's least payout read from Base.
+                var priorMin = Globals.ExitMinPayoutHeight;
+                try
+                {
+                    payable.MinPayoutSats = 20_000;
+                    Globals.ExitMinPayoutHeight = 501;
+                    Assert.Equal(BridgeCasterConsensus.BuildBoundVoteMessage(payable.BaseBurnTxHash, "BTC_EXIT", min, "bc1qdest", 7), BurnExitConsensusService.RoundVoteMessage(payable, 7, 500));
+                    Assert.Equal($"VFX_BRIDGE_BURN_V2|{payable.BaseBurnTxHash}|BTC_EXIT|{min}|bc1qdest|min=20000|7", BurnExitConsensusService.RoundVoteMessage(payable, 7, 501));
+                }
+                finally { Globals.ExitMinPayoutHeight = priorMin; payable.MinPayoutSats = 0; }
+
                 // A refund sent and never mined is made again, as a pool unlock is.
                 small.Status = BurnExitConsensusService.BurnExitStatus.Complete;
                 small.CompletionVfxTxHash = "refund-tx";

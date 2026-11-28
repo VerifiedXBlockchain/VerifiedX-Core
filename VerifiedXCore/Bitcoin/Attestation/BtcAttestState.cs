@@ -262,6 +262,11 @@ namespace VerifiedXCore.Bitcoin.Attestation
         /// pinned. Its Bitcoin transaction pays <see cref="AmountSats"/> less this.
         /// </summary>
         public long ShortfallShareSats { get; set; }
+        /// <summary>
+        /// A bridge exit part's share of its holder's least payout (Globals.ExitMinPayoutHeight): ceil(minimum x part / exit),
+        /// what its first transaction must pay at least and what a fee raise does not go below. 0: none.
+        /// </summary>
+        public long MinPayoutShareSats { get; set; }
         public List<VaultPin> Pins { get; set; } = new();
         public string? SettledTxid { get; set; }
         public long ClosedAtVfxHeight { get; set; }

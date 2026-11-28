@@ -4373,6 +4373,9 @@ namespace VerifiedXCore.Data
                 };
                 if (VerifiedXCore.Bitcoin.Attestation.BtcAttestRules.Recording(tx.Height))
                     exitState.ExitVfxHeight = tx.Height;
+                // The holder's least payout, from Globals.ExitMinPayoutHeight (as validation read it).
+                if (tx.Height >= Globals.ExitMinPayoutHeight && jobj["MinPayoutSats"] is JValue { Type: JTokenType.Integer, Value: long minPayout })
+                    exitState.MinPayoutSats = Math.Clamp(minPayout, 0, totalAmountSats.Value);
                 // A prior FAILED record for this burn (locks already restored) is superseded by the re-exit.
                 if (tx.Height >= Globals.BridgeIntraBlockGuardHeight)
                     VBTCBridgeBtcExitState.DeleteFailedRecord(baseBurnTxHash.Trim());

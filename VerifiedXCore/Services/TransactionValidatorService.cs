@@ -4466,6 +4466,18 @@ namespace VerifiedXCore.Services
                         && jobj["Allocations"] is not JArray { HasValues: true })
                         return (txResult, "A bridge exit to BTC carries its Allocations as a JSON array of at least one allocation.");
 
+                    // From Globals.ExitMinPayoutHeight the holder's least payout it carries is a whole number of satoshis no
+                    // larger than the exit (none carried: 0).
+                    long exitMinPayout = 0;
+                    if (exitGateHeight >= Globals.ExitMinPayoutHeight && jobj["MinPayoutSats"] is { } exitMinToken)
+                    {
+                        if (exitMinToken is not JValue { Type: JTokenType.Integer, Value: long exitMinValue })
+                            return (txResult, "A bridge exit's MinPayoutSats is a whole number of satoshis.");
+                        exitMinPayout = exitMinValue;
+                        if (exitMinPayout < 0 || exitMinPayout > (jobj["TotalAmountSats"]?.ToObject<long?>() ?? amountSats.Value))
+                            return (txResult, "A bridge exit's MinPayoutSats is at least 0 and at most its amount.");
+                    }
+
                     if (exitStrict)
                     {
                         // Submitter tightening (gated by BridgeIntraBlockGuardHeight): only the handler caster.
@@ -4490,9 +4502,13 @@ namespace VerifiedXCore.Services
                         var (exitAttempt, exitAttemptRefusal) = BridgeCasterConsensus.AttemptFor(txRequest.FromAddress, exitBurnHash, exitGateHeight, blockHeight, blockTime);
                         if (exitAttemptRefusal != null)
                             return (txResult, exitAttemptRefusal);
+                        // From Globals.ExitMinPayoutHeight the votes are bound to the holder's least payout too.
                         var (votesOk, votesReason) = BridgeCasterConsensus.VerifyBoundVotes(votes, exitBurnHash, "BTC_EXIT", exitTotalSats, btcDestination, exitGateHeight,
                             eachCasterOnce: (blockHeight == null && !blockVerify && !blockDownloads) || exitGateHeight >= Globals.BridgeVoteOncePerCasterHeight,
-                            attempt: exitAttempt);
+                            attempt: exitAttempt,
+                            voteMessage: exitGateHeight >= Globals.ExitMinPayoutHeight
+                                ? v => BridgeCasterConsensus.BuildExitVoteMessage(v.BaseBurnTxHash, exitTotalSats, btcDestination, exitMinPayout, exitGateHeight, v.Timestamp)
+                                : null);
                         if (!votesOk)
                             return (txResult, $"Caster consensus votes rejected for exit to BTC: {votesReason}");
 
@@ -4515,6 +4531,8 @@ namespace VerifiedXCore.Services
                                 return (txResult, "Base burn amount does not match the exit amount.");
                             if (!string.Equals(ev.Destination, btcDestination.Trim(), StringComparison.Ordinal))
                                 return (txResult, "Base burn destination does not match BtcDestination.");
+                            if (exitGateHeight >= Globals.ExitMinPayoutHeight && ev.MinPayoutSats != exitMinPayout)
+                                return (txResult, "Base burn's minimum payout does not match the exit's MinPayoutSats.");
                         }
                     }
                     else if (BaseBridgeService.IsBridgeConfigured)

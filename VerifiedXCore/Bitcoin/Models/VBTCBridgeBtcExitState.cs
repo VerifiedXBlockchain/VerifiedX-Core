@@ -40,6 +40,11 @@ namespace VerifiedXCore.Bitcoin.Models
         /// </summary>
         public string? DrawnAllocationsJson { get; set; }
         public string? BtcTxHash { get; set; }
+        /// <summary>
+        /// The least payout the holder named on Base, recorded from Globals.ExitMinPayoutHeight (0: none). Each part is first
+        /// pinned only on a transaction that pays it at least its share of this (VaultWithdrawalRow.MinPayoutShareSats).
+        /// </summary>
+        public long MinPayoutSats { get; set; }
 
         public const string CollectionName = "rsrv_vbtc_bridge_btc_exits";
 

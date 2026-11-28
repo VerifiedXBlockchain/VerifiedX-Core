@@ -90,6 +90,21 @@ namespace VerifiedXCore.Bitcoin.Services
             public BigInteger ChainId { get; set; }
         }
 
+        /// <summary>
+        /// V5 burnForBTCExitWithMinPayout: emitted right after the burn's BTCExitBurned, the least the holder accepts after
+        /// Bitcoin fees. Not a burn: it is never counted among a transaction's burns (BurnIdsOf), only attached to the burn
+        /// whose log it immediately follows (BaseBridgeService.AttachMinPayouts).
+        /// </summary>
+        [Event("BTCExitMinPayout")]
+        public class BTCExitMinPayoutEventDTO : IEventDTO
+        {
+            [Parameter("address", "burner", 1, true)]
+            public string Burner { get; set; } = "";
+
+            [Parameter("uint256", "minPayoutSats", 2, false)]
+            public BigInteger MinPayoutSats { get; set; }
+        }
+
         /// <summary>Needs VBTCb proxy address and Base RPC.</summary>
         public static bool IsConfigured =>
             !string.IsNullOrWhiteSpace(BaseBridgeService.VBTCbContractAddress);

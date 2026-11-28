@@ -24,6 +24,17 @@ namespace VerifiedXCore.Bitcoin.Services
         public static string BuildBoundVoteMessage(string baseBurnTxHash, string burnType, long amountSats, string destination, long timestamp) =>
             $"VFX_BRIDGE_BURN_V2|{baseBurnTxHash}|{burnType}|{amountSats}|{(destination ?? string.Empty).Trim()}|{timestamp}";
 
+        /// <summary>
+        /// The bound vote for a Bitcoin exit judged at <paramref name="height"/>: the plain bound vote, and from
+        /// Globals.ExitMinPayoutHeight also the holder's least payout ("|min=N" before the timestamp; 0 for none), so an exit
+        /// carrying another minimum than the casters read on Base has no votes.
+        /// </summary>
+        public static string BuildExitVoteMessage(string baseBurnTxHash, long amountSats, string destination, long minPayoutSats, long height, long timestamp)
+        {
+            var extras = height >= Globals.ExitMinPayoutHeight ? $"|min={minPayoutSats}" : "";
+            return $"VFX_BRIDGE_BURN_V2|{baseBurnTxHash}|BTC_EXIT|{amountSats}|{(destination ?? string.Empty).Trim()}{extras}|{timestamp}";
+        }
+
         /// <summary>The vote type of a refund round (Globals.BridgeBurnRefundHeight): its votes are refund votes, never exit votes.</summary>
         public const string RefundBurnType = "BTC_REFUND";
 

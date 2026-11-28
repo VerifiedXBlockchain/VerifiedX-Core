@@ -61,8 +61,22 @@ namespace VerifiedXCore.Bitcoin.Services
                 return refund.AmountSats < Attestation.BtcWithdrawals.MinExitPartSats
                     ? null
                     : $"A burn of {refund.AmountSats} sats can be paid by an exit (the smallest is {Attestation.BtcWithdrawals.MinExitPartSats}); it is not refunded.";
+            if (refund.Reason == VBTCBridgeRefundState.MinPayoutExitFailedReason)
+            {
+                if (height < Globals.ExitMinPayoutHeight) return "A failed exit with a minimum payout is refunded only from Globals.ExitMinPayoutHeight.";
+                var failed = FailedMinPayoutExit(refund.BurnId);
+                if (failed == null) return "This burn has no exit that carried a minimum payout and was failed by rule.";
+                if (failed.AmountSats != refund.AmountSats) return $"The failed exit was for {failed.AmountSats} sats; the whole burn is refunded.";
+                return null;
+            }
             return $"A bridge burn is not refunded for the reason \"{refund.Reason}\".";
         }
+
+        /// <summary>The exit recorded for the burn when it carried the holder's least payout and was failed by rule (expired), else null.</summary>
+        public static VBTCBridgeBtcExitState? FailedMinPayoutExit(string burnId) =>
+            VBTCBridgeBtcExitState.GetByBurnHash(burnId) is { IsFailedRecord: true, MinPayoutSats: > 0 } failed
+            && (failed.BtcTxHash ?? "").StartsWith(VBTCBridgeBtcExitState.FailedMarkerPrefix + "expired", StringComparison.Ordinal)
+                ? failed : null;
 
         /// <summary>
         /// Why the transaction is not a refund this chain takes at <paramref name="height"/>, or null. In a block

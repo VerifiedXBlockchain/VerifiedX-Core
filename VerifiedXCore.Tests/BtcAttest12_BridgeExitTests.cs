@@ -39,6 +39,7 @@ namespace VerifiedXCore.Tests
         private readonly long _priorGuard = Globals.BridgeIntraBlockGuardHeight;
         private readonly long _priorExitTakeover = Globals.ExitPartTakeoverHeight;
         private readonly long _priorBurnRefund = Globals.BridgeBurnRefundHeight;
+        private readonly long _priorMinPayout = Globals.ExitMinPayoutHeight;
         private readonly Func<VaultWithdrawalRow, VaultPin, Task<(bool, string)>> _realSign = BtcWithdrawalSigner.SignAndBroadcast;
         private readonly Func<string, Task<bool?>> _realKnown = BtcWithdrawalSigner.KnownOnBitcoin;
 
@@ -67,6 +68,7 @@ namespace VerifiedXCore.Tests
             Globals.BridgeIntraBlockGuardHeight = _priorGuard;
             Globals.ExitPartTakeoverHeight = _priorExitTakeover;
             Globals.BridgeBurnRefundHeight = _priorBurnRefund;
+            Globals.ExitMinPayoutHeight = _priorMinPayout;
             foreach (var signer in Signers.Skip(1)) Globals.BootstrapCasterAddresses.Remove(signer.Address); // seated by the refund tests
             Globals.BTCNetwork = _priorNetwork;
             base.Dispose();

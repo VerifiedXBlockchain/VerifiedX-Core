@@ -59,6 +59,8 @@ namespace VerifiedXCore.Bitcoin.Services
             public string VfxDestinationAddress { get; set; } = "";
             public decimal Amount { get; set; }
             public string BurnerAddress { get; set; } = "";
+            /// <summary>The least payout the holder named on Base (Globals.ExitMinPayoutHeight), as read from the burn; 0 when none.</summary>
+            public long MinPayoutSats { get; set; }
             public long DetectedAtBlock { get; set; }
             public DateTime DetectedAt { get; set; } = DateTime.UtcNow;
             public string HandlerCasterAddress { get; set; } = "";
@@ -273,6 +275,7 @@ namespace VerifiedXCore.Bitcoin.Services
                     Status = BurnExitStatus.VfxTxCreated,
                     CompletionVfxTxHash = exit.IsFailedRecord ? "" : exit.ExitTxHash,
                     AllocationsJson = exit.AllocationsJson ?? "",
+                    MinPayoutSats = exit.MinPayoutSats,
                     DetectedAtBlock = currentHeight,
                 };
                 reloaded++;
@@ -503,6 +506,10 @@ namespace VerifiedXCore.Bitcoin.Services
         {
             if (r.ExitType != BurnExitType.BtcExit || nextHeight < Globals.BridgeBurnRefundHeight) return null;
             if ((long)(r.Amount * 100_000_000M) < BtcWithdrawalsMinExitPartSats) return VBTCBridgeRefundState.BelowSmallestExitReason;
+            // From Globals.ExitMinPayoutHeight an exit that carried the holder's minimum and was failed by rule is refunded,
+            // not made again: it could not be paid at that minimum.
+            if (nextHeight >= Globals.ExitMinPayoutHeight && BridgeBurnRefundRules.FailedMinPayoutExit(r.BaseBurnTxHash) != null)
+                return VBTCBridgeRefundState.MinPayoutExitFailedReason;
             return null;
         }
 
@@ -519,8 +526,9 @@ namespace VerifiedXCore.Bitcoin.Services
             var amountSats = (long)(r.Amount * 100_000_000M);
             if (RefundReasonFor(r, nextHeight) != null)
                 return BridgeCasterConsensus.BuildRefundVoteMessage(r.BaseBurnTxHash, amountSats, r.BurnerAddress, timestamp);
-            var destination = r.ExitType == BurnExitType.VfxPoolUnlock ? r.VfxDestinationAddress : r.BtcDestination;
-            return BridgeCasterConsensus.BuildBoundVoteMessage(r.BaseBurnTxHash, BurnTypeString(r.ExitType), amountSats, destination, timestamp);
+            if (r.ExitType == BurnExitType.BtcExit)
+                return BridgeCasterConsensus.BuildExitVoteMessage(r.BaseBurnTxHash, amountSats, r.BtcDestination, r.MinPayoutSats, nextHeight, timestamp);
+            return BridgeCasterConsensus.BuildBoundVoteMessage(r.BaseBurnTxHash, BurnTypeString(r.ExitType), amountSats, r.VfxDestinationAddress, timestamp);
         }
 
         /// <summary>
@@ -785,6 +793,7 @@ namespace VerifiedXCore.Bitcoin.Services
             record.FoundOnBase = true;
             // The event matched the record or corrected it (it was read for this exit type): the record's fields are Base's now.
             if (evidence != null && !string.IsNullOrEmpty(evidence.Burner)) record.BurnerAddress = evidence.Burner;
+            if (evidence != null) record.MinPayoutSats = evidence.MinPayoutSats; // the holder's least payout, as Base holds it
             record.FieldsFromBase = true;
 
             // Step 1: Generate deterministic proposal hash and sign the proposal
@@ -1291,7 +1300,8 @@ namespace VerifiedXCore.Bitcoin.Services
                     record.BaseBurnTxHash,
                     allSuccessfulAllocations,
                     null, // No BTC withdrawals yet — reservation only
-                    record.ConsensusVotes);
+                    record.ConsensusVotes,
+                    minPayoutSats: VBTCService.NextBlockHeight >= Globals.ExitMinPayoutHeight ? record.MinPayoutSats : 0);
 
                 if (!exitResult.Success)
                 {
@@ -1715,8 +1725,10 @@ namespace VerifiedXCore.Bitcoin.Services
         /// </summary>
         internal static bool? UnlockToRemake(ProcessedBurnRecord r, long currentBlock, Func<string, bool>? burnUsed = null, Func<string, bool>? stillPooled = null)
         {
+            if (r.Status != BurnExitStatus.Complete || r.CompletionBroadcastAtBlock <= 0)
+                return null;
             // A refund (Globals.BridgeBurnRefundHeight) is sent and followed the same way: made again if never mined.
-            if ((r.ExitType != BurnExitType.VfxPoolUnlock && RefundReasonFor(r, currentBlock + 1) == null) || r.Status != BurnExitStatus.Complete || r.CompletionBroadcastAtBlock <= 0)
+            if (r.ExitType != BurnExitType.VfxPoolUnlock && RefundReasonFor(r, currentBlock + 1) == null)
                 return null;
             var age = currentBlock - r.CompletionBroadcastAtBlock;
             if (age <= STUCK_EXIT_BLOCK_THRESHOLD && !(stillPooled != null && age >= DroppedUnlockBlocks && !stillPooled(r.CompletionVfxTxHash)))

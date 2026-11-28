@@ -3457,7 +3457,8 @@ namespace VerifiedXCore.Bitcoin.Services
             string baseBurnTxHash,
             List<PoolUnlockAllocation> allocations,
             List<BtcExitWithdrawalRecord>? btcWithdrawals = null,
-            IReadOnlyList<CasterConsensusVote>? casterConsensusVotes = null)
+            IReadOnlyList<CasterConsensusVote>? casterConsensusVotes = null,
+            long minPayoutSats = 0)
         {
             try
             {
@@ -3467,7 +3468,7 @@ namespace VerifiedXCore.Bitcoin.Services
 
                 var totalAmountSats = (long)(totalAmount * 100_000_000M);
                 var firstAlloc = allocations?.FirstOrDefault();
-                var txData = JsonConvert.SerializeObject(new
+                var dataObject = new
                 {
                     Function = "VBTCBridgeExitToBTC()",
                     // Backward-compatible fields required by TransactionValidatorService
@@ -3483,7 +3484,15 @@ namespace VerifiedXCore.Bitcoin.Services
                     Allocations = allocations,
                     BtcWithdrawals = btcWithdrawals,
                     CasterConsensusVotes = casterConsensusVotes
-                });
+                };
+                var txData = JsonConvert.SerializeObject(dataObject);
+                // The holder's least payout (Globals.ExitMinPayoutHeight), as the votes are bound to it.
+                if (minPayoutSats > 0)
+                {
+                    var withMinimum = JObject.FromObject(dataObject);
+                    withMinimum["MinPayoutSats"] = minPayoutSats;
+                    txData = withMinimum.ToString(Formatting.None);
+                }
 
                 var tx = new Transaction
                 {

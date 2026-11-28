@@ -342,6 +342,8 @@ namespace VerifiedXCore.Bitcoin.Services
             public long AmountSats { get; set; }
             public string Destination { get; set; } = "";
             public string Burner { get; set; } = "";
+            /// <summary>The least payout the holder named (BTCExitMinPayout right after this BTCExitBurned); 0 when none.</summary>
+            public long MinPayoutSats { get; set; }
         }
 
         private static string NormalizeTxHash(string txHash)
@@ -476,6 +478,10 @@ namespace VerifiedXCore.Bitcoin.Services
                         burns.Add((ev.Log.LogIndex?.Value ?? BigInteger.Zero, false, amt <= 0 || amt > long.MaxValue ? null
                             : new BurnEventInfo { AmountSats = (long)amt, Destination = ev.Event.BtcDestination?.Trim() ?? "", Burner = ev.Event.Burner ?? "" }));
                     }
+                    AttachMinPayouts(burns.Where(b => !b.Vfx).Select(b => (b.LogIndex, b.Info)).ToList(),
+                        r.DecodeAllEvents<BaseBridgeExitWatchService.BTCExitMinPayoutEventDTO>()
+                            .Where(ev => string.Equals(ev.Log.Address, ContractAddress, StringComparison.OrdinalIgnoreCase))
+                            .Select(ev => (ev.Log.LogIndex?.Value ?? BigInteger.Zero, ev.Event.Burner ?? "", ev.Event.MinPayoutSats)));
                     return BurnAt(burns.OrderBy(b => b.LogIndex).Select(b => (b.Vfx, b.Info)).ToList(), SplitBurnId(txHash).Position, vfxExit);
                 }
                 catch (Exception ex) { lastErr = ex.Message; }
@@ -509,6 +515,25 @@ namespace VerifiedXCore.Bitcoin.Services
             if (mine.Count > 1 || (pathAudit && burns.Count > 1))
                 return (false, null, pathAudit ? "Multiple burn events in one receipt: each is named {hash}:{position}" : "Multiple burn events in one receipt");
             return (true, mine[0].Info, "");
+        }
+
+        /// <summary>
+        /// Gives each Bitcoin exit burn the least payout its holder named: the BTCExitMinPayout log that immediately follows its
+        /// BTCExitBurned log (the next log index) with the same burner, as burnForBTCExitWithMinPayout emits them. It is not a
+        /// burn and moves no burn's position. A minimum above the burned amount, or out of range, is not one (none is taken).
+        /// </summary>
+        internal static void AttachMinPayouts(IReadOnlyList<(BigInteger LogIndex, BurnEventInfo? Info)> btcBurns,
+            IEnumerable<(BigInteger LogIndex, string Burner, BigInteger MinPayoutSats)> minPayouts)
+        {
+            var byIndex = new Dictionary<BigInteger, (string Burner, BigInteger Min)>();
+            foreach (var m in minPayouts) byIndex[m.LogIndex] = (m.Burner, m.MinPayoutSats);
+            foreach (var (logIndex, info) in btcBurns)
+            {
+                if (info == null || !byIndex.TryGetValue(logIndex + 1, out var next)) continue;
+                if (!string.Equals((next.Burner ?? "").Trim(), (info.Burner ?? "").Trim(), StringComparison.OrdinalIgnoreCase)) continue;
+                if (next.Min < 0 || next.Min > info.AmountSats) continue;
+                info.MinPayoutSats = (long)next.Min;
+            }
         }
 
         /// <summary>True when at least one log in the receipt was emitted by the bridge contract.</summary>

@@ -239,6 +239,7 @@ namespace VerifiedXCore.Bitcoin.Attestation
                         State = VaultWithdrawalState.Waiting, IsBridgeExit = true, ExitBurnHash = exit.BaseBurnTxHash,
                         DestinationScriptHex = hasDestination ? script : "",
                         WaitingReason = hasDestination ? null : "the destination is not a Bitcoin address on this network",
+                        MinPayoutShareSats = MinPayoutShare(exit.MinPayoutSats, sats, exit.AmountSats),
                     };
                     BtcAttestStore.SaveWithdrawal(row, db);
                     first ??= row;
@@ -250,6 +251,19 @@ namespace VerifiedXCore.Bitcoin.Attestation
                 VerifiedXCore.Data.StateData.NoteApplyStepFailed(vfxHeight, ex);
                 ErrorLogUtility.LogError($"Recording bridge exit {exit?.BaseBurnTxHash} failed: {ex}", "BtcWithdrawals.OnExitApplied()");
             }
+        }
+
+        /// <summary>
+        /// A part's share of the holder's least payout (Globals.ExitMinPayoutHeight): ceil(minimum x part / exit), so the shares
+        /// together are at least the minimum. 0 when there is none.
+        /// </summary>
+        internal static long MinPayoutShare(long minPayoutSats, long partSats, long exitSats)
+        {
+            if (minPayoutSats <= 0 || partSats <= 0 || exitSats <= 0) return 0;
+            var product = (System.Numerics.BigInteger)minPayoutSats * partSats;
+            var share = System.Numerics.BigInteger.DivRem(product, exitSats, out var remainder);
+            if (remainder > 0) share += 1;
+            return (long)System.Numerics.BigInteger.Min(share, partSats);
         }
 
         /// <summary>
@@ -296,6 +310,13 @@ namespace VerifiedXCore.Bitcoin.Attestation
                 // raise would build): fixed on many small coins it could be raised fewer times or never, and nothing else
                 // moves a pinned part. Not pinned, it waits, and the exit fails by rule and its locks come back. A part fixed
                 // again while its exit is paying is pinned as it can be: it never expires, and pays once fees fall.
+                // Nor below its share of the holder's least payout (Globals.ExitMinPayoutHeight): the exit then fails by rule
+                // and may be refunded.
+                if (tx != null && !committed && part.MinPayoutShareSats > 0 && tx.DestinationSats < part.MinPayoutShareSats)
+                {
+                    reason = $"its transaction would pay {tx.DestinationSats} sats, below the {part.MinPayoutShareSats} sats of the holder's minimum payout that fall to this part";
+                    tx = null;
+                }
                 if (tx != null && !committed
                     && BtcCanonicalWithdrawal.Build(part.SmartContractUID, part.DestinationScriptHex, PayableSats(part), part.FeeRate << ExitPartBearsDoublings, out var bears, db) == null)
                 {
@@ -377,6 +398,8 @@ namespace VerifiedXCore.Bitcoin.Attestation
             catch (OverflowException) { return null; }
             if (rate > (row.IsSweep ? SweepMaxFeeRate : BtcCanonicalWithdrawal.MaxFeeRate)) return null;
             var replacement = BtcCanonicalWithdrawal.BuildReplacement(row.SmartContractUID, row.DestinationScriptHex, PayableSats(row), rate, newest.Inputs, row.Ref, out _, db);
+            // Not below the part's share of the holder's least payout: the raises stop there (and the part may be taken).
+            if (replacement != null && row.MinPayoutShareSats > 0 && replacement.DestinationSats < row.MinPayoutShareSats) return null;
             return replacement == null ? null : (replacement, rate);
         }
 

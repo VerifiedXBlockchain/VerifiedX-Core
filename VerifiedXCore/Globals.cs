@@ -597,6 +597,19 @@ namespace VerifiedXCore
         public const long BridgeBurnRefundTestnetHeight = long.MaxValue;
 
         /// <summary>
+        /// From this height the least payout a holder names on Base (burnForBTCExitWithMinPayout's BTCExitMinPayout) is part
+        /// of the exit: the exit transaction carries it (MinPayoutSats), the exit votes are bound to it, it is checked against
+        /// the burn at admission and recorded with the exit; each part of the exit is first pinned only on a transaction that
+        /// pays it at least its share (rounded up), and its fee is not raised past that share. An exit with a minimum that is
+        /// failed by rule may be refunded (VBTC_V2_BRIDGE_BURN_REFUND) instead of made again. Below it the minimum is ignored.
+        /// A consensus change to apply: an un-upgraded node judges the exit's votes on the message without the minimum and
+        /// refuses the block. Unset (long.MaxValue) on mainnet and testnet until the release that activates it. Testnet value in
+        /// GlobalsNetworkHeights.
+        /// </summary>
+        public static long ExitMinPayoutHeight = long.MaxValue;
+        public const long ExitMinPayoutTestnetHeight = long.MaxValue;
+
+        /// <summary>
         /// From this height a reserve's Recover() reads each pending NFT_TX row's call as the dispatchers read it. Below it
         /// a row whose Data was not an array of objects made the recovery throw part-way, so every later row, the balance
         /// sweep, the contract re-own and the vBTC sweep never ran, and the reserve stayed under its vault key. Active from LedgerRulesBatchHeight.

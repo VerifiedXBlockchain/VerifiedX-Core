@@ -31,6 +31,12 @@ namespace VerifiedXCore.Bitcoin.Models
         /// <summary>The refund of a burn VFX cannot pay at all: it is below the smallest part a vault pays in an exit.</summary>
         public const string BelowSmallestExitReason = "BELOW_SMALLEST_EXIT";
 
+        /// <summary>
+        /// The refund of a burn whose exit carried the holder's least payout and was failed by rule (Globals.ExitMinPayoutHeight):
+        /// no transaction could pay it at that minimum. The failed exit record is the evidence; the whole burn is refunded.
+        /// </summary>
+        public const string MinPayoutExitFailedReason = "MIN_PAYOUT_EXIT_FAILED";
+
         public static ILiteCollection<VBTCBridgeRefundState> GetCollection() =>
             DbContext.DB_VBTCWithdrawalRequests.GetCollection<VBTCBridgeRefundState>(CollectionName);
 
