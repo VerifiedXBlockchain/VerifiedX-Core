@@ -78,6 +78,13 @@ namespace VerifiedXCore.Tests
         /// <summary>The hash this provider's chain holds at <paramref name="number"/>.</summary>
         public string HashAt(long number) => BlockHashes.TryGetValue(number, out var hash) ? hash : BlockHash("block" + number);
 
+        /// <summary>
+        /// The newest block the backend answering for blocks and logs holds, when it is behind what the provider gives as
+        /// its finalized block (another backend's answer): a block above it is not found, and logs above it are not
+        /// served, with no error. Null: it holds everything up to the head.
+        /// </summary>
+        public long? HeldUpTo { get; set; }
+
         /// <summary>The widest range of blocks eth_getLogs answers; a wider one is refused. Null: any.</summary>
         public int? LogRangeCap { get; set; }
 
@@ -182,7 +189,7 @@ namespace VerifiedXCore.Tests
                     else if (tag == "latest") number = Head;
                     else if (tag.StartsWith("0x", StringComparison.OrdinalIgnoreCase)) number = Convert.ToInt64(tag, 16);
                     else return Error(id, -32602, $"unknown block tag {tag}");
-                    if (number > Head) return Result(id, JValue.CreateNull());
+                    if (number > Head || (tag != "finalized" && tag != "latest" && number > (HeldUpTo ?? long.MaxValue))) return Result(id, JValue.CreateNull());
                     return Result(id, new JObject
                     {
                         ["number"] = Hex(number), ["hash"] = HashAt(number), ["parentHash"] = number > 0 ? HashAt(number - 1) : "0x" + new string('0', 64),
@@ -207,7 +214,7 @@ namespace VerifiedXCore.Tests
                         served = Logs.Where(l =>
                         {
                             var block = Convert.ToInt64(l["blockNumber"]!.ToString(), 16);
-                            return block >= from && block <= to
+                            return block >= from && block <= to && block <= (HeldUpTo ?? long.MaxValue)
                                 && (addresses.Count == 0 || addresses.Contains(l["address"]!.ToString(), StringComparer.OrdinalIgnoreCase))
                                 && (topic0 == null || topic0.Contains(((JArray)l["topics"]!)[0]!.ToString(), StringComparer.OrdinalIgnoreCase));
                         }).ToList();

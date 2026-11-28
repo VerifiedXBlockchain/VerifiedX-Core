@@ -223,8 +223,8 @@ namespace VerifiedXCore.Bitcoin.Services
             {
                 var readAfter = ReadAfter.TryGetValue(state, out var number) ? (long)number : _rescanNumber;
                 foreach (var rescan in Rescans)
-                    if (rescan.Number > readAfter)
-                        state.LastScannedBlock = Math.Min(state.LastScannedBlock, rescan.Cursor);
+                    if (rescan.Number > readAfter && rescan.Cursor < state.LastScannedBlock)
+                        state.MoveTo(rescan.Cursor);
                 BridgeExitSyncState.Save(state);
             }
         }
@@ -244,7 +244,7 @@ namespace VerifiedXCore.Bitcoin.Services
             {
                 state = BridgeExitSyncState.GetOrCreate();
                 previousBlock = state.LastScannedBlock;
-                state.LastScannedBlock = Math.Max(0, fromBlock - 1);
+                state.MoveTo(Math.Max(0, fromBlock - 1));
                 BridgeExitSyncState.Save(state);
                 // A poll already under way read the cursor before this and saves where it got to when it ends: it is told.
                 Rescans.Add((++_rescanNumber, state.LastScannedBlock));
@@ -269,6 +269,59 @@ namespace VerifiedXCore.Bitcoin.Services
             if (!IsConfigured)
                 return (0, 0, "VBTCb contract address not configured");
             return await PollOnceInternal();
+        }
+
+        /// <summary>The hash of <paramref name="block"/> as BaseRpc.RequiredAgreement of <paramref name="providers"/> give it alike; null when fewer do.</summary>
+        private static async Task<string?> AgreedHashAsync(IReadOnlyList<(string Provider, BaseBlock Final)> providers, long block)
+        {
+            var reads = await BaseRpc.AuthorizingEachAsync(providers.Where(p => p.Final.Number >= block).Select(p => p.Provider), async web3 =>
+            {
+                var held = await web3.Eth.Blocks.GetBlockWithTransactionsHashesByNumber.SendRequestAsync(new BlockParameter(new HexBigInteger(block)));
+                if (held == null || string.IsNullOrEmpty(held.BlockHash)) throw new BaseProviderException($"the provider does not hold Base block {block}");
+                return held.BlockHash.ToLowerInvariant();
+            });
+            return reads.Where(r => r.Read).GroupBy(r => r.Value!, StringComparer.Ordinal)
+                .Where(g => g.Count() >= BaseRpc.RequiredAgreement).Select(g => g.Key).FirstOrDefault();
+        }
+
+        /// <summary>
+        /// Compares the cursor's block with the chain. The same hash (or none kept): nothing changes. Another hash, as
+        /// BaseRpc.RequiredAgreement providers give it alike: the cursor goes back to the newest earlier position the
+        /// chain still holds (<see cref="BridgeExitSyncState.Marks"/>), or, when it holds none of them,
+        /// <see cref="RestartRewindBlocks"/> below the oldest, and reading goes on from there; burns already handled are
+        /// passed over when they are read again. One provider's word does not move the cursor: while fewer than
+        /// BaseRpc.RequiredAgreement name the block alike, nothing is read (the providers' failing, not a block's).
+        /// </summary>
+        private static async Task GoBackIfTheChainChangedAsync(BridgeExitSyncState state, IReadOnlyList<(string Provider, BaseBlock Final)> providers)
+        {
+            if (string.IsNullOrEmpty(state.LastScannedBlockHash)) return;
+            var at = state.LastScannedBlock;
+            var held = await AgreedHashAsync(providers, at)
+                ?? throw new BaseProviderException($"Base cannot be read: fewer than {BaseRpc.RequiredAgreement} providers name block {at} alike");
+            if (string.Equals(held, state.LastScannedBlockHash, StringComparison.OrdinalIgnoreCase)) return;
+
+            BridgeExitCursorMark? kept = null;
+            foreach (var mark in state.Marks.OrderByDescending(m => m.Block))
+            {
+                var there = await AgreedHashAsync(providers, mark.Block)
+                    ?? throw new BaseProviderException($"Base cannot be read: fewer than {BaseRpc.RequiredAgreement} providers name block {mark.Block} alike");
+                if (string.Equals(there, mark.Hash, StringComparison.OrdinalIgnoreCase)) { kept = mark; break; }
+            }
+            var was = state.LastScannedBlockHash;
+            if (kept != null)
+            {
+                state.Marks.RemoveAll(m => m.Block >= kept.Block);
+                state.LastScannedBlock = kept.Block;
+                state.LastScannedBlockHash = kept.Hash;
+            }
+            else
+            {
+                // Not to 0: a cursor at 0 is one never set, which the next poll starts afresh just below the head.
+                state.MoveTo(Math.Max(1, (state.Marks.Count > 0 ? state.Marks.Min(m => m.Block) : at) - RestartRewindBlocks));
+            }
+            SaveCursorFromPoll(state);
+            ErrorLogUtility.LogError($"[BaseBridgeExit] Base block {at} is no longer the block the watch read (its hash was {was}, the chain holds {held}). Reading Base again from block {state.LastScannedBlock + 1}.",
+                "BaseBridgeExitWatchService.PollOnceInternal");
         }
 
         /// <summary>Whether BaseRpc.RequiredAgreement of <paramref name="providers"/> read the logs of <paramref name="block"/>.</summary>
@@ -308,7 +361,7 @@ namespace VerifiedXCore.Bitcoin.Services
             if (back >= state.LastScannedBlock) return;
             LogUtility.Log($"[BaseBridgeExit] Now handling burns: reading Base again from block {back + 1} (cursor was {state.LastScannedBlock}).",
                 "BaseBridgeExitWatchService.PollOnceInternal");
-            state.LastScannedBlock = back;
+            state.MoveTo(back);
             SaveCursorFromPoll(state);
         }
 
@@ -356,7 +409,7 @@ namespace VerifiedXCore.Bitcoin.Services
             if (back >= state.LastScannedBlock) return;
             LogUtility.Log($"[BaseBridgeExit] The path-audit rules have begun: reading Base again from block {back + 1} (cursor was {state.LastScannedBlock}).",
                 "BaseBridgeExitWatchService.PollOnceInternal");
-            state.LastScannedBlock = back;
+            state.MoveTo(back);
             SaveCursorFromPoll(state);
         }
 
@@ -445,6 +498,10 @@ namespace VerifiedXCore.Bitcoin.Services
             ConsumeRewind(state, Globals.IsBlockCaster && Globals.IsChainSynced);
             ConsumeRulesFlip(state);
 
+            // The cursor says which block was read last, by its hash. When the chain holds another block at that height,
+            // what was read below the cursor is not what the chain holds now: the watch goes back before it reads on.
+            await GoBackIfTheChainChangedAsync(state, providers);
+
             var from = state.LastScannedBlock + 1;
             if (from > latest)
                 return (0, state.LastScannedBlock, "No new blocks");
@@ -488,8 +545,18 @@ namespace VerifiedXCore.Bitcoin.Services
                 if (vfx.Any(e => e.Event != null && !BaseRpc.IsExpectedChain(e.Event.ChainId))
                     || btc.Any(e => e.Event != null && !BaseRpc.IsExpectedChain(e.Event.ChainId)))
                     throw new BaseProviderException(BaseBridgeService.BurnOnAnotherChain);
-                return (Vfx: vfx, Btc: btc);
+                // The provider says which block the range ended at. One that does not hold that block has not read the
+                // range: a backend behind the head answers a range it does not hold with no logs, which would read as
+                // "no burns" and move the cursor past them.
+                var last = await web3.Eth.Blocks.GetBlockWithTransactionsHashesByNumber.SendRequestAsync(new BlockParameter(new HexBigInteger(to)));
+                if (last == null || string.IsNullOrEmpty(last.BlockHash))
+                    throw new BaseProviderException($"the provider does not hold Base block {to}");
+                return (Vfx: vfx, Btc: btc, Hash: last.BlockHash.ToLowerInvariant());
             });
+            // The block the range ended at, as BaseRpc.RequiredAgreement providers name it alike: only their reads count
+            // toward passing the range.
+            var endHash = reads.Where(r => r.Read).GroupBy(r => r.Value.Hash, StringComparer.Ordinal)
+                .Where(g => g.Count() >= BaseRpc.RequiredAgreement).Select(g => g.Key).FirstOrDefault() ?? "";
 
             // What any provider serves is a burn to look into: one provider cannot hide a burn from the watch. It is not
             // yet a burn: before anything is signed for it, the casters' check holds it to a final receipt that
@@ -514,7 +581,7 @@ namespace VerifiedXCore.Bitcoin.Services
                         "BaseBridgeExitWatchService.PollOnceInternal");
                     continue;
                 }
-                readBy++;
+                if (read.Value.Hash == endHash) readBy++;
                 spanState.Span = spanState.AfterSuccess(span);
                 var ids = BurnIdsOf(read.Value.Vfx.Select(e => e.Log).Concat(read.Value.Btc.Select(e => e.Log)));
                 foreach (var ev in read.Value.Vfx)
@@ -677,7 +744,8 @@ namespace VerifiedXCore.Bitcoin.Services
             }
             _singleBlockFailures = 0;
 
-            state.LastScannedBlock = to;
+            if (scanFailed) state.MoveTo(to); // passed over, not read: its hash is not known
+            else state.Advance(to, endHash);
             SaveCursorFromPoll(state);
             _behind = to < latest;
 

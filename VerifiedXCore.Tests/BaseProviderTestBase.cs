@@ -56,6 +56,7 @@ namespace VerifiedXCore.Tests
             BaseRpc.ForgetChainChecksForTests();
             BaseBridgeExitWatchService.ResetSpanForTests();
             BaseBridgeExitWatchService.ResetRewindForTests();
+            BaseBridgeExitWatchService.ForgetRescansForTests();
         }
 
         public virtual void Dispose()
