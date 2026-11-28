@@ -2362,8 +2362,7 @@ namespace VerifiedXCore.Services
                 g => g.EffectiveFromHeight > CasterMembershipStore.ClearedGenesisFromHeight() && CasterMembershipStore.ValidateSuccessor(null, g, out _));
             // An election or reset above this node's tip cannot be adopted yet: it is judged on the block that carries it,
             // and a copy of that block may come without it.
-            foreach (var r in responses)
-                CarriedRecordCompletion.NotePeerRecords(r.Ip, r.Records);
+            CarriedRecordCompletion.NotePeerRecords(responses.Select(r => ((string?)r.Ip, (List<CasterMembershipRecord>?)r.Records)));
             var contested = ContestedSeq(localHeadSeq, responses);
             if (contested is { } seq)
             {

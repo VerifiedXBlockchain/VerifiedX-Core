@@ -2745,18 +2745,54 @@ namespace VerifiedXCore.Tests
         }
 
         /// <summary>
-        /// One peer answers with eight copies, each signed by keys of its own (every signature its signer's, none an
-        /// elector's): it takes two places at the height, and the record another peer holds still finds one.
+        /// One peer answers with eight copies, each with good signatures from two electors (too few to ratify it, which only
+        /// the block can show): it takes two places at the height, and the record another peer holds still finds one.
         /// </summary>
         [Fact]
         public async Task OnePeersCopies_TakeTwoPlacesAtAHeight_AndTheRecordAnotherPeerHoldsStillFitsIn()
         {
             var record = Ratified(0);
-            var strangers = Enumerable.Range(0, 8).Select(_ => new[] { NewMember(), NewMember() }).ToList();
-            var own = strangers.Select(keys => Signed(JsonConvert.DeserializeObject<CasterMembershipRecord>(JsonConvert.SerializeObject(record))!, keys)).ToList();
+            var pairs = Enumerable.Range(0, 8).Select(i => new[] { _electors[i], _electors[i + 1] }).ToList();
+            var own = pairs.Select(keys => Signed(JsonConvert.DeserializeObject<CasterMembershipRecord>(JsonConvert.SerializeObject(record))!, keys)).ToList();
             var greedy = _committee[0].Ip;
             await PeersAnswerWhileBehind(ip => ip == greedy ? own : new List<CasterMembershipRecord>());
             await PeersAnswerWhileBehind(ip => ip == _committee[1].Ip ? new List<CasterMembershipRecord> { record } : new List<CasterMembershipRecord>());
+            var block = Served(Members(record).Take(3), record);
+
+            await Download(PassedOn(block, record: false, certificate: true), "10.0.0.201");
+
+            Assert.Equal(H + 1, Globals.LastBlock.Height);
+            Assert.Equal(record.RecordHash, CasterMembershipStore.GetCurrent()!.RecordHash);
+        }
+
+        /// <summary>
+        /// Copies of the record carrying many signatures from addresses of the sender's own making: one with more than any
+        /// validator set signs, one with fewer than a pull may verify, all from addresses that are not validators here. Both
+        /// are refused before a single signature is verified, and the record as its electors signed it still gets in and
+        /// completes the block.
+        /// </summary>
+        [Fact]
+        public async Task ACopyWithThousandsOfMadeUpSigners_IsRefusedWithoutVerifyingOne_AndTheElectedRecordStillGetsIn()
+        {
+            var record = Ratified(0);
+            CasterMembershipRecord MadeUp(int signers)
+            {
+                var copy = JsonConvert.DeserializeObject<CasterMembershipRecord>(JsonConvert.SerializeObject(record))!;
+                copy.Signatures = Enumerable.Range(0, signers).Select(i => new RecordSignature { SignerAddress = $"xMadeUp{i:D6}", Signature = $"30{i:x8}" }).ToList();
+                return copy;
+            }
+            Assert.True(BoundedJson.ValidatorItems < 5_000 && CarriedRecordCompletion.MaxVerificationsPerPull > 900);
+            var verified = 0;
+            CarriedRecordCompletion.VerifyingForTests = r => { if (r.RecordHash == record.RecordHash) Interlocked.Add(ref verified, r.Signatures!.Count); };
+            try
+            {
+                await PeersAnswerWhileBehind(_ => new List<CasterMembershipRecord> { MadeUp(5_000), MadeUp(900) });
+                Assert.Equal(0, verified);
+
+                await PeersHoldWhileBehind(record);
+                Assert.Equal(record.Signatures!.Count, verified); // checked once, however many peers serve it
+            }
+            finally { CarriedRecordCompletion.VerifyingForTests = null; }
             var block = Served(Members(record).Take(3), record);
 
             await Download(PassedOn(block, record: false, certificate: true), "10.0.0.201");

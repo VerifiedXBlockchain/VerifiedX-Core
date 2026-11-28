@@ -31,8 +31,15 @@ namespace VerifiedXCore.Services
         /// <summary>The most records one responder's answers take at one height, so no one peer fills a height.</summary>
         public const int MaxPerSourcePerHeight = 2;
 
-        /// <summary>The most new records of one responder's answer whose signatures are checked, per pull.</summary>
+        /// <summary>The most new records of one responder's answer that are considered, per pull.</summary>
         public const int MaxCheckedPerSource = 4;
+
+        /// <summary>
+        /// The most signature verifications one pull spends on the records it keeps, across all responders. An honest
+        /// record carries as many signatures as ratify it (two thirds of the electorate) and every honest responder serves
+        /// the same copy, which is checked once.
+        /// </summary>
+        public const int MaxVerificationsPerPull = 1_024;
 
         /// <summary>The copies without their record refused at one height before the block is taken as it is.</summary>
         public const int MaxIncompleteCopies = 5;
@@ -41,43 +48,72 @@ namespace VerifiedXCore.Services
         private static readonly SortedDictionary<long, List<(CasterMembershipRecord Record, string Source)>> _noted = new();
         private static readonly Dictionary<long, (int Copies, HashSet<string> Sources)> _incomplete = new();
 
+        /// <summary>Tests only: told of each record whose signatures intake verifies, before it does.</summary>
+        internal static Action<CasterMembershipRecord>? VerifyingForTests;
+
         /// <summary>The source a block staged by the downloader is validated under (BlockValidatorService.ValidateBlocks).</summary>
         public static string DownloadSource(string? ip) => $"BlockDict:{ip}";
 
         /// <summary>
-        /// Keeps the carried records among <paramref name="records"/>, one responder's answer to a membership sync, that take
-        /// effect above this node's tip, whose fields hash to their record hash and whose every signature is its signer's
-        /// over the record (a seed reset: the seeds' set and signatures, which need no block). Whether the signers ratify it
-        /// needs the chain up to the block that carries it, and is judged there. A responder's copies take at most
-        /// <see cref="MaxPerSourcePerHeight"/> places at a height, and a copy judged not valid on its block gives its place up.
+        /// Keeps the carried records among <paramref name="answers"/> (each responder's answer to one membership sync) that
+        /// take effect above this node's tip, whose fields hash to their record hash and whose every signature is its
+        /// signer's over the record. Whether the signers ratify it needs the chain up to the block that carries it, and is
+        /// judged there. Before any signature is verified, a copy is refused when it carries more signatures than the
+        /// validator set could give, or names a signer this node does not know as an active validator at its tip (a seed
+        /// reset: one of the hard-coded seeds). The copies served by the most responders are checked first, within
+        /// <see cref="MaxVerificationsPerPull"/>. A responder's copies take at most <see cref="MaxPerSourcePerHeight"/>
+        /// places at a height, and a copy judged not valid on its block gives its place up.
         /// </summary>
-        public static void NotePeerRecords(string? source, IEnumerable<CasterMembershipRecord?>? records)
+        public static void NotePeerRecords(IEnumerable<(string? Source, List<CasterMembershipRecord>? Records)>? answers)
         {
-            if (records == null) return;
-            source ??= "unknown";
+            if (answers == null) return;
             var tip = Globals.LastBlock?.Height ?? -1;
-            var candidates = new List<CasterMembershipRecord>();
+            var ceiling = BoundedJson.ValidatorItems;
+            var candidates = new Dictionary<string, (CasterMembershipRecord Record, List<string> Sources)>(StringComparer.Ordinal);
             lock (_lock)
             {
                 PruneLocked(tip);
-                foreach (var r in records)
+                foreach (var (from, records) in answers)
                 {
-                    if (candidates.Count >= MaxCheckedPerSource) break;
-                    if (r == null || !MembershipChain.IsCarriedType(r.ChangeType) || r.EffectiveFromHeight <= tip || !VreeElection.Active(r.EffectiveFromHeight)) continue;
-                    if (r.Casters == null || CasterMembershipStore.FieldHoldingTheSeparator(r) != null || CasterMembershipStore.ComputeRecordHash(r) != r.RecordHash) continue;
-                    if (!HasRoomLocked(r, source)) continue;
-                    candidates.Add(r);
+                    var source = from ?? "unknown";
+                    var considered = 0;
+                    foreach (var r in records ?? new List<CasterMembershipRecord>())
+                    {
+                        if (considered >= MaxCheckedPerSource) break;
+                        if (r == null || !MembershipChain.IsCarriedType(r.ChangeType) || r.EffectiveFromHeight <= tip || !VreeElection.Active(r.EffectiveFromHeight)) continue;
+                        var count = r.Signatures?.Count ?? 0;
+                        if (count == 0 || count > ceiling) continue; // none, or more than any validator set signs
+                        if (r.Casters == null || CasterMembershipStore.FieldHoldingTheSeparator(r) != null || CasterMembershipStore.ComputeRecordHash(r) != r.RecordHash) continue;
+                        if (!HasRoomLocked(r, source)) continue;
+                        considered++;
+                        var key = Key(r);
+                        if (candidates.TryGetValue(key, out var seen)) { if (!seen.Sources.Contains(source)) seen.Sources.Add(source); }
+                        else candidates[key] = (r, new List<string> { source });
+                    }
                 }
             }
+            if (candidates.Count == 0) return;
 
-            // Signatures are checked outside the lock: they are the costly part, and only a few per responder are checked.
-            var signed = candidates.Where(r => SignatureRefusal(r) == null).ToList();
+            // Outside the lock, cheapest first: who signed is a lookup; only then is any signature verified.
+            HashSet<string>? validators = null;
+            HashSet<string> Validators() => validators ??= KnownValidators(tip);
+            var budget = MaxVerificationsPerPull;
+            var signed = new List<(CasterMembershipRecord Record, List<string> Sources)>();
+            foreach (var c in candidates.Values.OrderByDescending(c => c.Sources.Count))
+            {
+                if (SignerRefusal(c.Record, Validators) != null) continue;
+                var cost = c.Record.Signatures!.Count;
+                if (cost > budget) continue;
+                budget -= cost;
+                if (SignatureRefusal(c.Record) == null) signed.Add(c);
+            }
 
             lock (_lock)
             {
-                foreach (var r in signed)
+                foreach (var (r, sources) in signed)
                 {
-                    if (!HasRoomLocked(r, source)) continue;
+                    var source = sources.FirstOrDefault(s => HasRoomLocked(r, s));
+                    if (source == null) continue;
                     if (_noted.Values.Sum(l => l.Count) >= MaxNoted)
                     {
                         // The nearest heights are the ones a download reaches first: the farthest one gives way.
@@ -93,6 +129,10 @@ namespace VerifiedXCore.Services
             }
         }
 
+        /// <summary>The validators this node knows as active at <paramref name="tip"/>, from committed blocks.</summary>
+        private static HashSet<string> KnownValidators(long tip) =>
+            new(VrfSeed.ActiveAt(tip).Select(v => v.ValidatorAddress).Where(a => !string.IsNullOrEmpty(a)), StringComparer.Ordinal);
+
         /// <summary>Whether the copy is new at its height and both the height and the responder have a place left for it.</summary>
         private static bool HasRoomLocked(CasterMembershipRecord r, string source)
         {
@@ -102,23 +142,37 @@ namespace VerifiedXCore.Services
         }
 
         /// <summary>
-        /// Why a copy's signatures are not all its signers' own over the record, or null. A seed reset is judged whole: the
-        /// hard-coded seed set and two seed signatures. Stops at the first bad signature.
+        /// Why a copy's signers are not ones that could have signed it, read with no signature verified, or null: every
+        /// signer named once, and each a validator this node knows as active at its tip (an election's electors are
+        /// registered and bonded well before it), or for a seed reset one of the hard-coded seeds.
         /// </summary>
-        internal static string? SignatureRefusal(CasterMembershipRecord r)
+        internal static string? SignerRefusal(CasterMembershipRecord r, Func<HashSet<string>> validators)
         {
-            if (r.ChangeType == CasterMembershipStore.BootstrapResetChangeType)
-                return CasterMembershipStore.ValidateBootstrapReset(r, long.MaxValue, out var why) ? null : why;
-            var signatures = r.Signatures ?? new List<RecordSignature>();
-            if (signatures.Count == 0) return "no signatures";
-            var payload = CasterMembershipStore.CanonicalPayload(r);
+            var isReset = r.ChangeType == CasterMembershipStore.BootstrapResetChangeType;
             var signers = new HashSet<string>(StringComparer.Ordinal);
-            foreach (var sig in signatures)
+            foreach (var sig in r.Signatures ?? new List<RecordSignature>())
             {
                 if (string.IsNullOrEmpty(sig?.SignerAddress) || string.IsNullOrEmpty(sig.Signature)) return "an empty signature";
                 if (!signers.Add(sig.SignerAddress)) return $"two signatures from {sig.SignerAddress}";
-                if (!SignatureService.VerifySignature(sig.SignerAddress, payload, sig.Signature)) return $"an invalid signature from {sig.SignerAddress}";
+                if (isReset ? !Globals.BootstrapCasterAddresses.Contains(sig.SignerAddress) : !validators().Contains(sig.SignerAddress))
+                    return $"a signature from {sig.SignerAddress}, which is not a validator here";
             }
+            return null;
+        }
+
+        /// <summary>
+        /// Why a copy's signatures are not all its signers' own over the record, or null. A seed reset is judged whole: the
+        /// hard-coded seed set and two seed signatures. Stops at the first bad signature. Called only after
+        /// <see cref="SignerRefusal"/>, so it verifies at most one signature per known signer.
+        /// </summary>
+        internal static string? SignatureRefusal(CasterMembershipRecord r)
+        {
+            VerifyingForTests?.Invoke(r);
+            if (r.ChangeType == CasterMembershipStore.BootstrapResetChangeType)
+                return CasterMembershipStore.ValidateBootstrapReset(r, long.MaxValue, out var why) ? null : why;
+            var payload = CasterMembershipStore.CanonicalPayload(r);
+            foreach (var sig in r.Signatures ?? new List<RecordSignature>())
+                if (!SignatureService.VerifySignature(sig.SignerAddress, payload, sig.Signature)) return $"an invalid signature from {sig.SignerAddress}";
             return null;
         }
 
