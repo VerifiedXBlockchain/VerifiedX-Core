@@ -25,77 +25,8 @@ namespace VerifiedXCore.Tests
     /// signing of a contract change) against providers on loopback.
     /// </summary>
     [Collection("DbContextSequential")]
-    public class BaseProviderChainTests : IDisposable
+    public class BaseProviderChainTests : BaseProviderTestBase
     {
-        private const string Contract = "0x3669EE313f9Aa14b9eBb787DfdB0E97Ca67A0510";
-        private const long OtherChain = 1;
-
-        private readonly string _tempRoot;
-        private readonly string? _priorCustomPath = Globals.CustomPath;
-        private readonly Block _priorLastBlock = Globals.LastBlock;
-        private readonly bool _priorIsBlockCaster = Globals.IsBlockCaster;
-        private readonly string _priorValidator = Globals.ValidatorAddress;
-        private readonly string _priorRpc = BaseBridgeService.BaseRpcUrl;
-        private readonly string _priorRpc2 = BaseBridgeService.BaseRpcUrl2;
-        private readonly string _priorRpc3 = BaseBridgeService.BaseRpcUrl3;
-        private readonly string _priorContract = BaseBridgeService.ContractAddress;
-        private readonly int _priorChainId = BaseBridgeService.BaseChainId;
-        private readonly Func<long> _priorClock = BaseRpc.Clock;
-        private readonly List<FakeBaseRpc> _providers = new();
-        private long _now = 1_800_000_000;
-
-        public BaseProviderChainTests()
-        {
-            _tempRoot = Path.Combine(Path.GetTempPath(), $"base_chain_{Guid.NewGuid():N}") + Path.DirectorySeparatorChar;
-            Directory.CreateDirectory(_tempRoot);
-            Globals.CustomPath = _tempRoot;
-            DbContext.Initialize();
-            Globals.LastBlock = new Block { Height = 100, Timestamp = TimeUtil.GetTime() };
-            Globals.IsBlockCaster = false;
-            BaseBridgeService.ContractAddress = Contract;
-            BaseBridgeService.BaseRpcUrl2 = "";
-            BaseBridgeService.BaseRpcUrl3 = "";
-            BaseBridgeService.BaseChainId = (int)Globals.BaseEvmChainId;
-            BaseRpc.Clock = () => _now;
-            BaseRpc.ForgetChainChecksForTests();
-            BaseBridgeExitWatchService.ResetSpanForTests();
-            BaseBridgeExitWatchService.ResetRewindForTests();
-        }
-
-        public void Dispose()
-        {
-            foreach (var p in _providers) p.Dispose();
-            BaseRpc.Clock = _priorClock;
-            BaseRpc.ForgetChainChecksForTests();
-            BaseBridgeService.BaseRpcUrl = _priorRpc;
-            BaseBridgeService.BaseRpcUrl2 = _priorRpc2;
-            BaseBridgeService.BaseRpcUrl3 = _priorRpc3;
-            BaseBridgeService.ContractAddress = _priorContract;
-            BaseBridgeService.BaseChainId = _priorChainId;
-            BaseBridgeExitWatchService.ResetSpanForTests();
-            BaseBridgeExitWatchService.ResetRewindForTests();
-            Globals.ValidatorAddress = _priorValidator;
-            Globals.IsBlockCaster = _priorIsBlockCaster;
-            Globals.LastBlock = _priorLastBlock;
-            try { DbContext.CloseDB(); } catch { }
-            Globals.CustomPath = _priorCustomPath;
-            try { Directory.Delete(_tempRoot, recursive: true); } catch { }
-        }
-
-        private FakeBaseRpc Provider(long? chainId = null)
-        {
-            var p = new FakeBaseRpc { ChainId = chainId };
-            _providers.Add(p);
-            return p;
-        }
-
-        private static void Configure(params FakeBaseRpc[] providers)
-        {
-            BaseBridgeService.BaseRpcUrl = providers.Length > 0 ? providers[0].Url : "";
-            BaseBridgeService.BaseRpcUrl2 = providers.Length > 1 ? providers[1].Url : "";
-            BaseBridgeService.BaseRpcUrl3 = providers.Length > 2 ? providers[2].Url : "";
-        }
-
         // ── When the node starts ─────────────────────────────────────────────────────────
 
         [Fact]
@@ -135,21 +66,21 @@ namespace VerifiedXCore.Tests
             // The poll the loop runs: the provider is asked its chain id and nothing else, and the cursor does not move.
             await Assert.ThrowsAnyAsync<Exception>(() => BaseBridgeExitWatchService.ReadUntilCaughtUpAsync());
             Assert.Equal(1, provider.CallsTo("eth_chainId"));
-            Assert.Equal(0, provider.CallsTo("eth_blockNumber"));
+            Assert.Equal(0, provider.FinalizedAsked);
             Assert.Equal(0, provider.CallsTo("eth_getLogs"));
             Assert.Equal(0, BridgeExitSyncState.GetOrCreate().LastScannedBlock);
 
             // It serves Base again. Inside the set-aside time it is not asked; after it, it is asked and read.
             provider.ChainId = null;
-            _now += BaseRpc.SetAsideSeconds - 1;
+            Now += BaseRpc.SetAsideSeconds - 1;
             await Assert.ThrowsAnyAsync<Exception>(() => BaseBridgeExitWatchService.ReadUntilCaughtUpAsync());
             Assert.Equal(1, provider.CallsTo("eth_chainId"));
-            Assert.Equal(0, provider.CallsTo("eth_blockNumber"));
+            Assert.Equal(0, provider.FinalizedAsked);
 
-            _now += 2;
+            Now += 2;
             await BaseBridgeExitWatchService.ReadUntilCaughtUpAsync();
             Assert.Equal(2, provider.CallsTo("eth_chainId"));
-            Assert.Equal(1, provider.CallsTo("eth_blockNumber"));
+            Assert.Equal(1, provider.FinalizedAsked);
             Assert.Equal(4_999, BridgeExitSyncState.GetOrCreate().LastScannedBlock); // the cursor's first position, one below the head
         }
 
@@ -163,13 +94,13 @@ namespace VerifiedXCore.Tests
             await BaseBridgeExitWatchService.ReadUntilCaughtUpAsync();
             await BaseBridgeExitWatchService.ReadUntilCaughtUpAsync();
             Assert.Equal(1, provider.CallsTo("eth_chainId")); // kept between reads
-            Assert.Equal(2, provider.CallsTo("eth_blockNumber"));
+            Assert.Equal(2, provider.FinalizedAsked);
 
             provider.ChainId = OtherChain;
-            _now += BaseRpc.VerifiedForSeconds + 1;
+            Now += BaseRpc.VerifiedForSeconds + 1;
             await Assert.ThrowsAnyAsync<Exception>(() => BaseBridgeExitWatchService.ReadUntilCaughtUpAsync());
             Assert.Equal(2, provider.CallsTo("eth_chainId"));
-            Assert.Equal(2, provider.CallsTo("eth_blockNumber"));
+            Assert.Equal(2, provider.FinalizedAsked);
         }
 
         /// <summary>
@@ -238,45 +169,10 @@ namespace VerifiedXCore.Tests
 
         // ── The contract's views and code, as the operator's signing reads them ────────────
 
-        private static string Selector(string signature) => "0x" + Sha3Keccack.Current.CalculateHash(signature)[..8];
-
-        private static string Encoded(string type, object value) =>
-            "0x" + Convert.ToHexString(new ABIEncode().GetABIEncoded(new ABIValue(type, value))).ToLowerInvariant();
-
-        /// <summary>A provider that serves a version 4 contract with these members and admin nonce, and code at any address.</summary>
-        private FakeBaseRpc ContractProvider(long? chainId, string member, int nonce, string codeHex)
-        {
-            var p = Provider(chainId);
-            var views = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
-            {
-                [Selector("getValidators()")] = Encoded("address[]", new List<string> { member, "0x00000000000000000000000000000000000000aa", "0x00000000000000000000000000000000000000ab" }),
-                [Selector("requiredMintSignatures()")] = Encoded("uint256", new BigInteger(2)),
-                [Selector("adminNonce()")] = Encoded("uint256", new BigInteger(nonce)),
-                [Selector("MESSAGE_VERSION()")] = Encoded("uint256", new BigInteger(4)),
-                [Selector("getCasters()")] = Encoded("address[]", new List<string> { member, "0x00000000000000000000000000000000000000ba", "0x00000000000000000000000000000000000000bb" }),
-                [Selector("requiredCasterSignatures()")] = Encoded("uint256", new BigInteger(2)),
-            };
-            p.On = (method, args) =>
-            {
-                if (method == "eth_getCode") return codeHex;
-                if (method != "eth_call") return null;
-                var call = (JObject)args[0]!;
-                var data = (call["data"] ?? call["input"])!.ToString();
-                return views.TryGetValue(data[..10], out var answer) ? answer : null;
-            };
-            return p;
-        }
-
         [Fact]
         public async Task TheOperatorsSigning_ReadsTheContractFromAProviderOnBase_NotFromOneOnAnotherChain()
         {
-            // This node, a validator with its key in the wallet.
-            var key = new PrivateKey("secp256k1");
-            var pub = "04" + Convert.ToHexString(key.publicKey().toString()).ToLowerInvariant();
-            var me = AccountData.GetHumanAddress(pub);
-            AccountData.GetAccounts().InsertSafe(new Account { Address = me, PublicKey = pub, PrivateKey = "0" + key.secret.ToString("x") });
-            Globals.ValidatorAddress = me;
-            var myBase = ValidatorEthKeyService.DeriveBaseAddressFromVfxPublicKey(pub);
+            var myBase = ThisNodeIsAValidator();
             const string implementation = "0xd2bB4BdA89A23c63eaaD464F15658845a2114Ffa";
 
             // A provider on another chain serves a contract at admin nonce 99 and other code; the one on Base, nonce 5.

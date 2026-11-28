@@ -27,6 +27,9 @@ namespace VerifiedXCore.Bitcoin.Services
         public static BaseAnswer<T> No(string reason) => new(false, default, reason ?? "");
     }
 
+    /// <summary>A block of Base as a provider names it: its number and its hash.</summary>
+    public readonly record struct BaseBlock(long Number, string Hash);
+
     /// <summary>What asking a provider for its chain id came to (<see cref="BaseRpc.CheckProvidersAtStartAsync"/>).</summary>
     public enum BaseProviderCheck
     {
@@ -58,6 +61,12 @@ namespace VerifiedXCore.Bitcoin.Services
     /// Advisory: the answer is shown, or sizes a request of this node's own (a balance, gas, a local record's status),
     /// and the contract or the chain judges what follows.
     ///
+    /// An authorizing read takes only what is final on Base: a provider is asked for its finalized block (the newest
+    /// block Base will not replace), contract state is read at that one block, and a transaction's receipt counts only
+    /// from a block at or below it that is still on the provider's chain. What is newer is not refused, it is not
+    /// answered yet (<see cref="BaseAnswer{T}.Answered"/> false): the caller asks again later. An advisory read is of
+    /// the newest block.
+    ///
     /// A provider is asked only while it serves this network's Base chain (<see cref="Globals.BaseEvmChainId"/>, by its
     /// own eth_chainId). One that serves another chain is set aside for <see cref="SetAsideSeconds"/> and then asked
     /// again; none is set aside for good.
@@ -66,6 +75,18 @@ namespace VerifiedXCore.Bitcoin.Services
     {
         /// <summary>The reason given when no provider is configured, or none was reached.</summary>
         public const string NoProviderReason = "no RPC reachable";
+
+        /// <summary>Why a receipt is not taken yet: no provider has the transaction.</summary>
+        public const string ReceiptNotFound = "receipt not found";
+
+        /// <summary>Why a receipt is not taken yet: its block is newer than the provider's finalized block.</summary>
+        public const string ReceiptNotFinal = "the transaction's block is not final on Base yet";
+
+        /// <summary>Why a receipt is not taken: the block it names is not the one the provider's chain holds at that height.</summary>
+        public const string ReceiptOffChain = "the transaction's block is not on Base's chain";
+
+        /// <summary>Why a provider gives no authorizing answer: it names no finalized block.</summary>
+        public const string NoFinalizedBlock = "the provider gave no finalized block";
 
         /// <summary>Seconds a provider found on Base is used before its chain id is asked again.</summary>
         internal const int VerifiedForSeconds = 600;
@@ -173,47 +194,83 @@ namespace VerifiedXCore.Bitcoin.Services
         // ── Authorizing reads ────────────────────────────────────────────────────────────
 
         /// <summary>
-        /// An authorizing read, asked of the providers in their configured order until one answers. <paramref name="ask"/>
-        /// is given the provider's client and the block to read contract state at, and says whether this provider has
-        /// the answer; a provider that throws has none.
+        /// An authorizing read of contract state, asked of the providers in their configured order until one answers.
+        /// <paramref name="read"/> is given the provider's client and the block to read at: the provider's finalized
+        /// block, one block for every call of the read. A provider that throws, or names no finalized block, has no
+        /// answer.
         /// </summary>
-        public static Task<BaseAnswer<T>> AuthorizingAskAsync<T>(Func<Web3, BlockParameter, Task<BaseAnswer<T>>> ask) =>
-            FirstAsync(ask);
-
-        /// <summary>An authorizing read whose every answer is one: the first provider that does not throw gives it.</summary>
         public static Task<BaseAnswer<T>> AuthorizingFirstAsync<T>(Func<Web3, BlockParameter, Task<T>> read) =>
-            FirstAsync<T>(async (web3, at) => BaseAnswer<T>.Yes(await read(web3, at)));
+            FirstAsync<T>(final: true, async (web3, block) => BaseAnswer<T>.Yes(await read(web3, At(block))));
 
         /// <summary>
-        /// An authorizing read asked of the first configured provider only. Throws when that provider is not on Base, or
-        /// when the read does.
+        /// An authorizing read of a transaction's receipt, asked of the providers in their configured order. A receipt is
+        /// handed to <paramref name="judge"/> only from a block at or below the provider's finalized block whose hash is
+        /// the one the provider's chain holds at that height; <paramref name="judge"/> says what the receipt answers.
+        /// Until a provider has such a receipt there is no answer, for the reason the last provider gave
+        /// (<see cref="ReceiptNotFound"/>, <see cref="ReceiptNotFinal"/>, <see cref="ReceiptOffChain"/>).
         /// </summary>
-        public static Task<T> AuthorizingPrimaryAsync<T>(Func<Web3, BlockParameter, Task<T>> read) =>
+        public static Task<BaseAnswer<T>> AuthorizingReceiptAsync<T>(string txHash, Func<TransactionReceipt, BaseAnswer<T>> judge) =>
+            FirstAsync<T>(final: true, async (web3, final) =>
+            {
+                var receipt = await web3.Eth.Transactions.GetTransactionReceipt.SendRequestAsync(txHash);
+                if (receipt == null) return BaseAnswer<T>.No(ReceiptNotFound);
+                if (receipt.BlockNumber == null || receipt.BlockNumber.Value > final.Number) return BaseAnswer<T>.No(ReceiptNotFinal);
+                var held = await web3.Eth.Blocks.GetBlockWithTransactionsHashesByNumber.SendRequestAsync(new BlockParameter(receipt.BlockNumber));
+                if (held == null || string.IsNullOrEmpty(held.BlockHash) || !string.Equals(held.BlockHash, receipt.BlockHash, StringComparison.OrdinalIgnoreCase))
+                    return BaseAnswer<T>.No(ReceiptOffChain);
+                return judge(receipt);
+            });
+
+        /// <summary>
+        /// An authorizing read of the newest block, asked of the providers in their configured order until one answers.
+        /// Only for a rule that was written for the newest block and is also judged in a block: its answers stay as
+        /// they were. Every other authorizing read takes what is final.
+        /// </summary>
+        public static Task<BaseAnswer<T>> AuthorizingNewestAskAsync<T>(Func<Web3, Task<BaseAnswer<T>>> ask) =>
+            FirstAsync<T>(final: false, (web3, _) => ask(web3));
+
+        /// <summary>
+        /// The first configured provider's finalized block: how far the burn watch reads. Throws when that provider is
+        /// not on Base or names no finalized block.
+        /// </summary>
+        public static Task<BaseBlock> AuthorizingPrimaryHeadAsync() =>
+            PrimaryAsync(async web3 => await FinalizedAsync(web3) ?? throw new BaseProviderException($"Base cannot be read: {NoFinalizedBlock}"));
+
+        /// <summary>
+        /// An authorizing read asked of the first configured provider only, of blocks the caller names: the burn watch,
+        /// which reads no further than <see cref="AuthorizingPrimaryHeadAsync"/>. Throws when that provider is not on
+        /// Base, or when the read does.
+        /// </summary>
+        public static Task<T> AuthorizingPrimaryAsync<T>(Func<Web3, Task<T>> read) =>
             PrimaryAsync(read);
 
         /// <summary>
-        /// An authorizing read asked of one provider the caller names (a caller that walks the providers itself).
-        /// Throws when that provider is not on Base, or when the read does.
+        /// An authorizing read of contract state asked of one provider the caller names (a caller that walks the
+        /// providers itself). <paramref name="read"/> is given the block to read at: that provider's finalized block,
+        /// one block for every call of the read. Throws when the provider is not on Base or names no finalized block,
+        /// or when the read does.
         /// </summary>
         public static async Task<T> AuthorizingAtAsync<T>(string url, Func<Web3, BlockParameter, Task<T>> read)
         {
             var (check, reason) = await CheckChainAsync(url);
             if (check != BaseProviderCheck.OnBase) throw new BaseProviderException($"Base cannot be read: {reason}");
-            return await read(Client(url), BlockParameter.CreateLatest());
+            var web3 = Client(url);
+            var final = await FinalizedAsync(web3) ?? throw new BaseProviderException($"Base cannot be read: {NoFinalizedBlock}");
+            return await read(web3, At(final));
         }
 
         // ── Advisory reads ───────────────────────────────────────────────────────────────
 
         /// <summary>An advisory read, asked of the providers in their configured order until one does not throw.</summary>
         public static Task<BaseAnswer<T>> AdvisoryFirstAsync<T>(Func<Web3, Task<T>> read) =>
-            FirstAsync<T>(async (web3, _) => BaseAnswer<T>.Yes(await read(web3)));
+            FirstAsync<T>(final: false, async (web3, _) => BaseAnswer<T>.Yes(await read(web3)));
 
         /// <summary>
         /// An advisory read asked of the first configured provider only. Throws when that provider is not on Base, or
         /// when the read does.
         /// </summary>
         public static Task<T> AdvisoryPrimaryAsync<T>(Func<Web3, Task<T>> read) =>
-            PrimaryAsync<T>((web3, _) => read(web3));
+            PrimaryAsync(read);
 
         // ── Sending ──────────────────────────────────────────────────────────────────────
 
@@ -232,7 +289,30 @@ namespace VerifiedXCore.Bitcoin.Services
 
         // ── How the providers are asked ──────────────────────────────────────────────────
 
-        private static async Task<BaseAnswer<T>> FirstAsync<T>(Func<Web3, BlockParameter, Task<BaseAnswer<T>>> ask)
+        /// <summary>The tag a provider reads as its finalized block.</summary>
+        private static BlockParameter FinalizedTag()
+        {
+            var tag = new BlockParameter();
+            tag.SetValue(BlockParameter.BlockParameterType.finalized);
+            return tag;
+        }
+
+        /// <summary>The block to read contract state at: <paramref name="block"/> by its number.</summary>
+        private static BlockParameter At(BaseBlock block) => new((ulong)block.Number);
+
+        /// <summary>The provider's finalized block, or null when it names none.</summary>
+        private static async Task<BaseBlock?> FinalizedAsync(Web3 web3)
+        {
+            var block = await web3.Eth.Blocks.GetBlockWithTransactionsHashesByNumber.SendRequestAsync(FinalizedTag());
+            if (block?.Number == null || string.IsNullOrEmpty(block.BlockHash)) return null;
+            return new BaseBlock((long)block.Number.Value, block.BlockHash);
+        }
+
+        /// <summary>
+        /// Asks the providers in their order until one answers. With <paramref name="final"/> each is first asked for
+        /// its finalized block, which <paramref name="ask"/> is given; without, <paramref name="ask"/> reads the newest.
+        /// </summary>
+        private static async Task<BaseAnswer<T>> FirstAsync<T>(bool final, Func<Web3, BaseBlock, Task<BaseAnswer<T>>> ask)
         {
             var last = NoProviderReason;
             foreach (var url in Providers())
@@ -241,7 +321,14 @@ namespace VerifiedXCore.Bitcoin.Services
                 {
                     var (check, reason) = await CheckChainAsync(url);
                     if (check != BaseProviderCheck.OnBase) { last = reason; continue; }
-                    var answer = await ask(Client(url), BlockParameter.CreateLatest());
+                    var web3 = Client(url);
+                    BaseBlock block = default;
+                    if (final)
+                    {
+                        if (await FinalizedAsync(web3) is not { } finalized) { last = NoFinalizedBlock; continue; }
+                        block = finalized;
+                    }
+                    var answer = await ask(web3, block);
                     if (answer.Answered) return answer;
                     last = answer.Reason;
                 }
@@ -250,12 +337,12 @@ namespace VerifiedXCore.Bitcoin.Services
             return BaseAnswer<T>.No(last);
         }
 
-        private static async Task<T> PrimaryAsync<T>(Func<Web3, BlockParameter, Task<T>> read)
+        private static async Task<T> PrimaryAsync<T>(Func<Web3, Task<T>> read)
         {
             var url = BaseBridgeService.BaseRpcUrl;
             var (check, reason) = await CheckChainAsync(url);
             if (check != BaseProviderCheck.OnBase) throw new BaseProviderException($"Base cannot be read: {reason}");
-            return await read(Client(url), BlockParameter.CreateLatest());
+            return await read(Client(url));
         }
     }
 }

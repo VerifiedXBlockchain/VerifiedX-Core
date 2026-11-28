@@ -438,12 +438,12 @@ namespace VerifiedXCore.Bitcoin.Services
         }
 
         /// <summary>
-        /// Whether a reason says Base could not be read (no provider answered, or none had the receipt yet), as distinct
-        /// from Base answering that the transaction is not the burn. The reasons BaseBridgeService gives for the first.
+        /// Whether an exit transaction's refusal says Base has given no final answer about its burn yet (no provider
+        /// answered, none has the receipt, or its block is not final), as distinct from Base answering that the
+        /// transaction is not the burn. A refusal is text; the look-up's "not yet" is carried in it by one phrase
+        /// (BaseBridgeService.NotYetOnBase).
         /// </summary>
-        internal static bool BaseCouldNotBeRead(string? reason) =>
-            reason != null && (reason.IndexOf("Could not read", StringComparison.OrdinalIgnoreCase) >= 0
-                               || reason.IndexOf("receipt not found", StringComparison.OrdinalIgnoreCase) >= 0);
+        internal static bool BaseCouldNotBeRead(string? reason) => BaseBridgeService.IsNotYet(reason);
 
         /// <summary>
         /// What a burn becomes when its EXIT_TO_BTC transaction was not sent. This node's mempool refusing it (it holds an
@@ -1879,37 +1879,36 @@ namespace VerifiedXCore.Bitcoin.Services
             var expectedSats = (long)(record.Amount * 100_000_000M);
             var expectedDest = record.ExitType == BurnExitType.VfxPoolUnlock ? record.VfxDestinationAddress : record.BtcDestination;
 
-            var (ok, info, reason) = await BaseBridgeService.TryGetBurnEventAsync(record.BaseBurnTxHash, vfxExit: record.ExitType == BurnExitType.VfxPoolUnlock);
-            if (!ok)
+            var read = await BaseBridgeService.ReadBurnAsync(record.BaseBurnTxHash, vfxExit: record.ExitType == BurnExitType.VfxPoolUnlock);
+            if (!read.Ok)
             {
-                // Only an RPC that could not answer is transient. "No matching event" / "did not succeed"
-                // are answers: the alert pointed at something that is not a burn of this type.
-                var transient = reason.StartsWith("Could not read", StringComparison.OrdinalIgnoreCase)
-                                || reason.IndexOf("receipt not found", StringComparison.OrdinalIgnoreCase) >= 0;
+                // Only "not yet" is transient: no provider answered, none has the transaction, or its block is not final
+                // on Base. "No matching event" / "did not succeed" are answers: the alert pointed at something that is
+                // not a burn of this type.
+                var transient = read.NotYet;
                 // A positioned id met before the path-audit rules (a caster a block behind the one that named it) is
                 // asked again once they are reached, not failed and pruned (#291).
-                if (string.Equals(reason, BaseBridgeService.PositionBeforeRules, StringComparison.Ordinal))
-                    return (false, true, $"burn evidence not yet: {reason}", null);
+                if (string.Equals(read.Reason, BaseBridgeService.PositionBeforeRules, StringComparison.Ordinal))
+                    return (false, true, $"burn evidence not yet: {read.Reason}", null);
                 // The type comes from Base too, like the amount and destination: a committee caster's alert naming the
                 // other type had every caster that took it fail the burn and skip it for good (fifth review, round 21).
                 if (!transient)
                 {
-                    var (otherOk, otherInfo, otherReason) = await BaseBridgeService.TryGetBurnEventAsync(record.BaseBurnTxHash, vfxExit: record.ExitType != BurnExitType.VfxPoolUnlock);
-                    if (otherOk && otherInfo != null)
+                    var other = await BaseBridgeService.ReadBurnAsync(record.BaseBurnTxHash, vfxExit: record.ExitType != BurnExitType.VfxPoolUnlock);
+                    if (other.Ok && other.Info != null)
                     {
                         record.ExitType = record.ExitType == BurnExitType.VfxPoolUnlock ? BurnExitType.BtcExit : BurnExitType.VfxPoolUnlock;
-                        return (false, false, "burn evidence: the burn is of the other type; the record takes Base's", otherInfo);
+                        return (false, false, "burn evidence: the burn is of the other type; the record takes Base's", other.Info);
                     }
-                    // The other type's look-up could not be answered: asked again later, not failed (round 22).
-                    if (otherReason.StartsWith("Could not read", StringComparison.OrdinalIgnoreCase)
-                        || otherReason.IndexOf("receipt not found", StringComparison.OrdinalIgnoreCase) >= 0)
+                    // The other type's look-up has no answer yet: asked again later, not failed (round 22).
+                    if (other.NotYet)
                         transient = true;
                 }
-                return (false, transient, $"burn evidence unavailable: {reason}", null);
+                return (false, transient, $"burn evidence unavailable: {read.Reason}", null);
             }
 
-            var (matches, mismatch) = BridgeCasterConsensus.BurnEvidenceMatches(info, expectedSats, expectedDest);
-            return matches ? (true, false, "", info) : (false, false, $"burn evidence mismatch: {mismatch}", info);
+            var (matches, mismatch) = BridgeCasterConsensus.BurnEvidenceMatches(read.Info, expectedSats, expectedDest);
+            return matches ? (true, false, "", read.Info) : (false, false, $"burn evidence mismatch: {mismatch}", read.Info);
         }
 
         private static string SignMessageWithValidatorKey(string message)

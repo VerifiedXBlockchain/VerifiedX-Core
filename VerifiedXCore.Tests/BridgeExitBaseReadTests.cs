@@ -281,5 +281,96 @@ namespace VerifiedXCore.Tests
             Accepted(await TransactionValidatorService.VerifyTX(exit));
             Assert.Equal("Success", (await Raw(exit))["Result"]?.ToString());
         }
+
+        /// <summary>
+        /// A burn in a block that is not final on Base yet admits no exit, on the handler's own send, on VerifyTX and on
+        /// the raw route. It is "not yet", not "no": the handler's burn goes back to be planned again, and once the
+        /// block is final the same exit is sent. A block's verdict does not depend on it.
+        /// </summary>
+        [Fact]
+        public async Task AnExitWhoseBurnIsNotFinalOnBaseYet_IsNotSent_AndItsBurnIsPlannedAgain()
+        {
+            await Start();
+            AccountData.GetAccounts().InsertSafe(new Account { Address = Handler.Address, PublicKey = Handler.Pub, PrivateKey = "0" + Handler.Key.secret.ToString("x") });
+            var now = TimeUtil.GetTime();
+            var provider = Provider();
+            provider.Finalized = 890;
+            Configure(provider);
+            var burn = NewBurn();
+            provider.AddBurn(burn, Contract, vfxExit: false, 400_000, BtcDest, blockNumber: 900);
+            var lockId = Lock(0.004M);
+            var votes = Votes(burn, "BTC_EXIT", 400_000, BtcDest, now);
+            var allocations = new List<PoolUnlockAllocation> { new() { LockId = lockId, SmartContractUID = Vault, UnlockAmount = 0.004M } };
+
+            var (sent, why) = await VBTCService.CreateBridgeExitToBTCTx(Handler.Address, 0.004M, BtcDest, burn, allocations, null, votes);
+            Assert.False(sent);
+            Assert.Contains(BaseRpc.ReceiptNotFinal, why);
+            Assert.True(BaseBridgeService.IsNotYet(why), why);
+            Assert.Empty(TransactionData.GetPool().FindAll());
+
+            // What the caster makes of an exit not sent for that reason: its burn is planned again, not given up.
+            var record = new BurnExitConsensusService.ProcessedBurnRecord
+            {
+                BaseBurnTxHash = burn, ExitType = BurnExitType.BtcExit, Status = BurnExitConsensusService.BurnExitStatus.ConsensusReached,
+                Amount = 0.004M, BtcDestination = BtcDest, DetectedAtBlock = Tip, FieldsFromBase = true,
+            };
+            BurnExitConsensusService.NoteExitNotSent(record, why);
+            Assert.Equal(BurnExitConsensusService.BurnExitStatus.Pending, record.Status);
+            Assert.True(record.NextAttemptAt > TimeUtil.GetTime());
+
+            var exit = Exit(burn, 0.004M, lockId, now);
+            Refused(await TransactionValidatorService.VerifyTX(exit), BaseRpc.ReceiptNotFinal);
+            Assert.Equal("Fail", (await Raw(exit))["Result"]?.ToString());
+            Assert.Empty(TransactionData.GetPool().FindAll());
+            Accepted(await InBlock(exit, Tip + 1, now));
+
+            // Base finalizes the burn's block: the handler's exit is sent.
+            provider.Finalized = 900;
+            (sent, why) = await VBTCService.CreateBridgeExitToBTCTx(Handler.Address, 0.004M, BtcDest, burn, allocations, null, votes);
+            Assert.True(sent, why);
+            Assert.Single(TransactionData.GetPool().FindAll());
+        }
+
+        /// <summary>
+        /// Block building asks Base about a pooled exit's burn again. While there is no final answer at that moment (this
+        /// node's provider is behind, or does not answer) the exit stays in the pool for the next block; it was deleted,
+        /// and its burn waited for the handler to make it again. An answer that the transaction is not the burn still
+        /// removes it.
+        /// </summary>
+        [Fact]
+        public async Task BlockBuilding_KeepsAnExitWhileBaseHasNoFinalAnswer_AndDropsOneThatIsNotABurn()
+        {
+            await Start();
+            var now = TimeUtil.GetTime();
+            var provider = Provider();
+            Configure(provider);
+            var burn = NewBurn();
+            var log = provider.AddBurn(burn, Contract, vfxExit: true, 400_000, Minter.Address, blockNumber: 900);
+            var unlock = Unlock(burn, 0.004M, Lock(0.004M), now);
+            Accepted(await TransactionValidatorService.VerifyTX(unlock));
+            unlock.TransactionRating = TransactionRating.A; // set on receipt; block building skips unrated transactions
+            TransactionData.GetPool().InsertSafe(unlock);
+
+            // The provider is behind: for it the burn's block is not final.
+            provider.Finalized = 890;
+            Assert.Empty(await TransactionData.ProcessTxPool());
+            Assert.Single(TransactionData.GetPool().FindAll());
+
+            // The provider does not answer.
+            provider.Finalized = null;
+            provider.Down = true;
+            BaseRpc.ForgetChainChecksForTests();
+            Assert.Empty(await TransactionData.ProcessTxPool());
+            Assert.Single(TransactionData.GetPool().FindAll());
+
+            // It answers again and the block is final: the exit is proposed.
+            provider.Down = false;
+            Assert.Equal(unlock.Hash, Assert.Single(await TransactionData.ProcessTxPool()).Hash);
+
+            // A final receipt that is not the burn (the transaction failed on Base) is an answer: the exit is removed.
+            provider.Receipts[burn] = FakeBaseRpc.Receipt(burn, succeeded: false, log);
+            Assert.Empty(await TransactionData.ProcessTxPool());
+            Assert.Empty(TransactionData.GetPool().FindAll());
+        }
     }
 }

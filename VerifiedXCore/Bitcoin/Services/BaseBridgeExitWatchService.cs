@@ -259,7 +259,7 @@ namespace VerifiedXCore.Bitcoin.Services
                     ToBlock = new BlockParameter(new HexBigInteger(block)),
                     Address = new[] { contract },
                 };
-                await BaseRpc.AuthorizingPrimaryAsync((web3, _) => web3.Eth.Filters.GetLogs.SendRequestAsync(probe));
+                await BaseRpc.AuthorizingPrimaryAsync(web3 => web3.Eth.Filters.GetLogs.SendRequestAsync(probe));
                 return true;
             }
             catch { return false; }
@@ -374,9 +374,10 @@ namespace VerifiedXCore.Bitcoin.Services
 
         private static async Task<(int Processed, long ScannedToBlock, string Message)> PollOnceInternal()
         {
-            // The burns read here start an exit: authorizing reads, of the first configured provider.
-            var latestHex = await BaseRpc.AuthorizingPrimaryAsync((web3, _) => web3.Eth.Blocks.GetBlockNumber.SendRequestAsync());
-            var latest = (long)latestHex.Value;
+            // The burns read here start an exit: authorizing reads, of the first configured provider. The newest block
+            // read is the provider's finalized block, the newest one Base will not replace: a burn in a block after it
+            // is read once that block is final, so no exit starts from a burn Base can still drop.
+            var latest = (await BaseRpc.AuthorizingPrimaryHeadAsync()).Number;
             _behind = false;
 
             var state = ReadCursorForPoll();
@@ -443,7 +444,7 @@ namespace VerifiedXCore.Bitcoin.Services
             {
                 if (!string.IsNullOrEmpty(v3Contract))
                 {
-                    vfxExitLogs = await BaseRpc.AuthorizingPrimaryAsync((web3, _) =>
+                    vfxExitLogs = await BaseRpc.AuthorizingPrimaryAsync(web3 =>
                     {
                         var vfxExitHandler = web3.Eth.GetEvent<VfxExitBurnedEventDTO>(v3Contract);
                         return vfxExitHandler.GetAllChangesAsync(vfxExitHandler.CreateFilterInput(
@@ -451,7 +452,7 @@ namespace VerifiedXCore.Bitcoin.Services
                             new BlockParameter(new HexBigInteger(to))));
                     });
                 }
-                btcLogs = await BaseRpc.AuthorizingPrimaryAsync((web3, _) =>
+                btcLogs = await BaseRpc.AuthorizingPrimaryAsync(web3 =>
                 {
                     var btcEventHandler = web3.Eth.GetEvent<BTCExitBurnedEventDTO>(btcExitContract);
                     return btcEventHandler.GetAllChangesAsync(btcEventHandler.CreateFilterInput(

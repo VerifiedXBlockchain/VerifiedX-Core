@@ -176,6 +176,8 @@ namespace VerifiedXCore.Tests
                         return new JObject { ["jsonrpc"] = "2.0", ["id"] = id, ["result"] = "0x" + Globals.BaseEvmChainId.ToString("x") }.ToString();
                     case "eth_blockNumber":
                         return new JObject { ["jsonrpc"] = "2.0", ["id"] = id, ["result"] = "0x" + Head.ToString("x") }.ToString();
+                    case "eth_getBlockByNumber": // the finalized block: the head
+                        return new JObject { ["jsonrpc"] = "2.0", ["id"] = id, ["result"] = new JObject { ["number"] = "0x" + Head.ToString("x"), ["hash"] = "0x" + new string('1', 64), ["transactions"] = new JArray() } }.ToString();
                     case "eth_getLogs":
                         var filter = (JObject)request["params"]![0]!;
                         var from = Convert.ToInt64(filter["fromBlock"]!.ToString(), 16);

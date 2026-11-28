@@ -18,11 +18,12 @@ namespace VerifiedXCore.Tests
     /// <summary>
     /// A Base provider on loopback for tests: a JSON-RPC endpoint the node's own client talks to, so a test reads Base
     /// the way the node does. It answers eth_chainId with <see cref="ChainId"/>, eth_blockNumber with <see cref="Head"/>,
-    /// eth_getTransactionReceipt from <see cref="Receipts"/> and eth_getLogs from <see cref="Logs"/>; <see cref="On"/>
-    /// answers anything first when it is set. Every request is counted by method. Several of these stand in for
-    /// several providers.
+    /// eth_getBlockByNumber for the "finalized" tag with <see cref="Finalized"/> and for a number up to the head with
+    /// that block, eth_getTransactionReceipt from <see cref="Receipts"/> and eth_getLogs from <see cref="Logs"/>;
+    /// <see cref="On"/> answers anything first when it is set. Every request is counted by method. Several of these
+    /// stand in for several providers.
     /// </summary>
-    internal sealed class FakeBaseRpc : IDisposable
+    public sealed class FakeBaseRpc : IDisposable
     {
         private readonly TcpListener _listener = new(IPAddress.Loopback, 0);
         private readonly CancellationTokenSource _stop = new();
@@ -35,6 +36,26 @@ namespace VerifiedXCore.Tests
 
         /// <summary>The provider's newest block.</summary>
         public long Head { get; set; } = 1_000;
+
+        /// <summary>The provider's finalized block; null is the head (everything it holds is final).</summary>
+        public long? Finalized { get; set; }
+
+        /// <summary>Hashes of blocks that differ from <see cref="BlockHash(string)"/> of "block" and the number.</summary>
+        public ConcurrentDictionary<long, string> BlockHashes { get; } = new();
+
+        /// <summary>How many times the finalized block was asked for by its tag.</summary>
+        public int FinalizedAsked => Volatile.Read(ref _finalizedAsked);
+        private int _finalizedAsked;
+
+        /// <summary>The highest block any eth_getLogs asked up to; -1 when none was asked.</summary>
+        public long HighestLogBlockAsked => Interlocked.Read(ref _highestLogBlockAsked);
+        private long _highestLogBlockAsked = -1;
+
+        /// <summary>The block each eth_call and eth_getCode was asked at, as sent ("latest", or a number in hex).</summary>
+        public ConcurrentQueue<string> StateBlocksAsked { get; } = new();
+
+        /// <summary>The hash this provider's chain holds at <paramref name="number"/>.</summary>
+        public string HashAt(long number) => BlockHashes.TryGetValue(number, out var hash) ? hash : BlockHash("block" + number);
 
         /// <summary>When true every request fails, as from a provider that is down.</summary>
         public bool Down { get; set; }
@@ -117,6 +138,7 @@ namespace VerifiedXCore.Tests
             var args = request["params"] as JArray ?? new JArray();
             _calls.AddOrUpdate(method, 1, (_, n) => n + 1);
             if (Down) return Error(id, -32000, "the provider is down");
+            if (method is "eth_call" or "eth_getCode" && args.Count > 1) StateBlocksAsked.Enqueue(args[1]!.ToString());
             try
             {
                 if (On?.Invoke(method, args) is { } scripted) return Result(id, scripted);
@@ -128,12 +150,28 @@ namespace VerifiedXCore.Tests
                     return Result(id, Hex(ChainId ?? Globals.BaseEvmChainId));
                 case "eth_blockNumber":
                     return Result(id, Hex(Head));
+                case "eth_getBlockByNumber":
+                    var tag = args[0]!.ToString();
+                    if (tag == "finalized") Interlocked.Increment(ref _finalizedAsked);
+                    long number;
+                    if (tag == "finalized") number = Finalized ?? Head;
+                    else if (tag == "latest") number = Head;
+                    else if (tag.StartsWith("0x", StringComparison.OrdinalIgnoreCase)) number = Convert.ToInt64(tag, 16);
+                    else return Error(id, -32602, $"unknown block tag {tag}");
+                    if (number > Head) return Result(id, JValue.CreateNull());
+                    return Result(id, new JObject
+                    {
+                        ["number"] = Hex(number), ["hash"] = HashAt(number), ["parentHash"] = number > 0 ? HashAt(number - 1) : "0x" + new string('0', 64),
+                        ["timestamp"] = Hex(1_700_000_000 + number * 2), ["transactions"] = new JArray(),
+                    });
                 case "eth_getTransactionReceipt":
                     return Result(id, Receipts.TryGetValue(args[0]!.ToString(), out var receipt) ? receipt : JValue.CreateNull());
                 case "eth_getLogs":
                     var filter = (JObject)args[0]!;
                     var from = Convert.ToInt64(filter["fromBlock"]!.ToString(), 16);
                     var to = Convert.ToInt64(filter["toBlock"]!.ToString(), 16);
+                    long seen;
+                    while (to > (seen = Interlocked.Read(ref _highestLogBlockAsked)) && Interlocked.CompareExchange(ref _highestLogBlockAsked, to, seen) != seen) { }
                     var addresses = filter["address"] is JArray many ? many.Select(a => a.ToString()).ToList()
                         : filter["address"] != null ? new List<string> { filter["address"]!.ToString() } : new List<string>();
                     var topic0 = (filter["topics"] as JArray)?.FirstOrDefault() is { } first

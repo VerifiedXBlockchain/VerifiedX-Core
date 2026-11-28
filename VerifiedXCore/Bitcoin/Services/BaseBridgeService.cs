@@ -380,10 +380,8 @@ namespace VerifiedXCore.Bitcoin.Services
             if (!IsBridgeConfigured) return (false, "Bridge not configured");
             if (string.IsNullOrWhiteSpace(txHash)) return (false, "Empty tx hash");
             var h = NormalizeTxHash(txHash);
-            var verdict = await BaseRpc.AuthorizingAskAsync<(bool Ok, string Reason)>(async (web3, _) =>
+            var verdict = await BaseRpc.AuthorizingReceiptAsync<(bool Ok, string Reason)>(h, r =>
             {
-                var r = await web3.Eth.Transactions.GetTransactionReceipt.SendRequestAsync(h);
-                if (r == null) return BaseAnswer<(bool Ok, string Reason)>.No("receipt not found");
                 if (r.Status?.Value != 1) return BaseAnswer<(bool Ok, string Reason)>.Yes((false, "Base transaction did not succeed"));
                 // Key on the EMITTING address, not receipt.to: a burn made through a smart-contract
                 // wallet (e.g. a Safe) has a different `to` but its logs still come from the bridge.
@@ -391,8 +389,41 @@ namespace VerifiedXCore.Bitcoin.Services
                     return BaseAnswer<(bool Ok, string Reason)>.Yes((false, "Base transaction emitted no event from the bridge contract"));
                 return BaseAnswer<(bool Ok, string Reason)>.Yes((true, ""));
             });
-            return verdict.Answered ? verdict.Value : (false, $"Could not read Base receipt: {verdict.Reason}");
+            return verdict.Answered ? verdict.Value : (false, $"{NotYetOnBase}: {verdict.Reason}");
         }
+
+        /// <summary>What Base says of a burn (<see cref="ReadBurnAsync"/>).</summary>
+        public enum BurnVerdict
+        {
+            /// <summary>A final receipt holds the burn: <see cref="BurnRead.Info"/> is what was burned.</summary>
+            Burned,
+            /// <summary>A final receipt answers that the transaction is not this burn.</summary>
+            NotABurn,
+            /// <summary>
+            /// No answer yet: no provider was reached, none has the transaction, or its block is not final on Base. Not
+            /// a verdict on the burn; it is asked again later.
+            /// </summary>
+            NotYet,
+        }
+
+        /// <summary>A burn as read on Base: the verdict, the burn when there is one, and the reason when there is none.</summary>
+        public readonly record struct BurnRead(BurnVerdict Verdict, BurnEventInfo? Info, string Reason)
+        {
+            public bool Ok => Verdict == BurnVerdict.Burned;
+            public bool NotYet => Verdict == BurnVerdict.NotYet;
+        }
+
+        /// <summary>
+        /// How every reason begins when Base has given no final answer about a transaction (<see cref="BurnVerdict.NotYet"/>,
+        /// and the same for <see cref="HasSuccessfulReceiptToContractAsync"/>). A transaction refused for it carries the
+        /// words in its refusal, which is how the outcome reaches a caller that has only the refusal's text
+        /// (<see cref="IsNotYet"/>).
+        /// </summary>
+        public const string NotYetOnBase = "Could not read Base receipt";
+
+        /// <summary>Whether a refusal says Base has given no final answer yet, as distinct from Base answering no.</summary>
+        public static bool IsNotYet(string? reason) =>
+            reason != null && reason.IndexOf(NotYetOnBase, StringComparison.OrdinalIgnoreCase) >= 0;
 
         /// <summary>
         /// Reads the burn event from a Base receipt: the tx must have succeeded, been sent to the
@@ -405,15 +436,32 @@ namespace VerifiedXCore.Bitcoin.Services
 
         public static async Task<(bool Ok, BurnEventInfo? Info, string Reason)> TryGetBurnEventAsync(string txHash, bool vfxExit)
         {
-            if (BurnEventsForTests != null) return BurnEventsForTests(txHash, vfxExit);
-            if (!IsBridgeConfigured) return (false, null, "Bridge not configured");
-            if (string.IsNullOrWhiteSpace(txHash)) return (false, null, "Empty tx hash");
+            var read = await ReadBurnAsync(txHash, vfxExit);
+            return (read.Ok, read.Info, read.Reason);
+        }
+
+        /// <summary>What the test seam's answer reads as: its texts for "not yet" are the ones the look-up gave before it had a verdict of its own.</summary>
+        private static BurnRead FromSeam((bool Ok, BurnEventInfo? Info, string Reason) answer) =>
+            new(answer.Ok ? BurnVerdict.Burned
+                : string.Equals(answer.Reason, PositionBeforeRules, StringComparison.Ordinal)
+                  || (answer.Reason ?? "").StartsWith("Could not read", StringComparison.OrdinalIgnoreCase)
+                  || (answer.Reason ?? "").IndexOf(BaseRpc.ReceiptNotFound, StringComparison.OrdinalIgnoreCase) >= 0 ? BurnVerdict.NotYet
+                : BurnVerdict.NotABurn, answer.Info, answer.Reason ?? "");
+
+        /// <summary>
+        /// The burn a burn id names, as Base holds it for good: read only from a receipt in a block that is final on Base
+        /// and still on its chain (<see cref="BaseRpc.AuthorizingReceiptAsync"/>). <see cref="BurnVerdict.NotYet"/> until
+        /// then, and while the positioned id it is asked by is not yet in force (<see cref="PositionBeforeRules"/>).
+        /// </summary>
+        public static async Task<BurnRead> ReadBurnAsync(string txHash, bool vfxExit)
+        {
+            if (BurnEventsForTests != null) return FromSeam(BurnEventsForTests(txHash, vfxExit));
+            if (!IsBridgeConfigured) return new BurnRead(BurnVerdict.NotABurn, null, "Bridge not configured");
+            if (string.IsNullOrWhiteSpace(txHash)) return new BurnRead(BurnVerdict.NotABurn, null, "Empty tx hash");
             var h = NormalizeTxHash(txHash);
-            var verdict = await BaseRpc.AuthorizingAskAsync<(bool Ok, BurnEventInfo? Info, string Reason)>(async (web3, _) =>
+            var verdict = await BaseRpc.AuthorizingReceiptAsync<BurnRead>(h, r =>
             {
-                var r = await web3.Eth.Transactions.GetTransactionReceipt.SendRequestAsync(h);
-                if (r == null) return BaseAnswer<(bool Ok, BurnEventInfo? Info, string Reason)>.No("receipt not found");
-                if (r.Status?.Value != 1) return BaseAnswer<(bool Ok, BurnEventInfo? Info, string Reason)>.Yes((false, null, "Base transaction did not succeed"));
+                if (r.Status?.Value != 1) return BaseAnswer<BurnRead>.Yes(new BurnRead(BurnVerdict.NotABurn, null, "Base transaction did not succeed"));
                 // No receipt.to check: the event decoders below filter on the emitting log address,
                 // which is what proves the burn came from the bridge contract (smart-contract
                 // wallets call it indirectly).
@@ -423,7 +471,7 @@ namespace VerifiedXCore.Bitcoin.Services
                 foreach (var ev in r.DecodeAllEvents<BaseBridgeExitWatchService.VfxExitBurnedEventDTO>())
                 {
                     if (!string.Equals(ev.Log.Address, ContractAddress, StringComparison.OrdinalIgnoreCase)) continue;
-                    if (!BaseRpc.IsExpectedChain(ev.Event.ChainId)) return BaseAnswer<(bool Ok, BurnEventInfo? Info, string Reason)>.No(BurnOnAnotherChain);
+                    if (!BaseRpc.IsExpectedChain(ev.Event.ChainId)) return BaseAnswer<BurnRead>.No(BurnOnAnotherChain);
                     var amt = ev.Event.Amount;
                     burns.Add((ev.Log.LogIndex?.Value ?? BigInteger.Zero, true, amt <= 0 || amt > long.MaxValue ? null
                         : new BurnEventInfo { AmountSats = (long)amt, Destination = ev.Event.VfxDestinationAddress?.Trim() ?? "", Burner = ev.Event.Burner ?? "" }));
@@ -431,15 +479,17 @@ namespace VerifiedXCore.Bitcoin.Services
                 foreach (var ev in r.DecodeAllEvents<BaseBridgeExitWatchService.BTCExitBurnedEventDTO>())
                 {
                     if (!string.Equals(ev.Log.Address, ContractAddress, StringComparison.OrdinalIgnoreCase)) continue;
-                    if (!BaseRpc.IsExpectedChain(ev.Event.ChainId)) return BaseAnswer<(bool Ok, BurnEventInfo? Info, string Reason)>.No(BurnOnAnotherChain);
+                    if (!BaseRpc.IsExpectedChain(ev.Event.ChainId)) return BaseAnswer<BurnRead>.No(BurnOnAnotherChain);
                     var amt = ev.Event.Amount;
                     burns.Add((ev.Log.LogIndex?.Value ?? BigInteger.Zero, false, amt <= 0 || amt > long.MaxValue ? null
                         : new BurnEventInfo { AmountSats = (long)amt, Destination = ev.Event.BtcDestination?.Trim() ?? "", Burner = ev.Event.Burner ?? "" }));
                 }
-                return BaseAnswer<(bool Ok, BurnEventInfo? Info, string Reason)>.Yes(
-                    BurnAt(burns.OrderBy(b => b.LogIndex).Select(b => (b.Vfx, b.Info)).ToList(), SplitBurnId(txHash).Position, vfxExit));
+                var (ok, info, reason) = BurnAt(burns.OrderBy(b => b.LogIndex).Select(b => (b.Vfx, b.Info)).ToList(), SplitBurnId(txHash).Position, vfxExit);
+                // A positioned id met before its rules is asked again once they are reached: not a verdict on the burn.
+                var notYet = !ok && string.Equals(reason, PositionBeforeRules, StringComparison.Ordinal);
+                return BaseAnswer<BurnRead>.Yes(new BurnRead(ok ? BurnVerdict.Burned : notYet ? BurnVerdict.NotYet : BurnVerdict.NotABurn, info, reason));
             });
-            return verdict.Answered ? verdict.Value : (false, null, $"Could not read Base receipt: {verdict.Reason}");
+            return verdict.Answered ? verdict.Value : new BurnRead(BurnVerdict.NotYet, null, $"{NotYetOnBase}: {verdict.Reason}");
         }
 
         /// <summary>
@@ -494,11 +544,15 @@ namespace VerifiedXCore.Bitcoin.Services
             return false;
         }
 
-        /// <summary>Best-effort: confirms a Base tx receipt exists and succeeded (legacy, pre-gate).</summary>
+        /// <summary>
+        /// Best-effort: confirms a Base tx receipt exists and succeeded (legacy, pre-gate). The rule it serves is also
+        /// judged in blocks below Globals.BridgeBurnBindingHeight, so it reads as it always did: the newest block, no
+        /// finality.
+        /// </summary>
         public static async Task<bool> HasSuccessfulReceiptAsync(string txHash)
         {
             if (string.IsNullOrWhiteSpace(txHash)) return false;
-            var succeeded = await BaseRpc.AuthorizingAskAsync<bool>(async (web3, _) =>
+            var succeeded = await BaseRpc.AuthorizingNewestAskAsync<bool>(async web3 =>
             {
                 var r = await web3.Eth.Transactions.GetTransactionReceipt.SendRequestAsync(txHash);
                 return r != null && r.Status?.Value == 1 ? BaseAnswer<bool>.Yes(true) : BaseAnswer<bool>.No("no successful receipt");
