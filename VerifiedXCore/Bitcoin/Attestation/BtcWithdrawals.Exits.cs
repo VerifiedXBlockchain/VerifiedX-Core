@@ -266,7 +266,7 @@ namespace VerifiedXCore.Bitcoin.Attestation
             if (parts.Where(p => p.State == VaultWithdrawalState.Waiting).Count(p => ClaimRememberedPayment(p, vfxHeight, db)) > 0)
                 parts = BtcAttestStore.ExitParts(anyPart.RequestHash, anyPart.RequestVfxHeight, db).OrderBy(p => p.Ref, StringComparer.Ordinal).ToList();
             var committed = parts.Any(p => p.State is VaultWithdrawalState.Pinned or VaultWithdrawalState.Settled);
-            if (!committed && parts.Any(p => p.State != VaultWithdrawalState.Waiting)) return false;
+            if (!committed && OpenParts(parts, vfxHeight, db).Any(p => p.State != VaultWithdrawalState.Waiting)) return false;
 
             var built = new List<(VaultWithdrawalRow Row, BtcCanonicalTx? Tx, string? Reason)>();
             foreach (var part in parts.Where(p => p.State == VaultWithdrawalState.Waiting))
@@ -391,15 +391,15 @@ namespace VerifiedXCore.Bitcoin.Attestation
         private static void ExpireExit(VaultWithdrawalRow anyPart, long vfxHeight, LiteDatabase? db)
         {
             var exitTxHash = anyPart.RequestHash;
-            var parts = BtcAttestStore.ExitParts(exitTxHash, anyPart.RequestVfxHeight, db).OrderBy(p => p.Ref, StringComparer.Ordinal).ToList();
+            var parts = OpenParts(BtcAttestStore.ExitParts(exitTxHash, anyPart.RequestVfxHeight, db).OrderBy(p => p.Ref, StringComparer.Ordinal), vfxHeight, db);
             if (parts.Count == 0 || parts.Any(p => p.State != VaultWithdrawalState.Waiting)) return;
             if (vfxHeight >= Globals.ExitPartTakeoverHeight && parts.Any(p => p.ReopenedAtBitcoinHeight > 0))
             {
                 if (parts.Any(p => VoidingSpendNotBuried(p, db))) return;
                 if (TryPinExit(anyPart, vfxHeight, db)) return; // buried: fixed again on its vault's free coins if it can be
                 // The attempt can settle a part by a payment already seen and still pin nothing: judge the parts as they are now.
-                parts = BtcAttestStore.ExitParts(exitTxHash, anyPart.RequestVfxHeight, db).OrderBy(p => p.Ref, StringComparer.Ordinal).ToList();
-                if (parts.Any(p => p.State != VaultWithdrawalState.Waiting)) return;
+                parts = OpenParts(BtcAttestStore.ExitParts(exitTxHash, anyPart.RequestVfxHeight, db).OrderBy(p => p.Ref, StringComparer.Ordinal), vfxHeight, db);
+                if (parts.Count == 0 || parts.Any(p => p.State != VaultWithdrawalState.Waiting)) return;
             }
 
             var why = $"it could not be pinned within {VBTCWithdrawalRequest.EXPIRY_BLOCKS} blocks ({string.Join("; ", parts.Select(p => $"{p.SmartContractUID}: {p.WaitingReason}"))})";
@@ -419,13 +419,22 @@ namespace VerifiedXCore.Bitcoin.Attestation
                 ErrorLogUtility.LogError($"Bridge exit {exitTxHash} expired but its record is not open; no locks restored.", "BtcWithdrawals.ExpireExit()");
                 return;
             }
-            foreach (var allocation in AllocationsOf(exit))
+            // A part closed as never payable gave its locks back when it was voided; only the open parts' locks come back here.
+            var openVaults = parts.Select(p => p.SmartContractUID).ToHashSet(StringComparer.Ordinal);
+            foreach (var allocation in AllocationsOf(exit).Where(a => vfxHeight < Globals.ExitPartTakeoverHeight || openVaults.Contains(VaultOfLock(a) ?? "")))
                 VBTCBridgeLockState.RestoreUnlock(allocation.LockId, allocation.UnlockAmount, SatsOf(allocation.UnlockAmount));
             exit.IsComplete = true;
             exit.BtcTxHash = $"{VBTCBridgeBtcExitState.FailedMarkerPrefix}expired@{vfxHeight}";
             VBTCBridgeBtcExitState.Update(exit);
             SCLogUtility.Log($"Bridge exit for burn {exit.BaseBurnTxHash} failed by rule at block {vfxHeight}: {why}. Its locks were restored.", "BtcWithdrawals.ExpireExit()");
         }
+
+        /// <summary>
+        /// The parts of an exit still to be paid or failed. From <see cref="Globals.ExitPartTakeoverHeight"/> a part closed
+        /// as never payable (<see cref="ClosedAsNeverPayable"/>) is finished: it does not stop the rest being fixed again or failed.
+        /// </summary>
+        private static List<VaultWithdrawalRow> OpenParts(IEnumerable<VaultWithdrawalRow> parts, long vfxHeight, LiteDatabase? db) =>
+            vfxHeight >= Globals.ExitPartTakeoverHeight ? parts.Where(p => !ClosedAsNeverPayable(p, vfxHeight, db)).ToList() : parts.ToList();
 
         /// <summary>A part reopened after its transactions were voided, whose voiding spend is not yet buried.</summary>
         private static bool VoidingSpendNotBuried(VaultWithdrawalRow part, LiteDatabase? db) =>
