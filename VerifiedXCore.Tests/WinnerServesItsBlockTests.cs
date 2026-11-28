@@ -71,8 +71,23 @@ namespace VerifiedXCore.Tests
             new Proof { Address = Candidate, BlockHeight = Tip + 1, PreviousBlockHash = TipHash, ProofHash = "candidate-proof", IPAddress = CandidateIp };
 
         /// <summary>The candidate answers a request for its block by the request path's last segment.</summary>
-        private static void CandidateAnswers(Func<string, string?> blockBody, int delayMs = 0) =>
-            Globals.HttpClientFactory = new Producer(blockBody, delayMs);
+        private static Producer CandidateAnswers(Func<string, string?> blockBody, int delayMs = 0) =>
+            CandidateAnswers(blockBody, _ => delayMs);
+
+        private static Producer CandidateAnswers(Func<string, string?> blockBody, Func<string, int> delayFor)
+        {
+            var producer = new Producer(blockBody, delayFor);
+            Globals.HttpClientFactory = producer;
+            return producer;
+        }
+
+        /// <summary>The candidate as this caster knows it: not seen lately, so its version is asked for.</summary>
+        private static NetworkValidator KnownCandidate()
+        {
+            var nv = new NetworkValidator { Address = Candidate, IPAddress = CandidateIp, IsFullyTrusted = true, LastSeen = 0, CheckFailCount = 0 };
+            Globals.NetworkValidators[Candidate] = nv;
+            return nv;
+        }
 
         [Fact]
         public async Task ACandidateThatAnswersTheCheckButServesTheFetchNoBlock_FailsTheCheck()
@@ -109,26 +124,59 @@ namespace VerifiedXCore.Tests
             Assert.Null(ProofUtility.VerifiedDraftOf(Candidate, Tip + 1));
         }
 
+        /// <summary>
+        /// When its budget runs out the check is over: it has returned, no request of it is still running or sent after,
+        /// and it changes nothing afterwards (a cached height, a served block, the kept block).
+        /// </summary>
         [Fact]
-        public async Task TheCheckTakesNoLongerThanItsBudget()
+        public async Task TheCheckTakesNoLongerThanItsBudget_AndNothingOfItRunsAfter()
         {
-            var body = JsonConvert.SerializeObject(Draft());
-            CandidateAnswers(_ => body, delayMs: 1_200); // each request answers slowly: five of them take 6 s
+            var draft = Draft();
+            var body = JsonConvert.SerializeObject(draft);
+            var nv = KnownCandidate();
+            var producer = CandidateAnswers(_ => body, delayMs: 1_200); // each request answers slowly: all of them take 6 s
 
             var sw = Stopwatch.StartNew();
             var (passed, _) = await ProofUtility.VerifyWinnerAvailability(CandidateProof(), Tip + 1, 2_000);
             sw.Stop();
+            var sentByThen = producer.Requests;
 
             Assert.False(passed);
             Assert.InRange(sw.ElapsedMilliseconds, 1_900, 3_000);
+            await Task.Delay(5_000); // longer than the rest of the check would have taken
+            Assert.Equal(sentByThen, producer.Requests);
+            Assert.Equal(0, producer.InFlight);
+            Assert.Equal(0, nv.LastKnownHeight);       // the height asked for when the budget ran out is not cached
+            Assert.False(ProofUtility.WasServedByItsProducer(draft));
+            Assert.Null(ProofUtility.VerifiedDraftOf(Candidate, Tip + 1));
+        }
+
+        /// <summary>A version request cut off by the budget is not counted against the candidate, then or later.</summary>
+        [Fact]
+        public async Task AVersionRequestCutOffByTheBudget_CountsNothingAgainstTheCandidate()
+        {
+            var nv = KnownCandidate();
+            var producer = CandidateAnswers(_ => JsonConvert.SerializeObject(Draft()), path => path.EndsWith("/GetWalletVersion") ? 3_500 : 0);
+
+            var (passed, _) = await ProofUtility.VerifyWinnerAvailability(CandidateProof(), Tip + 1, 1_000);
+
+            Assert.False(passed);
+            await Task.Delay(3_500); // past the version request's own timeout
+            Assert.Equal(0, nv.CheckFailCount);
+            Assert.Equal(1, producer.Requests);
+            Assert.Equal(0, producer.InFlight);
         }
 
         /// <summary>A candidate's validator API: current version, at the tip, ready, and its block by path suffix.</summary>
         private sealed class Producer : IHttpClientFactory
         {
             private readonly Func<string, string?> _blockBody;
-            private readonly int _delayMs;
-            public Producer(Func<string, string?> blockBody, int delayMs) { _blockBody = blockBody; _delayMs = delayMs; }
+            private readonly Func<string, int> _delayFor;
+            private int _requests, _inFlight;
+            public Producer(Func<string, string?> blockBody, Func<string, int> delayFor) { _blockBody = blockBody; _delayFor = delayFor; }
+            /// <summary>Requests received, and requests received and not yet answered or cancelled.</summary>
+            public int Requests => Volatile.Read(ref _requests);
+            public int InFlight => Volatile.Read(ref _inFlight);
             public HttpClient CreateClient(string name) => new HttpClient(new Handler(this));
 
             private sealed class Handler : HttpMessageHandler
@@ -137,8 +185,11 @@ namespace VerifiedXCore.Tests
                 public Handler(Producer p) => _p = p;
                 protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
                 {
-                    if (_p._delayMs > 0) await Task.Delay(_p._delayMs, ct);
                     var path = request.RequestUri!.AbsolutePath;
+                    Interlocked.Increment(ref _p._requests);
+                    Interlocked.Increment(ref _p._inFlight);
+                    try { if (_p._delayFor(path) is var wait && wait > 0) await Task.Delay(wait, ct); }
+                    finally { Interlocked.Decrement(ref _p._inFlight); }
                     string? body = null;
                     if (path.EndsWith("/GetWalletVersion")) body = "99.0.0";
                     else if (path.EndsWith("/GetBlockHeight")) body = Tip.ToString();
