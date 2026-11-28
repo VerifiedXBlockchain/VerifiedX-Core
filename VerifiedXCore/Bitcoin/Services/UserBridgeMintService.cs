@@ -203,6 +203,8 @@ namespace VerifiedXCore.Bitcoin.Services
             }
             try
             {
+                // A run that waited behind another finds what that one left: a lock it minted is not collected for again.
+                if (BridgeLockRecord.GetByLockId(lockId)?.Status == BridgeLockStatus.Minted) return;
                 await CollectAndMintOnce(record, tag, collect, submit);
             }
             finally { MintsUnderWay.TryRemove(lockId, out _); }
@@ -657,6 +659,9 @@ namespace VerifiedXCore.Bitcoin.Services
         {
             try
             {
+                // Before anything is written: a retry turned away must not change the lock a mint is working on.
+                if (MintIsUnderWay(lockId))
+                    return (false, "A mint of this lock is already under way. Check bridge history for status.");
                 if (!BaseBridgeService.IsBridgeConfigured)
                     return (false, "Base bridge not configured. Set BaseBridgeContract in config.");
 

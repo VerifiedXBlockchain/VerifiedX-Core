@@ -241,7 +241,7 @@ namespace VerifiedXCore.Tests
         [Fact]
         public async Task OneMintOfALockRunsAtATime()
         {
-            var record = NewLock(BridgeLockStatus.Locked);
+            var record = NewLock(BridgeLockStatus.AttestationPending);
             var firstIsCollecting = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
             var letFirstGoOn = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
             var sends = 0;
@@ -264,10 +264,14 @@ namespace VerifiedXCore.Tests
                 () => { secondCollected++; return Task.FromResult<(Dictionary<string, string>?, int)>((new Dictionary<string, string> { ["s"] = "0xsig" }, 1)); },
                 () => SubmitMintWithProofAsUser(record, "xOwner", "0xbase"));
             var (ok, message) = await RetryMintForLock(record.LockId, "xOwner");
+            var (forced, forcedMessage) = await ForceRetryMintForLock(record.LockId, "xOwner");
 
             Assert.Equal(0, secondCollected);
             Assert.False(ok);
             Assert.Contains("already under way", message);
+            Assert.False(forced);
+            Assert.Contains("already under way", forcedMessage);
+            Assert.Equal(BridgeLockStatus.AttestationPending, Stored(record).Status); // neither retry rewrote the lock the mint is working on
 
             letFirstGoOn.SetResult(true);
             await first;
@@ -276,5 +280,70 @@ namespace VerifiedXCore.Tests
             Assert.False(MintIsUnderWay(record.LockId));
         }
 
+
+        [Fact]
+        public async Task ARunThatWaitedBehindAnother_DoesNotCollectForALockThatOneMinted()
+        {
+            var record = NewLock(BridgeLockStatus.Minted);
+            var collected = 0;
+            await CollectAndMint(record, "",
+                () => { collected++; return Task.FromResult<(Dictionary<string, string>?, int)>((new Dictionary<string, string> { ["s"] = "0xsig" }, 1)); },
+                () => SubmitMintWithProofAsUser(record, "xOwner", "0xbase"));
+
+            Assert.Equal(0, collected);
+            Assert.Equal(BridgeLockStatus.Minted, Stored(record).Status);
+        }
+
+        // ── The caster's own submission of a mint ───────────────────────────────────────────────────────────
+
+        [Fact]
+        public async Task ACastersSentMint_IsMintedOnlyOnceBaseHoldsIt_AndIsSubmittedAgainOtherwise()
+        {
+            LockMintedOnBaseForTests = _ => Task.FromResult<bool?>(false);
+
+            var inABlock = NewLock(BridgeLockStatus.ProofSubmitted, "0xa");
+            await BaseBridgeMintSubmissionService.ResolveSentMintAsync(inABlock.LockId, "0xa", receipt: true);
+            Assert.Equal(BridgeLockStatus.Minted, Stored(inABlock).Status);
+
+            var inNoBlock = NewLock(BridgeLockStatus.ProofSubmitted, "0xb");
+            await BaseBridgeMintSubmissionService.ResolveSentMintAsync(inNoBlock.LockId, "0xb", receipt: null);
+            Assert.Equal(BridgeLockStatus.AttestationReady, Stored(inNoBlock).Status); // the caster's loop submits it again
+            Assert.Null(Stored(inNoBlock).FinalizedAtUtc);
+
+            var reverted = NewLock(BridgeLockStatus.ProofSubmitted, "0xc");
+            await BaseBridgeMintSubmissionService.ResolveSentMintAsync(reverted.LockId, "0xc", receipt: false);
+            Assert.Equal(BridgeLockStatus.AttestationReady, Stored(reverted).Status);
+
+            // Reverted, or in no block, because another submission of the lock was there first: minted.
+            LockMintedOnBaseForTests = _ => Task.FromResult<bool?>(true);
+            var mintedByAnother = NewLock(BridgeLockStatus.ProofSubmitted, "0xd");
+            await BaseBridgeMintSubmissionService.ResolveSentMintAsync(mintedByAnother.LockId, "0xd", receipt: false);
+            Assert.Equal(BridgeLockStatus.Minted, Stored(mintedByAnother).Status);
+        }
+
+        [Fact]
+        public async Task ASentMintNobodyFollowsAnyMore_IsLookedAtAgain()
+        {
+            // The node restarted while mints were sent and not yet in a block.
+            var now = TimeUtil.GetTime();
+            BridgeLockRecord Sent(string hash, long relayedAt)
+            {
+                var record = NewLock(BridgeLockStatus.ProofSubmitted, hash);
+                record.RelayedAtUtc = relayedAt;
+                BridgeLockRecord.Save(record);
+                return record;
+            }
+            var included = Sent("0xincluded", now - BaseBridgeMintSubmissionService.SentMintFollowedSeconds - 5);
+            var lost = Sent("0xlost", now - BaseBridgeMintSubmissionService.SentMintFollowedSeconds - 5);
+            var recent = Sent("0xrecent", now - 30);
+            MintReceiptForTests = hash => Task.FromResult<bool?>(hash == "0xincluded" ? true : null);
+            LockMintedOnBaseForTests = _ => Task.FromResult<bool?>(false);
+
+            Assert.Equal(2, await BaseBridgeMintSubmissionService.ResolveUnfollowedSentMintsAsync(now));
+
+            Assert.Equal(BridgeLockStatus.Minted, Stored(included).Status);
+            Assert.Equal(BridgeLockStatus.AttestationReady, Stored(lost).Status);
+            Assert.Equal(BridgeLockStatus.ProofSubmitted, Stored(recent).Status); // still being followed
+        }
     }
 }
