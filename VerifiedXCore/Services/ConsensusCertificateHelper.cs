@@ -27,6 +27,8 @@ namespace VerifiedXCore.Services
         /// </summary>
         internal static async Task<string?> WhyNotSign(Block block)
         {
+            if (MembershipChain.ActivationSigningRefusal(block) is { } reverts)
+                return reverts;
             var tip = Globals.LastBlock;
             if (tip != null && tip.Height == block.Height && tip.Hash == block.Hash)
                 return null; // committed here, so validated here

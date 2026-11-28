@@ -60,6 +60,39 @@ namespace VerifiedXCore.Tests
             Assert.Equal(demotion.RecordHash, MembershipChain.RecordFor(Tip + 1)!.RecordHash);
         }
 
+        /// <summary>
+        /// An election took effect after the anchor was pinned and before the chain started: it rode on the block at its
+        /// effective height, which this chain holds. The run that starts the chain keeps it, so the chain starts with the
+        /// elected committee and not the older one, which may have no live signers left. A run that claims an election the
+        /// chain's block does not carry is refused, and a caster holding the election does not certify a start without it.
+        /// </summary>
+        [Fact]
+        public async Task AnElectionBeforeTheStart_IsKept_NotReverted()
+        {
+            var priorVree = Globals.VreeActivationHeight;
+            Globals.VreeActivationHeight = 1;
+            try
+            {
+                await AtTheHeight();
+                var election = Record(_anchor.RecordSeq + 1, 60, _anchor.RecordHash, Casters.Skip(1), VreeElection.EmergencyElectionChangeType);
+                BlockchainData.GetBlocks().InsertSafe(new Block { Height = 60, Hash = "h60-election", Transactions = new List<Transaction>(), MembershipRecord = election });
+                Hold(election);
+
+                var withoutIt = NextBlock(null, new List<CasterMembershipRecord> { _anchor });
+                Assert.NotNull(MembershipChain.ActivationSigningRefusal(withoutIt));    // a caster holding it does not certify this start
+                var notCarried = Record(_anchor.RecordSeq + 1, 61, _anchor.RecordHash, Casters.Skip(1), VreeElection.EmergencyElectionChangeType);
+                Assert.Contains("does not carry it", MembershipChain.RunRefusal(NextBlock(null, new List<CasterMembershipRecord> { _anchor, notCarried })) ?? "");
+
+                var block = await Craft();
+
+                Assert.Equal(new[] { _anchor.RecordHash, election.RecordHash }, block.MembershipRun!.Select(r => r.RecordHash));
+                Assert.Null(MembershipChain.ActivationSigningRefusal(block));
+                await Commit(block, null);
+                Assert.Equal(election.RecordHash, MembershipChain.RecordFor(Tip + 1)!.RecordHash);
+            }
+            finally { Globals.VreeActivationHeight = priorVree; }
+        }
+
         [Fact]
         public async Task AProducerWithoutTheAnchor_StartsNothing_AndItsBlockIsTaken()
         {

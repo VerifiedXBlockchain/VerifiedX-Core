@@ -238,6 +238,16 @@ namespace VerifiedXCore.Services
             for (var i = from; i < run.Count; i++)
             {
                 var r = run[i];
+                if (activation && IsCarriedType(r.ChangeType))
+                {
+                    // An election or a seed reset that took effect before the chain started is kept, not reverted.
+                    if (r.RecordSeq != prev.RecordSeq + 1 || !string.Equals(r.PrevRecordHash, prev.RecordHash, StringComparison.OrdinalIgnoreCase))
+                        return $"seq {r.RecordSeq} does not extend the chain's record seq {prev.RecordSeq}";
+                    if (PreChainReplacementRefusal(r, prev, block.Height) is { } notKept) return $"seq {r.RecordSeq}: {notKept}";
+                    chained.Add(r);
+                    prev = r;
+                    continue;
+                }
                 if (!IsRunType(r.ChangeType)) return $"seq {r.RecordSeq}: a {r.ChangeType} record is not carried in a run";
                 if (r.RecordSeq != prev.RecordSeq + 1 || !string.Equals(r.PrevRecordHash, prev.RecordHash, StringComparison.OrdinalIgnoreCase))
                     return $"seq {r.RecordSeq} does not extend the chain's record seq {prev.RecordSeq}";
@@ -250,6 +260,46 @@ namespace VerifiedXCore.Services
                 chained.Add(r);
                 prev = r;
             }
+            return null;
+        }
+
+        /// <summary>
+        /// Why an election or seed reset in the run that starts the chain is not one that took effect before it, or null. An
+        /// election rode on the block at its effective height, which this chain holds: that block must carry exactly this
+        /// record. A seed reset rode on no block before the chain: it must be the hard-coded seed set with two seed
+        /// signatures (each seed checked the stall on its own clock before signing). Either took effect before this block.
+        /// </summary>
+        private static string? PreChainReplacementRefusal(CasterMembershipRecord r, CasterMembershipRecord prev, long height)
+        {
+            if (CasterMembershipStore.FieldHoldingTheSeparator(r) is { } f) return $"its {f} holds the payload separator";
+            if (CasterMembershipStore.ComputeRecordHash(r) != r.RecordHash) return "its fields do not hash to its record hash";
+            if (r.EffectiveFromHeight >= height) return $"it takes effect at {r.EffectiveFromHeight}, not before this block";
+            if (r.EffectiveFromHeight <= prev.EffectiveFromHeight) return "effective height not advancing";
+            if (r.ChangeType == CasterMembershipStore.BootstrapResetChangeType)
+                return CasterMembershipStore.ValidateBootstrapReset(r, long.MaxValue, out var why) ? null : why;
+            if (!VreeElection.Active(r.EffectiveFromHeight)) return "elections are not active at its height";
+            var carrier = BlockchainData.GetBlockByHeight(r.EffectiveFromHeight);
+            return carrier?.MembershipRecord != null && string.Equals(carrier.MembershipRecord.RecordHash, r.RecordHash, StringComparison.OrdinalIgnoreCase)
+                ? null : $"this chain's block at {r.EffectiveFromHeight} does not carry it";
+        }
+
+        /// <summary>
+        /// A caster's refusal to certify the block that starts the chain when its run would put in force a committee older
+        /// than an election or seed reset this node holds: that record cannot be carried later (it rides only on the block at
+        /// its effective height), so the chain would start with a committee that may no longer have live signers. The
+        /// certifying committee holds what replaced it, so a run that leaves it out is not certified. Null otherwise.
+        /// Caster side only (ConsensusCertificateHelper, ConsensusAttestationPublisher): no block verdict reads it.
+        /// </summary>
+        public static string? ActivationSigningRefusal(Block block)
+        {
+            if (block?.MembershipRun is not { Count: > 0 } run || !Configured || block.Height < Globals.MembershipChainHeight) return null;
+            if (ChainBefore(block.Height) != null) return null; // not the block that starts the chain
+            var last = run[^1];
+            var held = CasterMembershipStore.HeldForHeight(block.Height);
+            if (held == null || held.RecordSeq <= last.RecordSeq) return null;
+            for (var seq = last.RecordSeq + 1; seq <= held.RecordSeq; seq++)
+                if (CasterMembershipStore.GetBySeq(seq) is { } skipped && IsCarriedType(skipped.ChangeType))
+                    return $"the run that starts the membership chain ends at seq {last.RecordSeq} and leaves out the {skipped.ChangeType} seq {skipped.RecordSeq} in force here";
             return null;
         }
 

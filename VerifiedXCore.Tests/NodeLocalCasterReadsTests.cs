@@ -65,15 +65,19 @@ namespace VerifiedXCore.Tests
             ["Services/MembershipChain.cs"] = new()
             {
                 // The committee as the chain carried it. Only the store's pure checks of a record's own fields and
-                // signatures, and a name: nothing this node holds.
-                ["CasterMembershipStore.BootstrapResetChangeType"] = 1,
-                ["CasterMembershipStore.ComputeRecordHash"] = 1,
-                ["CasterMembershipStore.FieldHoldingTheSeparator"] = 1,
+                // signatures (a run's records, and an election or seed reset the run that starts the chain keeps), and a
+                // name: nothing this node holds.
+                ["CasterMembershipStore.BootstrapResetChangeType"] = 2,
+                ["CasterMembershipStore.ComputeRecordHash"] = 2,
+                ["CasterMembershipStore.FieldHoldingTheSeparator"] = 2,
                 ["CasterMembershipStore.ValidateSuccessor"] = 1,
+                ["CasterMembershipStore.ValidateBootstrapReset"] = 1,
                 // A producer offers the records it holds (AttachPending); each is judged as every verifier judges it, and a
-                // block without them is taken, so what one node holds never decides a verdict.
+                // block without them is taken, so what one node holds never decides a verdict. A caster declines to certify
+                // a start that leaves out an election or reset it holds (ActivationSigningRefusal): its signature only.
                 ["CasterMembershipStore.GetSince"] = 1,
-                ["CasterMembershipStore.GetBySeq"] = 1,
+                ["CasterMembershipStore.GetBySeq"] = 2,
+                ["CasterMembershipStore.HeldForHeight"] = 1,
                 // After a block is written this node's records are brought to the chain's (a write; no verdict reads it).
                 ["CasterMembershipStore.FollowChain"] = 1,
             },
