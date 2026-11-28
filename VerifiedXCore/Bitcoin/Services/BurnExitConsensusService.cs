@@ -332,25 +332,35 @@ namespace VerifiedXCore.Bitcoin.Services
         /// <summary>
         /// The burns of a sweep that still need a round. A pending burn this node has sent nothing for, and whose
         /// redemption the chain has completed (the pool unlock is applied, or Bitcoin has paid the exit), was paid through
-        /// another caster's round: it is dropped, not put to rounds nobody else joins. An exit the chain still holds open
-        /// is kept: it may fail and need a new round.
+        /// another caster's round: it is not put to rounds nobody else joins. A pool unlock is held as complete and
+        /// watched like any other seen on chain, so that this caster still knows the burn, and votes on it, if a
+        /// reorganisation removes the payment; any other is dropped. An exit the chain still holds open is kept as it
+        /// is: it may fail and need a new round.
         /// </summary>
         internal static List<ProcessedBurnRecord> WithoutRedeemed(List<ProcessedBurnRecord> sweep, Func<string, bool>? redeemed = null)
         {
             var kept = new List<ProcessedBurnRecord>();
+            var tip = Globals.LastBlock?.Height ?? 0;
             foreach (var record in sweep)
             {
-                bool dropped;
+                bool paid, dropped = false;
                 lock (record.Sync) // a round starts under it: one that has started keeps its record
                 {
-                    dropped = record.Status == BurnExitStatus.Pending && record.CompletionVfxTxHash.Length == 0 && record.BtcTxHash.Length == 0
-                        && (redeemed ?? RedemptionIsComplete)(record.BaseBurnTxHash)
-                        && _processedBurns.TryRemove(new KeyValuePair<string, ProcessedBurnRecord>(record.BaseBurnTxHash, record));
+                    paid = record.Status == BurnExitStatus.Pending && record.CompletionVfxTxHash.Length == 0 && record.BtcTxHash.Length == 0
+                        && (redeemed ?? RedemptionIsComplete)(record.BaseBurnTxHash);
+                    if (paid && record.ExitType == BurnExitType.VfxPoolUnlock)
+                    {
+                        record.Status = BurnExitStatus.Complete;
+                        record.RedemptionSeenAtBlock = Math.Max(1, tip);
+                        record.RedemptionMissingSinceBlock = 0;
+                    }
+                    else if (paid)
+                        dropped = _processedBurns.TryRemove(new KeyValuePair<string, ProcessedBurnRecord>(record.BaseBurnTxHash, record));
                 }
-                if (!dropped) { kept.Add(record); continue; }
+                if (!paid) { kept.Add(record); continue; }
                 _proposals.TryRemove(record.BaseBurnTxHash, out _);
                 _confirmations.TryRemove(record.BaseBurnTxHash, out _);
-                LogUtility.Log($"[BurnExitConsensus] {record.BaseBurnTxHash} is redeemed on chain; its pending record is dropped.", "BurnExitConsensusService");
+                LogUtility.Log($"[BurnExitConsensus] {record.BaseBurnTxHash} is redeemed on chain; its pending record is {(dropped ? "dropped" : "complete")}.", "BurnExitConsensusService");
             }
             return kept;
         }
@@ -1700,8 +1710,9 @@ namespace VerifiedXCore.Bitcoin.Services
             return reopened;
         }
 
-        /// <summary>Whether the node's state is as its chain has it: not being restored, replayed or caught up.</summary>
-        private static bool StateIsSettled() => Globals.IsChainSynced && !Globals.IsResyncing && !Globals.StopAllTimers;
+        /// <summary>Whether the node's state is as its chain has it: not being restored, replayed or caught up, and not downloading a replacement branch.</summary>
+        private static bool StateIsSettled() =>
+            Globals.IsChainSynced && !Globals.IsResyncing && !Globals.StopAllTimers && !VerifiedXCore.Utilities.ForkRecoveryUtility.IsInDownloadPhase;
 
         /// <summary>Whether the chain's record of redeemed burns holds this burn; null when it could not be read.</summary>
         private static bool? RedeemedOrUnknown(string baseBurnTxHash)
@@ -1715,9 +1726,9 @@ namespace VerifiedXCore.Bitcoin.Services
         /// this caster's record of it, left where its round ended, is not taken for an exit that stopped and put to new
         /// rounds. True when it was marked complete.
         /// </summary>
-        internal static bool FollowRedemptionOnChain(ProcessedBurnRecord record, long currentBlock, Func<string, bool>? redeemed = null)
+        internal static bool FollowRedemptionOnChain(ProcessedBurnRecord record, long currentBlock, Func<ProcessedBurnRecord, bool>? redeemed = null)
         {
-            if (!(redeemed ?? RedemptionIsComplete)(record.BaseBurnTxHash)) return false;
+            if (!(redeemed ?? RedemptionIsCompleteFor)(record)) return false;
             lock (record.Sync)
             {
                 record.Status = BurnExitStatus.Complete;
@@ -1725,6 +1736,18 @@ namespace VerifiedXCore.Bitcoin.Services
             }
             LogUtility.Log($"[BurnExitConsensus] {record.BaseBurnTxHash} is redeemed on chain; this caster's record of it is complete.", "BurnExitConsensusService");
             return true;
+        }
+
+        /// <summary>
+        /// Whether the chain has finished paying this record's burn. A pool unlock: the burn is in the record of redeemed
+        /// burns. A Bitcoin exit: its exit on chain is complete; a burn is recorded as redeemed once Bitcoin has paid
+        /// the first vault's part, while the exit stays open until every part is paid.
+        /// </summary>
+        private static bool RedemptionIsCompleteFor(ProcessedBurnRecord record)
+        {
+            if (record.ExitType != BurnExitType.BtcExit) return RedemptionIsComplete(record.BaseBurnTxHash);
+            try { return VBTCBridgeBtcExitState.GetByBurnHash(record.BaseBurnTxHash) is { IsComplete: true, IsFailedRecord: false }; }
+            catch { return false; }
         }
 
         internal static async Task RetryUnminedPoolUnlocks(long currentBlock)

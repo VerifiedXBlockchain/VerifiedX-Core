@@ -176,6 +176,43 @@ namespace VerifiedXCore.Tests
         }
 
         [Fact]
+        public void ABitcoinExitWithOnlyOnePartPaid_IsNotCompleteYet_AndIsOnceTheChainsExitIs()
+        {
+            // Bitcoin has paid one vault's part: the burn is recorded as redeemed, the exit on chain is still open.
+            var exit = Track(32, BurnExitType.BtcExit, BurnExitStatus.VfxTxCreated);
+            VBTCBridgeBtcExitState.GetCollection().Insert(new VBTCBridgeBtcExitState { BaseBurnTxHash = exit.BaseBurnTxHash, ExitTxHash = "exit-tx" });
+            Assert.True(VBTCBridgeConsumedBurn.TryMarkConsumed(exit.BaseBurnTxHash, "BTC_EXIT_COMPLETE", "report", 950));
+
+            Assert.False(FollowRedemptionOnChain(exit, 1_000));
+            Assert.Equal(BurnExitStatus.VfxTxCreated, exit.Status);
+
+            var onChain = VBTCBridgeBtcExitState.GetByBurnHash(exit.BaseBurnTxHash)!;
+            onChain.IsComplete = true;
+            VBTCBridgeBtcExitState.GetCollection().Update(onChain);
+            Assert.True(FollowRedemptionOnChain(exit, 1_000));
+            Assert.Equal(BurnExitStatus.Complete, exit.Status);
+        }
+
+        [Fact]
+        public void APendingPoolUnlockAnotherCasterPaid_IsHeldAndWatched_SoItIsVotedOnAgainIfTheChainLosesIt()
+        {
+            // This caster's round fell short; another caster's unlock then paid the burn.
+            var paid = Track(33, BurnExitType.VfxPoolUnlock, BurnExitStatus.Pending);
+            Assert.True(VBTCBridgeConsumedBurn.TryMarkConsumed(paid.BaseBurnTxHash, "POOL_UNLOCK", "handlers-tx", 995));
+
+            Assert.Empty(WithoutRedeemed(new List<ProcessedBurnRecord> { paid })); // no round for it
+            Assert.Same(paid, ProcessedBurnForTests(paid.BaseBurnTxHash));          // and the caster still knows the burn
+            Assert.Equal(BurnExitStatus.Complete, paid.Status);
+            Assert.Equal(1_000, paid.RedemptionSeenAtBlock);
+
+            // A reorganisation removes that payment: found missing twice, the burn is pending here again.
+            VBTCBridgeConsumedBurn.GetCollection().DeleteAll();
+            Assert.Equal(0, ReopenUnlocksTheChainLost(1_001, stateIsSettled: () => true));
+            Assert.Equal(1, ReopenUnlocksTheChainLost(1_001 + RedemptionMissingBlocks, stateIsSettled: () => true));
+            Assert.Equal(BurnExitStatus.Pending, paid.Status);
+        }
+
+        [Fact]
         public void ABurnTheChainHasNotPaid_IsStillTakenForStuck()
         {
             var unpaid = Track(31, BurnExitType.VfxPoolUnlock, BurnExitStatus.ConsensusReached);
