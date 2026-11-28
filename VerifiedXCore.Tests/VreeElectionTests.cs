@@ -2573,12 +2573,15 @@ namespace VerifiedXCore.Tests
         /// five blocks below the record, so the record cannot be adopted yet; then the download brings the tip to the block
         /// before it.
         /// </summary>
-        private async Task PeersHoldWhileBehind(CasterMembershipRecord record)
+        private Task PeersHoldWhileBehind(CasterMembershipRecord record) => PeersAnswerWhileBehind(_ => new List<CasterMembershipRecord> { record });
+
+        /// <summary>As <see cref="PeersHoldWhileBehind"/>, each peer answering with what <paramref name="answer"/> gives for its address.</summary>
+        private async Task PeersAnswerWhileBehind(Func<string, List<CasterMembershipRecord>> answer)
         {
             var tip = Globals.LastBlock;
             StallAt(H - 5, 400);
-            CasterDiscoveryService.FetchMembershipResponse = (_, _) => Task.FromResult<MembershipRecordResponse?>(
-                new MembershipRecordResponse { HeadSeq = record.RecordSeq, Records = new List<CasterMembershipRecord> { record } });
+            CasterDiscoveryService.FetchMembershipResponse = (ip, _) => Task.FromResult<MembershipRecordResponse?>(
+                new MembershipRecordResponse { HeadSeq = HeadSeq + 1, Records = answer(ip) });
             ValidatorMembershipPull.ResetForTests();
             Assert.True(await ValidatorMembershipPull.PullIfDueAsync());
             Assert.Equal(_head.RecordHash, CasterMembershipStore.GetCurrent()!.RecordHash); // too far ahead to be adopted
@@ -2706,6 +2709,57 @@ namespace VerifiedXCore.Tests
             Assert.Same(served, CarriedRecordCompletion.PreferSource(H + 1, served, new[] { served })); // nobody else has it
 
             await Download(PassedOn(block, record: true, certificate: true), other.NodeIP);
+
+            Assert.Equal(H + 1, Globals.LastBlock.Height);
+            Assert.Equal(record.RecordHash, CasterMembershipStore.GetCurrent()!.RecordHash);
+        }
+
+        /// <summary>
+        /// Copies of the record with signatures that are not their signers' (the record hash leaves the signatures out, so
+        /// each is a copy of the real record) reach this node first, two from every peer, more than a height has places
+        /// for. None is kept, the record as its electors signed it is kept from the next pull, and the copy of the block
+        /// without it is given it back.
+        /// </summary>
+        [Fact]
+        public async Task CopiesOfTheRecordWithBadSignatures_DoNotKeepOutTheOneItsElectorsSigned()
+        {
+            var record = Ratified(0);
+            var junk = 0;
+            CasterMembershipRecord BadlySigned()
+            {
+                var copy = JsonConvert.DeserializeObject<CasterMembershipRecord>(JsonConvert.SerializeObject(record))!;
+                var signer = Of(copy.Signatures![0].SignerAddress);
+                copy.Signatures[0].Signature = SignatureService.CreateSignature($"not-the-record-{++junk}", signer.Key, signer.Pub);
+                Assert.Equal(record.RecordHash, CasterMembershipStore.ComputeRecordHash(copy));
+                return copy;
+            }
+            await PeersAnswerWhileBehind(_ => new List<CasterMembershipRecord> { BadlySigned(), BadlySigned() });
+            Assert.True(junk > CarriedRecordCompletion.MaxPerHeight);
+            await PeersHoldWhileBehind(record);
+            var block = Served(Members(record).Take(3), record);
+
+            await Download(PassedOn(block, record: false, certificate: true), "10.0.0.201");
+
+            Assert.Equal(H + 1, Globals.LastBlock.Height);
+            Assert.Equal(record.RecordHash, CasterMembershipStore.GetCurrent()!.RecordHash);
+        }
+
+        /// <summary>
+        /// One peer answers with eight copies, each signed by keys of its own (every signature its signer's, none an
+        /// elector's): it takes two places at the height, and the record another peer holds still finds one.
+        /// </summary>
+        [Fact]
+        public async Task OnePeersCopies_TakeTwoPlacesAtAHeight_AndTheRecordAnotherPeerHoldsStillFitsIn()
+        {
+            var record = Ratified(0);
+            var strangers = Enumerable.Range(0, 8).Select(_ => new[] { NewMember(), NewMember() }).ToList();
+            var own = strangers.Select(keys => Signed(JsonConvert.DeserializeObject<CasterMembershipRecord>(JsonConvert.SerializeObject(record))!, keys)).ToList();
+            var greedy = _committee[0].Ip;
+            await PeersAnswerWhileBehind(ip => ip == greedy ? own : new List<CasterMembershipRecord>());
+            await PeersAnswerWhileBehind(ip => ip == _committee[1].Ip ? new List<CasterMembershipRecord> { record } : new List<CasterMembershipRecord>());
+            var block = Served(Members(record).Take(3), record);
+
+            await Download(PassedOn(block, record: false, certificate: true), "10.0.0.201");
 
             Assert.Equal(H + 1, Globals.LastBlock.Height);
             Assert.Equal(record.RecordHash, CasterMembershipStore.GetCurrent()!.RecordHash);
