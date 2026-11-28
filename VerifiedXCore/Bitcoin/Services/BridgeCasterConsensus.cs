@@ -247,15 +247,85 @@ namespace VerifiedXCore.Bitcoin.Services
         }
 
         /// <summary>
+        /// What a vote must also meet to count for one attempt at a burn's redemption (from
+        /// Globals.BridgeVotesBoundToAttemptHeight): it names <paramref name="Submitter"/> as the handler its caster agreed
+        /// to, under that caster's handler signature, and its timestamp is within [<paramref name="NotBefore"/>,
+        /// <paramref name="NotAfter"/>].
+        /// </summary>
+        public sealed record VoteAttempt(string Submitter, long NotBefore, long NotAfter);
+
+        /// <summary>
+        /// The oldest a counted vote may be against its block's timestamp: the age a transaction may have, and the margin a
+        /// block's timestamp is allowed (LedgerIntegrityRules.TimestampOutsideItsBlock). A caster builds its transaction
+        /// right after its round, so an honest vote is about as old as the transaction that carries it.
+        /// </summary>
+        public const long VoteMaxAgeSeconds = Globals.MaxTxAgeSeconds + LedgerIntegrityRules.BlockTimeMarginSeconds;
+
+        /// <summary>
+        /// How much stricter admission is than a block on a vote's age: a transaction admitted with its votes just inside
+        /// the limit is not refused in the block that carries it, and block building drops one that has aged out.
+        /// </summary>
+        public const long VoteAdmissionMarginSeconds = LedgerIntegrityRules.BlockTimeMarginSeconds;
+
+        /// <summary>
+        /// The attempt the votes of a transaction from <paramref name="submitter"/> must be for, judged at
+        /// <paramref name="height"/>; null below Globals.BridgeVotesBoundToAttemptHeight (nothing more is asked). In a block
+        /// the ages are taken from the block's timestamp (<paramref name="blockTime"/>); a block judged without one (a local
+        /// rescan) is held to the handler and to the earlier attempt only. At admission (<paramref name="blockHeight"/>
+        /// null) they are taken from this node's clock, the age limit <see cref="VoteAdmissionMarginSeconds"/> shorter and
+        /// the skew allowance without the block margin. When <paramref name="failedExitBurn"/> has an exit that failed and
+        /// was recorded with its block (ExitVfxHeight), a counted vote is newer than the latest a vote in that block could be
+        /// stamped (<see cref="LatestVoteInBlock"/>): no vote the earlier attempt carried counts again. A new round after
+        /// that exit failed is at least VBTCWithdrawalRequest.EXPIRY_BLOCKS blocks later. Refusal is set when that block
+        /// cannot be read.
+        /// </summary>
+        /// <summary>
+        /// The latest a counted vote may be stamped in a block stamped <paramref name="blockTime"/>: the forward skew a
+        /// block allows a transaction's timestamp, with the margin.
+        /// </summary>
+        public static long LatestVoteInBlock(long blockTime) => blockTime + Globals.MaxFutureSkewSeconds + LedgerIntegrityRules.BlockTimeMarginSeconds;
+
+        public static (VoteAttempt? Attempt, string? Refusal) AttemptFor(string submitter, string? failedExitBurn, long height, long? blockHeight, long? blockTime)
+        {
+            if (height < Globals.BridgeVotesBoundToAttemptHeight) return (null, null);
+
+            var notBefore = long.MinValue;
+            if (!string.IsNullOrWhiteSpace(failedExitBurn)
+                && VBTCBridgeBtcExitState.GetByBurnHash(failedExitBurn) is { IsFailedRecord: true, ExitVfxHeight: > 0 } failed)
+            {
+                var earlier = VerifiedXCore.Data.BlockchainData.GetBlockByHeight(failed.ExitVfxHeight);
+                if (earlier == null)
+                    return (null, $"The block of this burn's earlier exit ({failed.ExitVfxHeight}) could not be read.");
+                notBefore = LatestVoteInBlock(earlier.Timestamp) + 1;
+            }
+
+            var notAfter = long.MaxValue;
+            if (blockHeight == null)
+            {
+                var now = VerifiedXCore.Utilities.TimeUtil.GetTime();
+                notBefore = Math.Max(notBefore, now - (VoteMaxAgeSeconds - VoteAdmissionMarginSeconds));
+                notAfter = now + Globals.MaxFutureSkewSeconds;
+            }
+            else if (blockTime != null)
+            {
+                notBefore = Math.Max(notBefore, blockTime.Value - VoteMaxAgeSeconds);
+                notAfter = LatestVoteInBlock(blockTime.Value);
+            }
+            return (new VoteAttempt(submitter ?? string.Empty, notBefore, notAfter), null);
+        }
+
+        /// <summary>
         /// Bound verification: signer must be in the committee for <paramref name="height"/>, and the
         /// signature must cover the burn hash, burn type, burned amount (sats) and payout destination
         /// exactly as carried by the transaction being validated.
         /// A signature is checked only while it can still change the count, and <paramref name="eachCasterOnce"/>
         /// (admission, and blocks from the height) refuses a list in which a caster has more than one vote to check
         /// (see <see cref="TryVerifyVotesFromCommittee"/>).
+        /// With <paramref name="attempt"/> (see <see cref="AttemptFor"/>) a vote counts only when it is timestamped within
+        /// the attempt's bounds and names the attempt's submitter as its handler under its caster's handler signature.
         /// </summary>
         public static (bool Ok, string Reason) VerifyBoundVotes(IEnumerable<CasterConsensusVote>? votes, string baseBurnTxHash, string burnType,
-            long amountSats, string destination, long height, bool eachCasterOnce = false)
+            long amountSats, string destination, long height, bool eachCasterOnce = false, VoteAttempt? attempt = null)
         {
             if (votes == null) return (false, "no votes");
             if (amountSats <= 0) return (false, "amount must be positive");
@@ -267,6 +337,7 @@ namespace VerifiedXCore.Bitcoin.Services
 
             var ok = new HashSet<string>(StringComparer.Ordinal);
             var listed = eachCasterOnce ? new HashSet<string>(StringComparer.Ordinal) : null;
+            int outsideTime = 0, otherHandler = 0;
             foreach (var v in votes)
             {
                 if (ok.Count >= required) break;
@@ -276,12 +347,34 @@ namespace VerifiedXCore.Bitcoin.Services
                 if (!string.Equals(v.BurnType, burnType, StringComparison.Ordinal)) continue;
                 if (listed != null && !listed.Add(v.CasterAddress)) return (false, VoteListedTwiceReason);
                 if (ok.Contains(v.CasterAddress)) continue;
+                if (attempt != null)
+                {
+                    if (v.Timestamp < attempt.NotBefore || v.Timestamp > attempt.NotAfter) { outsideTime++; continue; }
+                    if (string.IsNullOrEmpty(v.HandlerSignature) || !string.Equals(v.AgreedHandler, attempt.Submitter, StringComparison.Ordinal)) { otherHandler++; continue; }
+                }
                 var msg = BuildBoundVoteMessage(v.BaseBurnTxHash, v.BurnType, amountSats, destination, v.Timestamp);
                 Interlocked.Increment(ref VoteSignatureChecksForTests);
                 if (!VerifiedXCore.Services.SignatureService.VerifySignature(v.CasterAddress, msg, v.Signature)) continue;
+                if (attempt != null
+                    && !VerifiedXCore.Services.SignatureService.VerifySignature(v.CasterAddress,
+                        BuildConfirmationHandlerMessage(v.BaseBurnTxHash, v.CasterAddress, v.AgreedHandler!, v.Timestamp), v.HandlerSignature!))
+                {
+                    otherHandler++;
+                    continue;
+                }
                 ok.Add(v.CasterAddress);
             }
-            return ok.Count >= required ? (true, "") : (false, $"{ok.Count}/{required} valid bound committee votes");
+            if (ok.Count >= required) return (true, "");
+            var why = $"{ok.Count}/{required} valid bound committee votes";
+            if (outsideTime > 0) why += $"; {outsideTime} {VoteOutsideAttemptTimeReason}";
+            if (otherHandler > 0) why += $"; {otherHandler} {VoteForOtherHandlerReason}";
+            return (false, why);
         }
+
+        /// <summary>Why a vote did not count: its timestamp is outside what the attempt allows.</summary>
+        public const string VoteOutsideAttemptTimeReason = "timestamped outside the time this attempt allows";
+
+        /// <summary>Why a vote did not count: it does not name the transaction's sender as its handler under its caster's signature.</summary>
+        public const string VoteForOtherHandlerReason = "not naming the sender as the handler its caster agreed to";
     }
 }

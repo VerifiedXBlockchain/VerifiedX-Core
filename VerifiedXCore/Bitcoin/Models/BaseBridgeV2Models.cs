@@ -110,5 +110,14 @@ namespace VerifiedXCore.Bitcoin.Models
         public string BurnType { get; set; } = "";
         public long Timestamp { get; set; }
         public string Signature { get; set; } = string.Empty;
+        /// <summary>The handler this caster agreed to in the round, as its confirmation names it.</summary>
+        [Newtonsoft.Json.JsonProperty(NullValueHandling = Newtonsoft.Json.NullValueHandling.Ignore)]
+        public string? AgreedHandler { get; set; }
+        /// <summary>
+        /// This caster's signature over BridgeCasterConsensus.BuildConfirmationHandlerMessage for the burn, itself, the
+        /// agreed handler and the vote's timestamp (the confirmation's handler signature).
+        /// </summary>
+        [Newtonsoft.Json.JsonProperty(NullValueHandling = Newtonsoft.Json.NullValueHandling.Ignore)]
+        public string? HandlerSignature { get; set; }
     }
 }

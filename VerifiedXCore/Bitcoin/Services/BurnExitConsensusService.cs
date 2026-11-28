@@ -514,6 +514,43 @@ namespace VerifiedXCore.Bitcoin.Services
         internal static bool VotesCarry(IEnumerable<CasterConsensusVote>? votes, HashSet<string> committee, int required) =>
             (votes ?? Enumerable.Empty<CasterConsensusVote>()).Select(v => v.CasterAddress).Where(committee.Contains).Distinct(StringComparer.Ordinal).Count() >= required;
 
+        /// <summary>
+        /// The votes of a round, as the transaction that carries them records them: each with the handler its caster
+        /// agreed to and that caster's signature over it (from Globals.BridgeVotesBoundToAttemptHeight a vote counts only
+        /// for the caster it names, BridgeCasterConsensus.VerifyBoundVotes).
+        /// </summary>
+        internal static List<CasterConsensusVote> VotesOf(IEnumerable<BurnExitConfirmation> confirmations, BurnExitType exitType)
+        {
+            var burnType = BurnTypeString(exitType);
+            return confirmations.Select(c => new CasterConsensusVote
+            {
+                CasterAddress = c.ConfirmingCasterAddress,
+                BaseBurnTxHash = c.BaseBurnTxHash,
+                BurnType = burnType,
+                Signature = c.Signature,
+                Timestamp = c.Timestamp,
+                AgreedHandler = c.AgreedHandlerAddress,
+                HandlerSignature = c.HandlerSignature,
+            }).ToList();
+        }
+
+        /// <summary>How long before admission's age limit a round's votes are given up for a new round: room to build and send the transaction.</summary>
+        internal const long VoteAgeSlackSeconds = 60;
+
+        /// <summary>
+        /// The votes of a round that a transaction sent now for the block at <paramref name="nextHeight"/> would still be
+        /// admitted with: from Globals.BridgeVotesBoundToAttemptHeight those younger than admission's age limit (less
+        /// <see cref="VoteAgeSlackSeconds"/>), all of them below it. A round whose exit waited its turn past that is held
+        /// again instead of sending an exit that is refused.
+        /// </summary>
+        internal static IEnumerable<CasterConsensusVote> VotesStillAdmitted(IEnumerable<CasterConsensusVote>? votes, long nextHeight, long now)
+        {
+            var all = votes ?? Enumerable.Empty<CasterConsensusVote>();
+            if (nextHeight < Globals.BridgeVotesBoundToAttemptHeight) return all;
+            var oldest = now - (BridgeCasterConsensus.VoteMaxAgeSeconds - BridgeCasterConsensus.VoteAdmissionMarginSeconds - VoteAgeSlackSeconds);
+            return all.Where(v => v != null && v.Timestamp >= oldest);
+        }
+
         /// <summary>Until <paramref name="onChain"/> holds, checked every <paramref name="poll"/>, or <paramref name="atMost"/> passed; whether it held.</summary>
         internal static async Task<bool> WaitUntilOnChain(Func<bool> onChain, TimeSpan atMost, TimeSpan poll)
         {
@@ -794,15 +831,7 @@ namespace VerifiedXCore.Bitcoin.Services
             record.FailedRounds = 0;
 
             record.Status = BurnExitStatus.ConsensusReached;
-            var voteBurnType = BurnTypeString(record.ExitType);
-            record.ConsensusVotes = confirmations.Select(c => new CasterConsensusVote
-            {
-                CasterAddress = c.ConfirmingCasterAddress,
-                BaseBurnTxHash = c.BaseBurnTxHash,
-                BurnType = voteBurnType,
-                Signature = c.Signature,
-                Timestamp = c.Timestamp
-            }).ToList();
+            record.ConsensusVotes = VotesOf(confirmations, record.ExitType);
 
             LogUtility.Log($"[BurnExitConsensus] Consensus reached for {baseBurnTxHash}. Handler: {winner.ProposerCasterAddress}, Votes: {confirmations.Count}", "BurnExitConsensusService");
 
@@ -814,9 +843,9 @@ namespace VerifiedXCore.Bitcoin.Services
                 {
                     // Waiting its turn, the round's votes may no longer carry the committee that judges the exit: then the
                     // burn goes back for a fresh round rather than sending an exit that is refused and given up.
-                    if (!VotesCarry(record.ConsensusVotes, ExitCommittee(), RequiredCasterSignatures))
+                    if (!VotesCarry(VotesStillAdmitted(record.ConsensusVotes, VBTCService.NextBlockHeight, TimeUtil.GetTime()), ExitCommittee(), RequiredCasterSignatures))
                     {
-                        LogUtility.Log($"[BurnExitConsensus] The committee changed while {baseBurnTxHash} waited its turn; a new round will be held.", "BurnExitConsensusService");
+                        LogUtility.Log($"[BurnExitConsensus] The committee changed, or the round's votes grew too old, while {baseBurnTxHash} waited its turn; a new round will be held.", "BurnExitConsensusService");
                         record.ConsensusVotes.Clear();
                         record.HandlerCasterAddress = "";
                         record.Status = BurnExitStatus.Pending;
