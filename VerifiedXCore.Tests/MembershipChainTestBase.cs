@@ -67,6 +67,7 @@ namespace VerifiedXCore.Tests
             Globals.MembershipAnchorRecordHash = "";
             BlockchainData.ChainRef = "test-chain";
             CasterMembershipStore.InvalidateCache();
+            MembershipChain.ResetForTests();
             ValidatorMembershipPull.ResetForTests();
             // No peer answers a pull: what this node holds is what it judges by.
             CasterDiscoveryService.FetchMembershipResponse = (_, _) => Task.FromResult<MembershipRecordResponse?>(null);
@@ -95,6 +96,7 @@ namespace VerifiedXCore.Tests
             Globals.MembershipChainHeight = _priorChainHeight;
             Globals.MembershipAnchorRecordHash = _priorAnchor;
             CasterMembershipStore.InvalidateCache();
+            MembershipChain.ResetForTests();
             base.Dispose();
         }
 

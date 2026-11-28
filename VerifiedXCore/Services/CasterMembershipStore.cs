@@ -462,7 +462,9 @@ namespace VerifiedXCore.Services
         /// applies to the candidate (VreeElection.TermRefusal).</param>
         /// <param name="bySeq">The record at a sequence number; the store's unless a run of records not stored yet is being
         /// judged (<see cref="ValidRunFromHead"/>).</param>
-        public static bool ValidateSuccessor(CasterMembershipRecord? prev, CasterMembershipRecord candidate, out string reason, bool termEnded = false, Func<long, CasterMembershipRecord?>? bySeq = null)
+        /// <param name="atHeight">Judging a record a block carries (MembershipChain): the height of the block before it, in
+        /// place of this node's tip.</param>
+        public static bool ValidateSuccessor(CasterMembershipRecord? prev, CasterMembershipRecord candidate, out string reason, bool termEnded = false, Func<long, CasterMembershipRecord?>? bySeq = null, long? atHeight = null)
         {
             reason = "";
             if (candidate == null) { reason = "null candidate"; return false; }
@@ -535,7 +537,7 @@ namespace VerifiedXCore.Services
 
             if (VreeElection.IsHoldRecord(candidate) && VreeElection.HoldShapeRefusal(prev, candidate) is { } notAHold)
             { reason = notAHold; return false; }
-            if (VreeElection.TermRefusal(prev, candidate, Globals.LastBlock?.Height ?? -1, bySeq ?? GetBySeq, termEnded) is { } termOver)
+            if (VreeElection.TermRefusal(prev, candidate, atHeight ?? Globals.LastBlock?.Height ?? -1, bySeq ?? GetBySeq, termEnded) is { } termOver)
             { reason = termOver; return false; }
 
             var prevSet = prev.Casters.Select(c => c.Address).ToHashSet(StringComparer.Ordinal);

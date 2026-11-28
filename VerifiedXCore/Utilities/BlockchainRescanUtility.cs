@@ -61,6 +61,9 @@ namespace VerifiedXCore.Utilities
                 return result;//block rejected
             }
 
+            if (Services.MembershipChain.RunRefusal(block) != null)
+                return result;
+
             if (block.Height != 0)
             {
                 var blockCoinBaseResult = BlockchainData.ValidateBlock(block); //this checks the coinbase tx

@@ -776,6 +776,7 @@ namespace VerifiedXCore.Data
 
                     //insert block to db
                     await blocks.InsertSafeAsync(block);
+                    Services.MembershipChain.NoteCommitted(block); // the records it carries, read for the heights above it
 
                     if (notifyCLI)
                     {

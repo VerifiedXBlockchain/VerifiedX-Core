@@ -1233,6 +1233,14 @@ namespace VerifiedXCore.Services
                     return result;//block rejected
                 }
 
+                // The membership records the block carries, under its hash and its producer's signature.
+                if (MembershipChain.RunRefusal(block) is { } runRefusal)
+                {
+                    NoteRefusedForItsContents(block);
+                    DbContext.Rollback("BlockValidatorService.ValidateBlock()-membershipRun", runRefusal);
+                    return result;
+                }
+
                 if (block.Height != 0)
                 {
                     if(block.Height == Globals.SpecialBlockHeight)
@@ -2339,6 +2347,11 @@ namespace VerifiedXCore.Services
             {
                 ValidatorLogUtility.Log("Block validated failed due to merkel root not matching", "BlockValidatorService.ValidateBlockForTask()");
                 return result;//block rejected
+            }
+            if (MembershipChain.RunRefusal(block) is { } runRefusal)
+            {
+                ValidatorLogUtility.Log($"Block refused: its membership records: {runRefusal}", "BlockValidatorService.ValidateBlockForTask()");
+                return result;
             }
             var blockCoinBaseResult = BlockchainData.ValidateBlock(block); //this checks the coinbase tx
 
