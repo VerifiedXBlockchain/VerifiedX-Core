@@ -74,6 +74,8 @@ namespace VerifiedXCore.Tests
                 // block without them is taken, so what one node holds never decides a verdict.
                 ["CasterMembershipStore.GetSince"] = 1,
                 ["CasterMembershipStore.GetBySeq"] = 1,
+                // After a block is written this node's records are brought to the chain's (a write; no verdict reads it).
+                ["CasterMembershipStore.FollowChain"] = 1,
             },
             // Read none.
             ["Data/StateData.cs"] = new(),

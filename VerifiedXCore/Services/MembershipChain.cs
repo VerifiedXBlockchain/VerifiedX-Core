@@ -41,6 +41,13 @@ namespace VerifiedXCore.Services
         public static bool IsRunType(string? changeType) =>
             changeType is "Promotion" or "Demotion" or "Departure" or VreeElection.MaintenanceHoldChangeType;
 
+        /// <summary>
+        /// Whether a block at <paramref name="height"/> may still carry <paramref name="record"/> by its effective height:
+        /// at most <see cref="CarryWindowBlocks"/> after it. Only while the chain's rules judge that height.
+        /// </summary>
+        public static bool MayStillCarry(CasterMembershipRecord record, long height) =>
+            record != null && ActiveAt(height) && height <= record.EffectiveFromHeight + CarryWindowBlocks;
+
         /// <summary>The records a block carries in its carried record (Block.MembershipRecord), in force from that block.</summary>
         public static bool IsCarriedType(string? changeType) =>
             changeType is VreeElection.EmergencyElectionChangeType or VreeElection.ScheduledRotationChangeType or CasterMembershipStore.BootstrapResetChangeType;
@@ -263,6 +270,17 @@ namespace VerifiedXCore.Services
                 ErrorLogUtility.LogError($"Could not note the membership records of block {block.Height}: {ex.Message}", "MembershipChain.NoteCommitted()");
             }
             _cache.Clear();
+
+            // This node's records follow what the chain now holds.
+            try
+            {
+                if (ChainAt(block.Height + 1) is { } chain)
+                    CasterMembershipStore.FollowChain(chain, block.Height + 1);
+            }
+            catch (Exception ex)
+            {
+                ErrorLogUtility.LogError($"Could not bring this node's membership records to the chain at block {block.Height}: {ex.Message}", "MembershipChain.NoteCommitted()");
+            }
         }
 
         /// <summary>Tests only: forgets cached answers.</summary>

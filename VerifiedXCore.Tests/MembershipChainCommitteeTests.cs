@@ -48,6 +48,18 @@ namespace VerifiedXCore.Tests
 
         private static async Task<bool> Take(Block block) => await BlockValidatorService.ValidateBlock(Relayed(block), false);
 
+        /// <summary>
+        /// This node's records go back to the anchor, as on a node the record never reached. (A written block's records go
+        /// into this node's own; here they are taken out again, so what decides is shown to be the chain.)
+        /// </summary>
+        private void BackToTheAnchor()
+        {
+            var col = DbContext.DB_Config!.GetCollection<CasterMembershipRecord>("rsrv_caster_membership");
+            col.DeleteMany(x => x.RecordSeq > _anchor.RecordSeq);
+            CasterMembershipStore.InvalidateCache();
+            Assert.Equal(_anchor.RecordSeq, HeldSeq());
+        }
+
         /// <summary>The block that carries the demotion of the fourth caster, certified by the committee before it.</summary>
         private async Task<CasterMembershipRecord> CarryTheDemotion()
         {
@@ -69,7 +81,7 @@ namespace VerifiedXCore.Tests
         {
             await StartTheChain(Old);
             await CarryTheDemotion();
-            Assert.Equal(_anchor.RecordSeq, HeldSeq());                  // this node's own record is the four-caster one
+            BackToTheAnchor();                                            // this node's own record is the four-caster one
             Assert.Equal(2, BridgeCasterConsensus.RequiredVotesFor(BridgeCasterConsensus.GetCommitteeForHeight(Tip + 1)));
             var pullsBefore = _pulls;
 
@@ -105,7 +117,7 @@ namespace VerifiedXCore.Tests
             await StartTheChain(New);
             var promotion = Next(_anchor, Old, "Promotion", Casters[3].Address, Tip + 1);
             Assert.True(await Take(NextBlock(New.Take(2), new List<CasterMembershipRecord> { promotion })));
-            Assert.Equal(_anchor.RecordSeq, HeldSeq());
+            BackToTheAnchor();
 
             var unlock = Unlock(New.Take(2));
             var (ok, why) = await TransactionValidatorService.VerifyTX(unlock, false, true, false, null, false, Tip + 1, TimeUtil.GetTime());
