@@ -8,9 +8,11 @@ namespace VerifiedXCore.Bitcoin.Services
     /// through): can the vBTCb contract's signers mint it? A lock debits its holder on VFX at once, and only a mint on Base
     /// gives that back as vBTC.b. The contract mints with 2/3 of the validators it lists and a majority of the casters it
     /// lists, and its lists follow VFX days behind; when too few of the listed signers are running, VFX still takes the
-    /// lock and Base cannot mint it. So the node reads the contract's lists, asks each listed signer's node whether it is
-    /// up and on the network's chain (its Health answer, the conditions it signs a mint under), and makes the lock only
-    /// when those that answer meet both of the contract's thresholds. A listed signer this node has no address for (no
+    /// lock and Base cannot mint it. So the node reads the contract's lists, asks each listed signer's node whether it
+    /// would sign a mint now (its Health answer: ReadyToAttest, the signer's own verdict by the conditions it signs
+    /// under), and makes the lock only when those that say so meet both of the contract's thresholds. A signer on a build
+    /// that does not say is not counted: what else it reports (synced, healthy, no fork) is also what a signer cut off
+    /// from new blocks reports, and it refuses to sign once its tip is five minutes old. A listed signer this node has no address for (no
     /// registration in its window, no caster record that names it) was not asked and is not held against the lock: the
     /// lock is refused on what the node sees, not on what it cannot see. A contract it cannot read at all is the
     /// exception: then nothing is known, and nothing is locked until it can be read.
@@ -42,7 +44,7 @@ namespace VerifiedXCore.Bitcoin.Services
             if (UserBridgeMintService.Enough(view, view.RequiredMintSignatures, answering.Concat(notAsked))) return null;
 
             var why = $"Base cannot mint a bridge lock right now: {view.Validators.Count(answering.Contains)} of the contract's {view.Validators.Count} validators"
-                + $" and {view.CasterList.Count(answering.Contains)} of its {view.CasterList.Count} casters answer, and it needs {view.RequiredMintSignatures} and {view.RequiredCasterSignatures}"
+                + $" and {view.CasterList.Count(answering.Contains)} of its {view.CasterList.Count} casters are ready to sign a mint, and it needs {view.RequiredMintSignatures} and {view.RequiredCasterSignatures}"
                 + (notAsked.Count > 0 ? $" ({notAsked.Count} more could not be asked: this node has no address for them)." : ".")
                 + " Nothing was locked; try again later.";
             LogUtility.Log($"[BaseMintReadiness] {why}", "BaseMintReadiness.RefusalAsync");
@@ -50,9 +52,9 @@ namespace VerifiedXCore.Bitcoin.Services
         }
 
         /// <summary>
-        /// Whether the node at <paramref name="ip"/> answers and reports what a signer needs to sign a mint
-        /// (BaseBridgeAttestationService.NotReadyToAttest): a validator, synced, not stalled or recovering, and not on
-        /// another chain than its peers.
+        /// Whether the node at <paramref name="ip"/> answers that it is a validator and would sign a mint now
+        /// (ReadyToAttest: BaseBridgeAttestationService.NotReadyToAttest as that node judges it). No such answer, or none
+        /// at all, is a signer that is not counted.
         /// </summary>
         private static async Task<bool> AnswersAsync(string ip)
         {
@@ -63,9 +65,7 @@ namespace VerifiedXCore.Bitcoin.Services
                 var health = BoundedJson.Parse(text, BoundedJson.ValidatorApi);
                 if (health.Type == JTokenType.String) health = BoundedJson.Parse(health.Value<string>() ?? "", BoundedJson.ValidatorApi);
                 if (health is not JObject node) return false;
-                return node.Value<bool?>("IsValidator") == true && node.Value<bool?>("IsChainSynced") == true
-                    && (node.Value<string>("SyncState") is null or "Healthy")
-                    && (node.Value<string>("ForkStatus") is not ("Resolving" or "Unresolved"));
+                return node.Value<bool?>("IsValidator") == true && node.Value<bool?>("ReadyToAttest") == true;
             }
             catch { return false; }
         }

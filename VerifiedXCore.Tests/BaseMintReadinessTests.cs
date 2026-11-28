@@ -6,6 +6,8 @@ using System.Net;
 using System.Net.Http;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.AspNetCore.Hosting;
+using Microsoft.AspNetCore.TestHost;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 using VerifiedXCore.Bitcoin.Controllers;
@@ -24,7 +26,8 @@ namespace VerifiedXCore.Tests
     /// A bridge lock debits its holder on VFX at once, and only a mint on Base gives that back. The Base contract mints with
     /// 2/3 of the validators it lists and a majority of the casters it lists, whoever sits in the VFX committee by now. This
     /// node makes a lock (the wallet's BridgeToBase route, as the node serves it) only while enough of the contract's own
-    /// signers answer and report that they would sign; otherwise nothing is locked, sent or reserved.
+    /// signers say they would sign a mint now; otherwise nothing is locked, sent or reserved. Each signer answers through
+    /// the Health route as a node serves it, in the state the test puts that signer's node in.
     /// </summary>
     [Collection("DbContextSequential")]
     public class BaseMintReadinessTests : IDisposable
@@ -39,13 +42,16 @@ namespace VerifiedXCore.Tests
         private readonly string? _priorCustomPath = Globals.CustomPath;
         private readonly Block _priorLastBlock = Globals.LastBlock;
         private readonly bool _priorSynced = Globals.IsChainSynced;
+        private readonly bool _priorResyncing = Globals.IsResyncing;
+        private readonly bool _priorStopTimers = Globals.StopAllTimers;
+        private readonly string _priorValidator = Globals.ValidatorAddress;
         private readonly string _priorContract = BaseBridgeService.ContractAddress;
         private readonly HttpMessageHandler? _priorHandler = NodeHttp.PeerHandlerForTests;
 
         private readonly K[] _validators = Enumerable.Range(1, 3).Select(i => NewKey($"10.0.7.{i}")).ToArray();
         private readonly K[] _casters = Enumerable.Range(1, 3).Select(i => NewKey($"10.0.8.{i}")).ToArray();
         private readonly K _holder = NewKey("");
-        private readonly SignerNodes _nodes = new();
+        private readonly SignerNodes _nodes;
         private bool _contractReadable = true;
         /// <summary>A caster on the contract that this node has no address for, in the place of the contract's third.</summary>
         private readonly K _stranger = NewKey("10.0.8.9");
@@ -87,14 +93,17 @@ namespace VerifiedXCore.Tests
             DbContext.DB_Config!.GetCollection<CasterMembershipRecord>("rsrv_caster_membership").Upsert(record.RecordSeq, record);
             VerifiedXCore.Services.CasterMembershipStore.InvalidateCache();
 
-            Globals.LastBlock = new Block { Height = Height };
+            Globals.LastBlock = new Block { Height = Height, Timestamp = TimeUtil.GetTime() };
             Globals.IsChainSynced = true;
+            Globals.IsResyncing = false;
+            Globals.StopAllTimers = false;
             VBTCValidatorRegistry.InvalidateCache();
             BaseBridgeService.ContractAddress = Proxy;
             BaseBridgeService.ReadSignerViewForTests = () => Task.FromResult<BaseBridgeService.SignerView?>(_contractReadable
                 ? new BaseBridgeService.SignerView(_validators.Select(v => v.Base).ToList(), 4, 2, 7,
                     (_thirdCasterIsAStranger ? _casters.Take(2).Append(_stranger) : _casters).Select(c => c.Base).ToList(), 2)
                 : null);
+            _nodes = new SignerNodes(_validators.Concat(_casters).ToDictionary(k => k.Ip, k => k.Address));
             NodeHttp.PeerHandlerForTests = _nodes;
         }
 
@@ -103,7 +112,10 @@ namespace VerifiedXCore.Tests
             NodeHttp.PeerHandlerForTests = _priorHandler;
             BaseBridgeService.ReadSignerViewForTests = null;
             BaseBridgeService.ContractAddress = _priorContract;
+            Globals.ValidatorAddress = _priorValidator;
             Globals.IsChainSynced = _priorSynced;
+            Globals.IsResyncing = _priorResyncing;
+            Globals.StopAllTimers = _priorStopTimers;
             Globals.LastBlock = _priorLastBlock;
             VBTCValidatorRegistry.InvalidateCache();
             try { DbContext.CloseDB(); } catch { }
@@ -119,22 +131,62 @@ namespace VerifiedXCore.Tests
             return new K(key, pub, AccountData.GetHumanAddress(pub), ValidatorEthKeyService.DeriveBaseAddressFromVfxPublicKey(pub).ToLowerInvariant(), ip);
         }
 
-        /// <summary>The signers' nodes as this node reaches them: by IP, down (no answer) or answering Health as told.</summary>
+        /// <summary>
+        /// The signers' nodes as this node reaches them, by IP: down (no answer), or answering Health through the route as a
+        /// node serves it, one at a time, as the validator at that IP and in the state the test gives its node (how old its
+        /// tip is, whether it is synced). A signer on an older build answers without ReadyToAttest.
+        /// </summary>
         private sealed class SignerNodes : HttpMessageHandler
         {
+            private readonly TestServer _server = new(new WebHostBuilder().UseStartup<StartupP2PCaster>());
+            private readonly SemaphoreSlim _oneAtATime = new(1, 1);
+            private readonly Dictionary<string, string> _validatorAt;
             public readonly HashSet<string> Down = new();
-            public readonly Dictionary<string, object> Reports = new();
+            public readonly HashSet<string> OlderBuild = new();
+            public readonly Dictionary<string, Action> NodeState = new();
+            public readonly Dictionary<string, JObject> LastAnswer = new();
             public int Asked;
 
-            protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
+            public SignerNodes(Dictionary<string, string> validatorAt) => _validatorAt = validatorAt;
+
+            protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
             {
                 Interlocked.Increment(ref Asked);
                 var ip = request.RequestUri!.Host;
-                if (Down.Contains(ip) || !request.RequestUri.AbsolutePath.EndsWith("/valapi/validator/Health", StringComparison.OrdinalIgnoreCase))
+                var path = request.RequestUri.AbsolutePath;
+                if (Down.Contains(ip) || !_validatorAt.TryGetValue(ip, out var address) || !path.EndsWith("/valapi/validator/Health", StringComparison.OrdinalIgnoreCase))
                     throw new HttpRequestException("unreachable");
-                var report = Reports.TryGetValue(ip, out var told) ? told
-                    : new { IsValidator = true, IsChainSynced = true, SyncState = "Healthy", ForkStatus = "None", Height };
-                return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(JsonConvert.SerializeObject(report)) });
+
+                string text;
+                await _oneAtATime.WaitAsync(ct);
+                var (validator, tip, synced) = (Globals.ValidatorAddress, Globals.LastBlock, Globals.IsChainSynced);
+                try
+                {
+                    Globals.ValidatorAddress = address;                            // the node at that IP answers
+                    if (NodeState.TryGetValue(ip, out var itsState)) itsState();
+                    var ctx = await _server.SendAsync(c =>
+                    {
+                        c.Request.Method = "GET";
+                        c.Request.Path = path;
+                        c.Connection.RemoteIpAddress = IPAddress.Parse("203.0.113.7");
+                    });
+                    using var reader = new StreamReader(ctx.Response.Body);
+                    text = await reader.ReadToEndAsync();
+                    if (ctx.Response.StatusCode != 200) return new HttpResponseMessage((HttpStatusCode)ctx.Response.StatusCode);
+                }
+                finally
+                {
+                    (Globals.ValidatorAddress, Globals.LastBlock, Globals.IsChainSynced) = (validator, tip, synced);
+                    _oneAtATime.Release();
+                }
+                var answer = JObject.Parse(text.TrimStart().StartsWith("\"") ? JsonConvert.DeserializeObject<string>(text)! : text);
+                if (OlderBuild.Contains(ip))
+                {
+                    answer.Remove("ReadyToAttest");
+                    text = answer.ToString(Formatting.None);
+                }
+                lock (LastAnswer) LastAnswer[ip] = answer;
+                return new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(text) };
             }
         }
 
@@ -158,27 +210,50 @@ namespace VerifiedXCore.Tests
             Assert.Equal(0M, BridgeLockRecord.GetLockedAmount(_holder.Address, Vault) - before * (VBTCService.MinBridgeLockSats / 100_000_000M)); // and none is reserved
         }
 
-        [Fact]
-        public async Task ALockIsMade_OnlyWhileEnoughOfTheContractsOwnSignersAnswerToMintIt()
+        private async Task Made(int locksInAll)
         {
-            // Every signer the contract lists answers: the lock is made.
-            var made = await BridgeToBase();
-            Assert.True(made.Value<bool>("Success"), made.ToString());
-            Assert.Equal(1, Pooled());
+            var answer = await BridgeToBase();
+            Assert.True(answer.Value<bool>("Success"), answer.ToString());
+            Assert.Equal(locksInAll, Pooled());
+        }
+
+        /// <summary>A signer's node whose latest block is this old: cut off from new blocks, it still calls itself synced.</summary>
+        private static Action TipIs(int secondsOld) => () => Globals.LastBlock = new Block { Height = Height, Timestamp = TimeUtil.GetTime() - secondsOld };
+
+        [Fact]
+        public async Task ALockIsMade_OnlyWhileEnoughOfTheContractsOwnSignersWouldSignItsMint()
+        {
+            // Every signer the contract lists is ready: the lock is made.
+            await Made(1);
             Assert.Equal(6, _nodes.Asked);                                         // each listed signer was asked once
 
             // Two of the contract's three casters are gone (the validators all answer): Base needs two casters.
             _nodes.Down.UnionWith(_casters.Take(2).Select(c => c.Ip));
-            await Refused("3 of the contract's 3 validators and 1 of its 3 casters answer, and it needs 2 and 2");
+            await Refused("3 of the contract's 3 validators and 1 of its 3 casters are ready to sign a mint, and it needs 2 and 2");
             _nodes.Down.Clear();
 
-            // Two of its three validators answer but are stalled or not synced: they would not sign.
-            _nodes.Reports[_validators[0].Ip] = new { IsValidator = true, IsChainSynced = true, SyncState = "Stalled", ForkStatus = "None" };
-            _nodes.Reports[_validators[1].Ip] = new { IsValidator = true, IsChainSynced = false, SyncState = "Healthy", ForkStatus = "None" };
-            await Refused("1 of the contract's 3 validators and 3 of its 3 casters answer");
-            _nodes.Reports[_validators[1].Ip] = new { IsValidator = true, IsChainSynced = true, SyncState = "Healthy", ForkStatus = "Unresolved" };
+            // Two of its three validators are cut off from new blocks: their tip is 301 seconds old. Each still reports
+            // itself synced, healthy and on no fork, and each refuses to sign a mint.
+            _nodes.NodeState[_validators[0].Ip] = _nodes.NodeState[_validators[1].Ip] = TipIs(301);
+            await Refused("1 of the contract's 3 validators and 3 of its 3 casters are ready to sign a mint");
+            var cutOff = _nodes.LastAnswer[_validators[0].Ip];
+            Assert.True(cutOff.Value<bool>("IsValidator") && cutOff.Value<bool>("IsChainSynced"));
+            Assert.Equal("Healthy", cutOff.Value<string>("SyncState"));
+            Assert.DoesNotContain(cutOff.Value<string>("ForkStatus"), new[] { "Resolving", "Unresolved" });
+            Assert.False(cutOff.Value<bool>("ReadyToAttest"));
+            // With a tip a little younger than that they sign, and the lock is made.
+            _nodes.NodeState[_validators[0].Ip] = _nodes.NodeState[_validators[1].Ip] = TipIs(240);
+            await Made(2);
+
+            // Two validators that are not synced.
+            _nodes.NodeState[_validators[0].Ip] = _nodes.NodeState[_validators[1].Ip] = () => Globals.IsChainSynced = false;
             await Refused("1 of the contract's 3 validators");
-            _nodes.Reports.Clear();
+            _nodes.NodeState.Clear();
+
+            // Two validators on a build that does not say whether it would sign: not counted.
+            _nodes.OlderBuild.UnionWith(_validators.Take(2).Select(v => v.Ip));
+            await Refused("1 of the contract's 3 validators and 3 of its 3 casters are ready to sign a mint");
+            _nodes.OlderBuild.Clear();
 
             // The contract cannot be read: not known, so not locked.
             _contractReadable = false;
@@ -187,20 +262,16 @@ namespace VerifiedXCore.Tests
 
             // One validator and one caster down leaves 2/3 and a majority: enough.
             _nodes.Down.UnionWith(new[] { _validators[2].Ip, _casters[2].Ip });
-            var again = await BridgeToBase();
-            Assert.True(again.Value<bool>("Success"), again.ToString());
-            Assert.Equal(2, Pooled());
+            await Made(3);
             _nodes.Down.Clear();
 
             // A caster the contract lists that this node has no address for was not asked: it is not held against the lock
-            // (one caster answers, one is down), but it does not stand in for two that are known and gone.
+            // (one caster is ready, one is down), but it does not stand in for two that are known and gone.
             _thirdCasterIsAStranger = true;
             _nodes.Down.Add(_casters[1].Ip);
-            var third = await BridgeToBase();
-            Assert.True(third.Value<bool>("Success"), third.ToString());
-            Assert.Equal(3, Pooled());
+            await Made(4);
             _nodes.Down.Add(_casters[0].Ip);
-            await Refused("0 of its 3 casters answer, and it needs 2 and 2 (1 more could not be asked");
+            await Refused("0 of its 3 casters are ready to sign a mint, and it needs 2 and 2 (1 more could not be asked");
         }
 
         /// <summary>A node with no bridge contract configured has nothing to ask: its lock is made as before.</summary>
@@ -209,9 +280,7 @@ namespace VerifiedXCore.Tests
         {
             BaseBridgeService.ContractAddress = "";
             _nodes.Down.UnionWith(_validators.Concat(_casters).Select(k => k.Ip));
-            var made = await BridgeToBase();
-            Assert.True(made.Value<bool>("Success"), made.ToString());
-            Assert.Equal(1, Pooled());
+            await Made(1);
             Assert.Equal(0, _nodes.Asked);
         }
     }
