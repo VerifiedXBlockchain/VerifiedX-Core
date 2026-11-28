@@ -4244,7 +4244,7 @@ namespace VerifiedXCore.Services
                         var (votesOk, votesReason) = BridgeCasterConsensus.TryVerifyVotesFromCommittee(votes, exitBurnTxHash!.Trim(), "EXIT", unlockGateHeight,
                             eachCasterOnce: (blockHeight == null && !blockVerify && !blockDownloads) || unlockGateHeight >= Globals.BridgeVoteOncePerCasterHeight);
                         if (!votesOk)
-                            return (txResult, $"Caster consensus votes rejected for VBTCb unlock: {votesReason}");
+                            return (txResult, $"{BridgeCasterConsensus.VotesRejectedPrefix}VBTCb unlock: {votesReason}");
                         if (VBTCBridgeConsumedBurn.IsBurnUsedAnywhere(exitBurnTxHash))
                             return (txResult, "Exit burn transaction has already been consumed.");
                         // Admission-time only: block validation relies on the committee-bound votes above
@@ -4353,7 +4353,7 @@ namespace VerifiedXCore.Services
                             eachCasterOnce: (blockHeight == null && !blockVerify && !blockDownloads) || poolGateHeight >= Globals.BridgeVoteOncePerCasterHeight,
                             attempt: poolAttempt);
                         if (!votesOk)
-                            return (txResult, $"Caster consensus votes rejected for pool unlock: {votesReason}");
+                            return (txResult, $"{BridgeCasterConsensus.VotesRejectedPrefix}pool unlock: {votesReason}");
 
                         if (VBTCBridgeConsumedBurn.IsBurnUsedAnywhere(poolBurnHash))
                             return (txResult, "Exit burn transaction has already been consumed.");
@@ -4492,7 +4492,7 @@ namespace VerifiedXCore.Services
                             eachCasterOnce: (blockHeight == null && !blockVerify && !blockDownloads) || exitGateHeight >= Globals.BridgeVoteOncePerCasterHeight,
                             attempt: exitAttempt);
                         if (!votesOk)
-                            return (txResult, $"Caster consensus votes rejected for exit to BTC: {votesReason}");
+                            return (txResult, $"{BridgeCasterConsensus.VotesRejectedPrefix}exit to BTC: {votesReason}");
 
                         var exitAllocs = jobj["Allocations"];
                         if (exitAllocs != null && exitAllocs.Type == JTokenType.Array && exitAllocs.HasValues)

@@ -127,6 +127,9 @@ The proxy address, balances, used lock ids and validators all stay. Only the imp
    `UPGRADE` is the V3 message (EIP-191). On V4 the actions are `PROPOSE_UPGRADE` (with `Implementation`),
    `PROPOSE_UPGRADE_DELAY` (`DelaySeconds`), `PROPOSE_REMOVAL` (`Validators` and/or `Casters`, `VfxBlockHeight`) and `CANCEL_PENDING`.
    The `Digest` it returns must equal the hash in `upgrade-request.<network>.json`.
+   A node signs `PROPOSE_REMOVAL` only for validators it no longer sees on VFX. For one that still runs on VFX but
+   does not sign on Base, the operator names it in `NotSigningOnBase` as well (a list, each also in `Validators`):
+   the node then signs, and does not veto that proposal on its account while it is pending.
 3. **Submit**: verifies the signatures locally first and sends nothing if there are too few.
    ```cmd
    set SIGNATURES=0xsig1,0xsig2

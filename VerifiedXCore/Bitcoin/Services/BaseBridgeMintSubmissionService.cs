@@ -213,7 +213,7 @@ namespace VerifiedXCore.Bitcoin.Services
             {
                 // Create Web3 instance with signer
                 var account = new Account(ethKey, chainId);
-                var web3 = new Web3(account, rpcUrl);
+                var web3 = await BaseRpc.SenderAsync(account);
 
                 var contract = web3.Eth.GetContract(MINT_WITH_PROOF_ABI, contractAddress);
                 var mintFunction = contract.GetFunction("mintWithProof");

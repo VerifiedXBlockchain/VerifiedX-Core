@@ -141,26 +141,68 @@ namespace VerifiedXCore.Bitcoin.Services
                 CommitteeAt(epochHeight - 2 * EpochBlocks), contractCasters);
         }
 
+        // ── A proposed removal ──────────────────────────────────────────────────────────────────────────────
+
         /// <summary>
-        /// The Base addresses of the validators that keep their seat at <paramref name="epochHeight"/> (funded, seen in the
-        /// KeepSeenBlocks before it), lower-cased; empty when the boundary block is not on this chain.
+        /// Blocks back from the tip in which a validator on the contract must have a REGISTER or HEARTBEAT to count as live
+        /// when its removal is proposed (<see cref="LiveForRemovalAt"/>). One number for both sides of a proposal: the
+        /// operator's signature on it and the members' veto of it.
         /// </summary>
-        public static HashSet<string> KeptAt(long epochHeight)
+        public const int RemovalLiveBlocks = KeepSeenBlocks;
+
+        /// <summary>The members that are live for a proposed removal, by Base address, lower-cased.</summary>
+        public sealed record RemovalLiveness(IReadOnlySet<string> Validators, IReadOnlySet<string> Casters)
         {
-            var block = BlockchainData.GetBlockByHeight(epochHeight);
-            if (block == null || string.IsNullOrEmpty(block.Hash)) return new HashSet<string>();
-            return VBTCValidatorRegistry.FundedOnly(SeenAt(epochHeight, block.Hash)).Select(v => BaseAddressOf(v.FrostPublicKey).ToLowerInvariant())
-                .Where(a => a.Length > 0).ToHashSet();
+            /// <summary>The first of these validators that is live, or null.</summary>
+            public string? LiveValidator(IEnumerable<string> named) => named.FirstOrDefault(v => Validators.Contains((v ?? "").Trim().ToLowerInvariant()));
+            /// <summary>The first of these casters that is live, or null.</summary>
+            public string? LiveCaster(IEnumerable<string> named) => named.FirstOrDefault(c => Casters.Contains((c ?? "").Trim().ToLowerInvariant()));
         }
 
-        private static (long Height, string Hash, List<Models.VBTCValidator> Seen)? _seen;
+        /// <summary>
+        /// One scan's result with the block it was made at. Kept as one reference that is read once and replaced whole
+        /// (the veto loop and signing requests ask together, across a tip change): a block's height and hash are never
+        /// read beside another block's list.
+        /// </summary>
+        private sealed record SeenAtBlock(long Height, string Hash, List<Models.VBTCValidator> Seen);
+
+        private static volatile SeenAtBlock? _seenForRemoval;
+
+        /// <summary>
+        /// Who is live when a removal of members is proposed, as of <paramref name="tip"/>: the validators that hold the
+        /// balance, are not S3C, were seen in the <see cref="RemovalLiveBlocks"/> up to the tip and have not exited since,
+        /// and the casters in this node's current caster record. The one rule for a proposed removal: the operator's
+        /// signature on a proposal (BaseAdminSigningService) and the members' veto of a pending one
+        /// (BaseValidatorSyncService) both ask it at their tip, so a node does not cancel a proposal it would sign.
+        /// </summary>
+        public static RemovalLiveness LiveForRemovalAt(long tip)
+        {
+            var casters = (VerifiedXCore.Services.CasterMembershipStore.GetCurrent()?.Casters ?? new List<VerifiedXCore.Models.CasterInfo>())
+                .Select(c => BaseAddressOf(c.PublicKey).ToLowerInvariant()).Where(a => a.Length > 0).ToHashSet();
+            if (tip < 0) return new RemovalLiveness(new HashSet<string>(), casters);
+            // One scan per tip block (a tip with no committed block to key on is scanned each time); the balance is read
+            // each time, as committed state holds it now.
+            var hash = BlockchainData.GetBlockByHeight(tip)?.Hash ?? "";
+            List<Models.VBTCValidator> seen;
+            if (hash.Length > 0 && _seenForRemoval is { } known && known.Height == tip && known.Hash == hash) seen = known.Seen;
+            else
+            {
+                seen = VBTCValidatorRegistry.GetValidatorsSeenWithin(tip, RemovalLiveBlocks).Where(v => !v.IsS3C).ToList();
+                if (hash.Length > 0) _seenForRemoval = new SeenAtBlock(tip, hash, seen);
+            }
+            var validators = VBTCValidatorRegistry.FundedOnly(seen).Select(v => BaseAddressOf(v.FrostPublicKey).ToLowerInvariant())
+                .Where(a => a.Length > 0).ToHashSet();
+            return new RemovalLiveness(validators, casters);
+        }
+
+        private static volatile SeenAtBlock? _seen;
 
         /// <summary>The public validators seen in the KeepSeenBlocks up to the boundary: one block scan per boundary block.</summary>
         private static List<Models.VBTCValidator> SeenAt(long epochHeight, string blockHash)
         {
             if (_seen is { } s && s.Height == epochHeight && s.Hash == blockHash) return s.Seen;
             var seen = VBTCValidatorRegistry.GetValidatorsSeenWithin(epochHeight, KeepSeenBlocks).Where(v => !v.IsS3C).ToList();
-            _seen = (epochHeight, blockHash, seen);
+            _seen = new SeenAtBlock(epochHeight, blockHash, seen);
             return seen;
         }
 

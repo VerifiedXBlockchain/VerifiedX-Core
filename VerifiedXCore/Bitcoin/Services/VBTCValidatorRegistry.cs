@@ -185,6 +185,7 @@ namespace VerifiedXCore.Bitcoin.Services
 
         private static readonly System.Collections.Concurrent.ConcurrentDictionary<long, BlockSummary> _summaries = new();
         [ThreadStatic] private static long _blocksReadOnThisThread;
+        private static long _widestWindow = SCAN_WINDOW, _highestAsked;
 
         /// <summary>Blocks this thread read from the store to scan (tests).</summary>
         internal static long BlocksReadOnThisThread => _blocksReadOnThisThread;
@@ -223,7 +224,14 @@ namespace VerifiedXCore.Bitcoin.Services
                 window.Add(summary);
                 expected = string.IsNullOrEmpty(summary?.PrevHash) ? null : summary!.PrevHash;
             }
-            foreach (var old in _summaries.Keys.Where(k => k < scanFrom - SCAN_WINDOW || k > currentHeight + SCAN_WINDOW).ToList())
+            // Kept for the widest window asked so far, up to the highest block asked: a scan of the last SCAN_WINDOW blocks
+            // otherwise dropped what a longer one (the days a Base seat is judged over, read at the tip) reuses at the
+            // next block, and that one read its whole window from the store again.
+            _widestWindow = Math.Max(_widestWindow, currentHeight - scanFrom);
+            _highestAsked = Math.Max(_highestAsked, currentHeight);
+            var keepFrom = currentHeight - _widestWindow - SCAN_WINDOW;
+            var keepTo = _highestAsked + SCAN_WINDOW;
+            foreach (var old in _summaries.Keys.Where(k => k < keepFrom || k > keepTo).ToList())
                 _summaries.TryRemove(old, out _);
             window.Reverse();
             return window;

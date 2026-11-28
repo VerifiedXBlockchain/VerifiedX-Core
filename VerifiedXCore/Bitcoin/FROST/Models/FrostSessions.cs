@@ -111,8 +111,10 @@ namespace VerifiedXCore.Bitcoin.FROST.Models
         public string MessageHash { get; set; }
         public string SmartContractUID { get; set; }
         public string LeaderAddress { get; set; }
-        /// <summary>Led by an address that holds no share of the vault's key and is no caster (a withdrawal's requester): counted in their shared room.</summary>
+        /// <summary>Led by an address that holds no share of the vault's key and is no caster (a withdrawal's requester): its place is one of its vault's.</summary>
         public bool LedByRequester { get; set; }
+        /// <summary>The vault this session signs for (a session names the key it signs with, and a vault can have had more than one): a requester-led session's place is counted against it.</summary>
+        public string? VaultUID { get; set; }
         /// <summary>
         /// FIND-028: VFX withdrawal request TX hash for dedup tracking. Null for non-withdrawal signings.
         /// </summary>
@@ -591,36 +593,98 @@ namespace VerifiedXCore.Bitcoin.FROST.Models
         public const int DKG_LEADER_CAP_WINDOW_SECONDS = 900;
         
         /// <summary>
-        /// Maximum concurrent signing sessions allowed. One session signs one input of one Bitcoin transaction, and a
-        /// vault the chain watches can have many withdrawals being signed at once, each led in turn by several of its
-        /// signers: 50 sessions kept for an hour were used up by a handful of ordinary withdrawals, and could be
-        /// filled on purpose by the requester of one small pinned withdrawal (second path audit, 14 October 2026).
+        /// The least room there is here for signing sessions led by a key's holders and by casters
+        /// (<see cref="SigningRoomForValidators"/>: it follows the validator set). One session signs one input of one
+        /// Bitcoin transaction, and a vault the chain watches can have many withdrawals being signed at once, each led in
+        /// turn by several of its signers: 50 sessions kept for an hour were used up by a handful of ordinary withdrawals,
+        /// and could be filled on purpose by the requester of one small pinned withdrawal (second path audit, 14 October
+        /// 2026).
         /// </summary>
         public const int MAX_SIGNING_SESSIONS = 500;
 
-        /// <summary>Signing sessions kept here at all, finished ones included (a finished session holds no place, but is kept for its ten minutes).</summary>
+        /// <summary>
+        /// Finished signing sessions kept here (a finished session holds no place, but is kept for its ten minutes). A
+        /// number of their own, beside the rooms and not over them: the oldest make way for a new start
+        /// (<see cref="DropFinishedForRoom"/>), and a session that holds a place is counted in its room and nowhere else.
+        /// Counted together with the open sessions, the sessions of rooms that between them hold more than this number
+        /// reached it before either room was full, and every start was refused with places to spare. What a validator
+        /// keeps is then at most its rooms' places and this many more.
+        /// </summary>
         public const int MAX_SIGNING_SESSIONS_HELD = 2_000;
 
-        /// <summary>A signing session is dropped this long after it was started; a ceremony takes seconds.</summary>
+        /// <summary>A signing session whose share was given is dropped this long after it was started.</summary>
         public const int SIGNING_SESSION_SECONDS = 600;
 
-        /// <summary>Signing sessions one leader may have open on this validator.</summary>
-        public const int MAX_SIGNING_SESSIONS_PER_LEADER = 60;
+        /// <summary>
+        /// How long a signing session holds its place, and is kept, without its Round 2: as a key ceremony that goes no
+        /// step further (<see cref="DKG_UNPROGRESSED_SECONDS"/>). A leader asks for the shares as soon as it has the
+        /// commitments, within about a minute of its start (two requests, each answered or given up within thirty
+        /// seconds); a session whose leader never did kept its place for ten minutes.
+        /// </summary>
+        public const int SIGNING_UNPROGRESSED_SECONDS = 120;
 
         /// <summary>
-        /// Signing sessions all requester-led ceremonies together may have open here; the rest of the room is kept for
-        /// the key's holders and casters, who lead the signing of every pinned transaction. Counted per leader only, nine
-        /// requester addresses with pinned withdrawals filled every validator's room and every payout stalled (fifth
-        /// review, round 24).
+        /// Signing sessions one leader may have open on this validator. A leader signs a transaction one input after
+        /// another, each session done before the next is started, and a key's holders lead the pinned payments one after
+        /// another, so signing needs one open session a leader. Eight leaves room for an address that leads several
+        /// payments at once (an exchange's node), and for sessions of attempts whose end did not reach this validator,
+        /// which keep their place for <see cref="SIGNING_UNPROGRESSED_SECONDS"/>. A limit far above what signing needs let
+        /// a few leaders hold most of a validator's room between them.
         /// </summary>
-        public const int MAX_REQUESTER_LED_SIGNING_SESSIONS = 200;
+        public const int MAX_SIGNING_SESSIONS_PER_LEADER = 8;
 
         /// <summary>
-        /// Signing sessions one leader may have open here for the same thing to sign (one input of one transaction): a
-        /// retry. Counted per leader: a limit across leaders let one leader's three sessions refuse every other leader
-        /// of that input for as long as it renewed them.
+        /// Signing sessions led by requesters (addresses that hold no share of the key and are no caster) that may be open
+        /// here for one vault. A requester's place is its vault's, never another vault's: an address costs nothing to
+        /// make, so places charged to requesters alone, in one room for every vault, were all taken by a few of them,
+        /// whichever vault they signed for.
         /// </summary>
-        public const int MAX_SIGNING_SESSIONS_PER_LEADER_AND_HASH = 2;
+        public const int MAX_REQUESTER_LED_SIGNING_SESSIONS_PER_VAULT = 8;
+
+        /// <summary>
+        /// Requester-led signing sessions open here in all: what they may hold in memory together. Reached only with
+        /// many vaults each at <see cref="MAX_REQUESTER_LED_SIGNING_SESSIONS_PER_VAULT"/>, and then it refuses requesters
+        /// only: the places of a key's holders and of casters are apart (<see cref="SigningRoomForValidators"/>).
+        /// </summary>
+        public const int MAX_REQUESTER_LED_SIGNING_SESSIONS = 1_000;
+
+        /// <summary>
+        /// Signing sessions one leader may have open here for the same thing to sign (one input of one transaction).
+        /// Counted per leader: a limit across leaders let one leader's sessions refuse every other leader of that input
+        /// for as long as it renewed them. A leader's new start for an input takes the place of its earlier one
+        /// (<see cref="DropSupersededSigningSessions"/>).
+        /// </summary>
+        public const int MAX_SIGNING_SESSIONS_PER_LEADER_AND_HASH = 1;
+
+        /// <summary>
+        /// The room for signing sessions led by a key's holders and by casters, with <paramref name="validators"/> active
+        /// validators: every one of them may hold <see cref="MAX_SIGNING_SESSIONS_PER_LEADER"/>, and there is never less
+        /// than <see cref="MAX_SIGNING_SESSIONS"/>. A fixed number is outgrown by the validator set, and is filled by the
+        /// few leaders whose limits add up to it.
+        /// </summary>
+        public static int SigningRoomForValidators(int validators) =>
+            Math.Max(MAX_SIGNING_SESSIONS, MAX_SIGNING_SESSIONS_PER_LEADER * Math.Max(0, validators));
+
+        /// <summary>
+        /// A room of signing places: what a place is charged to, how many places one such party may hold, and how many
+        /// there are for a validator set of a given size.
+        /// </summary>
+        public sealed record SigningRoom(string Name, string ChargedTo, int PerParty, Func<int, int> Places);
+
+        /// <summary>
+        /// The rooms <see cref="SigningStartRefusal"/> keeps. A place is charged to something that is not made for
+        /// nothing (a validator, a vault), and a room is filled only by many such parties, each at its limit: a test
+        /// holds every room declared here to that.
+        /// </summary>
+        public static IReadOnlyList<SigningRoom> SigningRooms { get; } = new[]
+        {
+            new SigningRoom("led by a holder of the key or a caster", "the leader", MAX_SIGNING_SESSIONS_PER_LEADER, SigningRoomForValidators),
+            new SigningRoom("led by a requester", "the vault", MAX_REQUESTER_LED_SIGNING_SESSIONS_PER_VAULT, _ => MAX_REQUESTER_LED_SIGNING_SESSIONS),
+        };
+
+        /// <summary>Whether a signing session holds a place: its share not given, and started within <see cref="SIGNING_UNPROGRESSED_SECONDS"/>.</summary>
+        public static bool SigningHoldsAPlace(SigningSession s, long nowSeconds) =>
+            !s.NonceConsumed && s.StartTimestamp >= nowSeconds - SIGNING_UNPROGRESSED_SECONDS;
 
         /// <summary>How far a signing start's timestamp may be from this validator's clock, in seconds: an old start cannot be sent again to use up its leader's room.</summary>
         private static readonly ConcurrentDictionary<string, long> _signingStartsSeen = new(StringComparer.Ordinal);
@@ -649,11 +713,17 @@ namespace VerifiedXCore.Bitcoin.FROST.Models
             }
         }
 
-        /// <summary>The leader's sessions here for one input opened by starts older than <paramref name="timestamp"/>: given up by a newer start.</summary>
-        public static void DropSupersededSigningSessions(string leader, string? scUID, string? requestHash, int inputIndex, long timestamp)
+        /// <summary>
+        /// The leader's other sessions here for one input, opened by starts no newer than <paramref name="timestamp"/>:
+        /// given up by the start that has it (<paramref name="sessionId"/>, whose own session is left). A start with the
+        /// same timestamp takes the earlier one's place too: kept beside it, a leader held two places for one input, and
+        /// only the later of the two could ever be given a share.
+        /// </summary>
+        public static void DropSupersededSigningSessions(string leader, string? scUID, string? requestHash, int inputIndex, long timestamp, string? sessionId = null)
         {
             foreach (var (id, s) in SigningSessions.Where(kv => kv.Value.LeaderAddress == leader && kv.Value.SmartContractUID == scUID
-                         && kv.Value.WithdrawalRequestHash == requestHash && kv.Value.InputIndex == inputIndex && kv.Value.LeaderStartTimestamp < timestamp).ToList())
+                         && kv.Value.WithdrawalRequestHash == requestHash && kv.Value.InputIndex == inputIndex && kv.Value.LeaderStartTimestamp <= timestamp
+                         && !string.Equals(kv.Key, sessionId, StringComparison.Ordinal)).ToList())
                 SigningSessions.TryRemove(id, out _);
         }
 
@@ -675,43 +745,66 @@ namespace VerifiedXCore.Bitcoin.FROST.Models
 
         /// <summary>
         /// Makes room under <see cref="MAX_SIGNING_SESSIONS_HELD"/> by dropping the oldest finished sessions (their share
-        /// given). Finished sessions are kept ten minutes and counted against the validator's total, though no per-leader
-        /// cap counts them: one leader starting, finishing and starting again (the same start may be sent again) filled
-        /// the total and every start here, the vault's holders' and the casters' included, was refused (fifth review,
-        /// round 35). Open sessions are never dropped.
+        /// given). Finished sessions are kept ten minutes and counted against that number, though no per-leader cap
+        /// counts them: one leader starting, finishing and starting again (the same start may be sent again) filled it
+        /// and every start here, the vault's holders' and the casters' included, was refused (fifth review, round 35).
+        /// Only the finished ones are counted, and only they are dropped: open sessions are their rooms' matter.
         /// </summary>
         public static void DropFinishedForRoom()
         {
-            var over = SigningSessions.Count - MAX_SIGNING_SESSIONS_HELD + 1;
+            var finished = SigningSessions.Where(kv => kv.Value.NonceConsumed).ToList();
+            var over = finished.Count - MAX_SIGNING_SESSIONS_HELD + 1;
             if (over <= 0) return;
-            foreach (var finished in SigningSessions.Where(kv => kv.Value.NonceConsumed).OrderBy(kv => kv.Value.StartTimestamp).Take(over).Select(kv => kv.Key).ToList())
-                SigningSessions.TryRemove(finished, out _);
+            foreach (var oldest in finished.OrderBy(kv => kv.Value.StartTimestamp).Take(over).Select(kv => kv.Key).ToList())
+                SigningSessions.TryRemove(oldest, out _);
         }
 
         /// <summary>
         /// Why a new signing session is refused for want of room; null when there is room. Counted over the sessions
-        /// given (the open ones), so the rule can be tested without the store. With no leader given only the
-        /// validator's total is judged (before the leader's signature has been checked).
+        /// given (the ones kept), so the rule can be tested without the store. With no leader given only what can be
+        /// judged before the leader's signature has been checked is judged: the finished sessions kept, and whether every
+        /// room is full.
         /// </summary>
-        public static string? SigningStartRefusal(IEnumerable<SigningSession> open, string? leaderAddress, string? messageHash, bool ledByRequester = false)
+        /// <remarks>
+        /// There are two rooms (<see cref="SigningRooms"/>), and a session takes a place in one of them only. One led by a
+        /// holder of the key or by a caster is counted against its leader, in a room that follows the validator set
+        /// (<paramref name="validators"/>; this node's count when not given). One led by a requester
+        /// (<paramref name="ledByRequester"/>) is counted against its vault (<paramref name="vaultUid"/>) as well. Neither
+        /// room is refused for what the other holds, and no number over both rooms refuses a start that has a place in
+        /// its own: the finished sessions kept have theirs (<see cref="MAX_SIGNING_SESSIONS_HELD"/>).
+        /// </remarks>
+        public static string? SigningStartRefusal(IEnumerable<SigningSession> open, string? leaderAddress, string? messageHash, bool ledByRequester = false,
+            string? vaultUid = null, long? nowSeconds = null, int? validators = null)
         {
             var held = open as ICollection<SigningSession> ?? open.ToList();
-            if (held.Count >= MAX_SIGNING_SESSIONS_HELD)
+            if (held.Count(x => x.NonceConsumed) >= MAX_SIGNING_SESSIONS_HELD)
                 return "Maximum concurrent signing sessions reached. Try again later.";
             // A session whose share this validator has given is done here: it no longer holds a place. It held one for
             // its full ten minutes, and a leader that had signed one 50-input transaction was refused for the next
-            // (fifth review, round 25). The finished ones are still kept (above) for their own ten minutes.
-            var sessions = held.Where(x => !x.NonceConsumed).ToList();
-            if (sessions.Count >= MAX_SIGNING_SESSIONS)
+            // (fifth review, round 25). The finished ones are still kept (above) for their own ten minutes. Nor does one
+            // whose Round 2 has not come within SIGNING_UNPROGRESSED_SECONDS.
+            var now = nowSeconds ?? TimeUtil.GetTime();
+            var sessions = held.Where(x => SigningHoldsAPlace(x, now)).ToList();
+            var ledByRequesters = sessions.Count(x => x.LedByRequester);
+            var roomForValidators = SigningRoomForValidators(validators ?? ActiveValidatorCount());
+            var validatorsRoomFull = sessions.Count - ledByRequesters >= roomForValidators;
+            var requestersRoomFull = ledByRequesters >= MAX_REQUESTER_LED_SIGNING_SESSIONS;
+            if (string.IsNullOrEmpty(leaderAddress))
+                return validatorsRoomFull && requestersRoomFull ? "Maximum concurrent signing sessions reached. Try again later." : null;
+            if (ledByRequester)
+            {
+                if (requestersRoomFull)
+                    return $"{MAX_REQUESTER_LED_SIGNING_SESSIONS} requester-led signing sessions are open here. Try again later; the vault's signers sign pinned transactions without you.";
+                if (sessions.Count(x => x.LedByRequester && string.Equals(x.VaultUID, vaultUid, StringComparison.Ordinal)) >= MAX_REQUESTER_LED_SIGNING_SESSIONS_PER_VAULT)
+                    return $"{MAX_REQUESTER_LED_SIGNING_SESSIONS_PER_VAULT} requester-led signing sessions are open here for this vault. Try again later.";
+            }
+            else if (validatorsRoomFull)
                 return "Maximum concurrent signing sessions reached. Try again later.";
-            if (string.IsNullOrEmpty(leaderAddress)) return null;
-            if (ledByRequester && sessions.Count(x => x.LedByRequester) >= MAX_REQUESTER_LED_SIGNING_SESSIONS)
-                return $"{MAX_REQUESTER_LED_SIGNING_SESSIONS} requester-led signing sessions are open here. Try again later; the vault's signers sign pinned transactions without you.";
             if (sessions.Count(x => x.LeaderAddress == leaderAddress) >= MAX_SIGNING_SESSIONS_PER_LEADER)
                 return $"This leader already has {MAX_SIGNING_SESSIONS_PER_LEADER} signing sessions open here. Try again later.";
             if (!string.IsNullOrEmpty(messageHash)
                 && sessions.Count(x => x.LeaderAddress == leaderAddress && string.Equals(x.MessageHash, messageHash, StringComparison.OrdinalIgnoreCase)) >= MAX_SIGNING_SESSIONS_PER_LEADER_AND_HASH)
-                return $"This leader already has {MAX_SIGNING_SESSIONS_PER_LEADER_AND_HASH} signing sessions open here for the same input. Try again later.";
+                return "This leader already has a signing session open here for the same input. Try again later.";
             return null;
         }
         
@@ -821,9 +914,11 @@ namespace VerifiedXCore.Bitcoin.FROST.Models
                 DKGSessions.TryRemove(key, out _);
             }
             
-            // Cleanup signing sessions (a shorter life than a key ceremony's: see SIGNING_SESSION_SECONDS)
+            // Cleanup signing sessions (a shorter life than a key ceremony's: see SIGNING_SESSION_SECONDS), and sooner
+            // the ones whose Round 2 has not come (SIGNING_UNPROGRESSED_SECONDS): no share was given in them.
             var signingCutoff = currentTime - SIGNING_SESSION_SECONDS;
-            var oldSigning = SigningSessions.Where(kvp => kvp.Value.StartTimestamp < signingCutoff).Select(kvp => kvp.Key).ToList();
+            var oldSigning = SigningSessions.Where(kvp => kvp.Value.StartTimestamp < signingCutoff || (!kvp.Value.NonceConsumed && !SigningHoldsAPlace(kvp.Value, currentTime)))
+                .Select(kvp => kvp.Key).ToList();
             foreach (var key in oldSigning)
             {
                 SigningSessions.TryRemove(key, out _);

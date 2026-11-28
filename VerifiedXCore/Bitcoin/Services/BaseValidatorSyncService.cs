@@ -146,7 +146,8 @@ namespace VerifiedXCore.Bitcoin.Services
                 if (!asMember) return (null, "Only a validator or caster on the contract signs a cancellation");
                 var pending = await PendingForSigningAsync();
                 if (pending == null) return (null, "Could not read the Base contract");
-                if (LiveTargetOf(pending, epoch) == null) return (null, "No pending removal names a validator or caster that is still live");
+                // Judged on what this node already knows of the pending removal: a request never makes it read Base for more.
+                if (LiveTargetOf(pending, tip, view.AdminNonce) == null) return (null, "No pending removal names a validator or caster that is still live");
                 return (new Authorized(VbtcbTypedData.CancelPendingDigest(view.AdminNonce, chainId, BaseBridgeService.ContractAddress), action, null, epoch, view.AdminNonce.ToString()), "");
             }
 
@@ -248,21 +249,31 @@ namespace VerifiedXCore.Bitcoin.Services
         }
 
         /// <summary>
-        /// Why this node vetoes a pending removal: the first member it names that this node sees live (a caster in its current
-        /// caster record, or a validator that keeps its seat at the epoch boundary: funded, seen in the two days before it),
-        /// or, for a V5 caster replacement, the first caster it would seat that is not in that record. Null when there is
-        /// none, as when it clears members that went dark for the committee's own, and for a removal proposed before V5
-        /// (the contract never executes it, and cancelPending would also drop a pending upgrade).
+        /// The first member a pending removal names that this node sees live at its tip, by the rule the operator's
+        /// signature on a proposal is given by (<see cref="BaseSignerSetPolicy.LiveForRemovalAt"/>): a caster in its
+        /// current caster record, or a funded validator seen on VFX. Null when it names none, as when it clears members
+        /// that went dark. A validator this node's operator named as not signing on Base, when signing this very proposal,
+        /// is not counted (BaseRemovalOverride, which tells that proposal from any other by the digest signed and the admin
+        /// nonce the pending removal was proposed under): the node does not veto what its operator approved, for that
+        /// validator. <paramref name="adminNonce"/> is the contract's now. Reads nothing from Base.
+        /// From V5, also the first caster a caster replacement would seat that is not in the current caster record. Null
+        /// for a removal proposed before V5: the contract never executes it, and cancelPending would also drop a pending upgrade.
         /// </summary>
-        internal static string? LiveTargetOf(BaseBridgeService.PendingRemoval pending, long epoch)
+        internal static string? LiveTargetOf(BaseBridgeService.PendingRemoval pending, long tip, System.Numerics.BigInteger adminNonce)
         {
             if (pending.Eta == 0 || pending.Nonce == 0) return null;
-            var committee = (VerifiedXCore.Services.CasterMembershipStore.GetCurrent()?.Casters ?? new List<VerifiedXCore.Models.CasterInfo>())
-                .Select(c => BaseSignerSetPolicy.BaseAddressOf(c.PublicKey).ToLowerInvariant()).Where(a => a.Length > 0).ToHashSet();
-            if (pending.Casters.FirstOrDefault(c => committee.Contains(c.ToLowerInvariant())) is { } caster) return caster;
-            if (pending.CasterAdds.FirstOrDefault(c => !committee.Contains(c.ToLowerInvariant())) is { } stranger) return stranger;
-            var kept = BaseSignerSetPolicy.KeptAt(epoch);
-            return pending.Validators.FirstOrDefault(v => kept.Contains(v.ToLowerInvariant()));
+            var live = BaseSignerSetPolicy.LiveForRemovalAt(tip);
+            if (live.LiveCaster(pending.Casters) is { } caster) return caster;
+            if (pending.CasterAdds.Count > 0)
+            {
+                var committee = (VerifiedXCore.Services.CasterMembershipStore.GetCurrent()?.Casters ?? new List<VerifiedXCore.Models.CasterInfo>())
+                    .Select(c => BaseSignerSetPolicy.BaseAddressOf(c.PublicKey).ToLowerInvariant()).Where(a => a.Length > 0).ToHashSet();
+                if (pending.CasterAdds.FirstOrDefault(c => !committee.Contains((c ?? "").ToLowerInvariant())) is { } stranger) return stranger;
+            }
+            if (live.LiveValidator(pending.Validators) == null) return null;
+            var named = VerifiedXCore.Bitcoin.Models.BaseRemovalOverride.For(BaseBridgeService.ContractAddress, BaseBridgeService.BaseChainId,
+                pending, adminNonce, BaseRemovalProposal.ProposedUnder(pending));
+            return live.LiveValidator(pending.Validators.Where(v => !named.Contains((v ?? "").Trim().ToLowerInvariant())));
         }
 
         /// <summary>This node's signature on the request, or null and why not (see <see cref="AuthorizeAsync"/>).</summary>
@@ -345,7 +356,12 @@ namespace VerifiedXCore.Bitcoin.Services
             var members = view.Validators.Concat(view.CasterList).Select(m => m.ToLowerInvariant()).Distinct().ToList();
             if (string.IsNullOrEmpty(myBase) || !members.Contains(myBase.ToLowerInvariant())) return;
             var pending = await BaseBridgeService.ReadPendingRemovalAsync();
-            if (pending == null || pending.Eta == 0 || LiveTargetOf(pending, epoch) is not { } live) return;
+            if (pending == null || pending.Eta == 0) return;
+            // Only here is Base read for the nonce the pending removal was proposed under (one attempt a pass, and only
+            // while a removal this node's operator signed waits on it).
+            if (VerifiedXCore.Bitcoin.Models.BaseRemovalOverride.WaitsOnTheProposalsNonce(BaseBridgeService.ContractAddress, pending, view.AdminNonce))
+                await BaseRemovalProposal.SearchAsync(pending);
+            if (LiveTargetOf(pending, tip, view.AdminNonce) is not { } live) return;
 
             var seed = pending.Eta.ToString();
             var first = FirstSeenPending.GetOrAdd(BaseBridgeService.ContractAddress + ":" + seed, Clock());
@@ -570,7 +586,7 @@ namespace VerifiedXCore.Bitcoin.Services
                     LogUtility.Log($"[BaseValidatorSync] {function}: this validator's Base address {ethAccount.Address} has no ETH for gas; the next validator in turn sends it.", "BaseValidatorSyncService");
                     return;
                 }
-                var web3 = new Nethereum.Web3.Web3(ethAccount, BaseBridgeService.BaseRpcUrl);
+                var web3 = await BaseRpc.SenderAsync(ethAccount);
                 var fn = web3.Eth.GetContract(ValidatorSetAbi, BaseBridgeService.ContractAddress).GetFunction(function);
                 var gas = await fn.EstimateGasAsync(ethAccount.Address, null, null, args);
                 txHash = await fn.SendTransactionAsync(ethAccount.Address, new Nethereum.Hex.HexTypes.HexBigInteger(gas.Value * 12 / 10), null, null, args);

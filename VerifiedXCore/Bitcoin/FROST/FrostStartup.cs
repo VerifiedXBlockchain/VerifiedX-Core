@@ -2529,9 +2529,9 @@ namespace VerifiedXCore.Bitcoin.FROST
                                 return;
                             }
 
-                            // FIND-0013 Fix: Enforce maximum concurrent session cap (in all, per leader, per input)
+                            // FIND-0013 Fix: Enforce maximum concurrent session cap (in all, per leader, per vault, per input)
                             FrostSessionStorage.DropFinishedForRoom(); // finished sessions make way (round 35)
-                            var noRoom = FrostSessionStorage.SigningStartRefusal(FrostSessionStorage.SigningSessions.Values.ToList(), null, null); // the total; the leader's own room once it is known to be the leader
+                            var noRoom = FrostSessionStorage.SigningStartRefusal(FrostSessionStorage.SigningSessions.Values.ToList(), null, null); // nothing to be had in any room; the leader's own room once it is known to be the leader
                             if (noRoom != null)
                             {
                                 context.Response.StatusCode = StatusCodes.Status429TooManyRequests;
@@ -2755,7 +2755,7 @@ namespace VerifiedXCore.Bitcoin.FROST
                             // was recorded as the leader's session and the retry's Round 2 refused (round 19).
                             // And the newest start verified here for the input is remembered, so starts the leader gave up are
                             // refused even once the newer session has gone, and the older sessions it gave up free their
-                            // places (round 20).
+                            // places (round 20). So does one of the same timestamp: a leader has one session for an input here.
                             if (VerifiedXCore.Bitcoin.Attestation.BtcVaultKeys.KeyRow(request.SmartContractUID) != null)
                             {
                                 if (!FrostSessionStorage.TakeStartOrder(request.LeaderAddress, request.SmartContractUID, request.WithdrawalRequestHash, request.InputIndex, request.Timestamp))
@@ -2764,7 +2764,7 @@ namespace VerifiedXCore.Bitcoin.FROST
                                     await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = "A newer start of this leader holds this input here." }));
                                     return;
                                 }
-                                FrostSessionStorage.DropSupersededSigningSessions(request.LeaderAddress, request.SmartContractUID, request.WithdrawalRequestHash, request.InputIndex, request.Timestamp);
+                                FrostSessionStorage.DropSupersededSigningSessions(request.LeaderAddress, request.SmartContractUID, request.WithdrawalRequestHash, request.InputIndex, request.Timestamp, request.SessionId);
                             }
 
                             // The leader is who it says: its room here, and a start that is not an old one sent again.
@@ -2774,9 +2774,12 @@ namespace VerifiedXCore.Bitcoin.FROST
                                 await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = "The signing start's timestamp is too far from this validator's clock." }));
                                 return;
                             }
+                            // A requester's place is its vault's; a holder's or a caster's is its own, in the room that follows
+                            // the validator set.
                             var ledByRequester = FrostSigningAuthorization.LedByRequester(request.LeaderAddress, request.SmartContractUID);
+                            var signedForVault = FrostSigningAuthorization.VaultOf(request.SmartContractUID);
                             FrostSessionStorage.DropFinishedForRoom();
-                            var noRoomForLeader = FrostSessionStorage.SigningStartRefusal(FrostSessionStorage.SigningSessions.Values.ToList(), request.LeaderAddress, request.MessageHash, ledByRequester);
+                            var noRoomForLeader = FrostSessionStorage.SigningStartRefusal(FrostSessionStorage.SigningSessions.Values.ToList(), request.LeaderAddress, request.MessageHash, ledByRequester, signedForVault);
                             if (noRoomForLeader != null)
                             {
                                 context.Response.StatusCode = StatusCodes.Status429TooManyRequests;
@@ -2969,6 +2972,7 @@ namespace VerifiedXCore.Bitcoin.FROST
                                 SmartContractUID = request.SmartContractUID,
                                 LeaderAddress = request.LeaderAddress,
                                 LedByRequester = ledByRequester,
+                                VaultUID = signedForVault,
                                 LeaderStartTimestamp = request.Timestamp,
                                 LeaderStartSignature = request.LeaderSignature,
                                 LeaderRemoteIp = FrostSigningAuthorization.NormalizeRemoteIp(context.Connection.RemoteIpAddress),

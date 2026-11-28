@@ -48,6 +48,22 @@ namespace VerifiedXCore.Tests
             new("mempool-add", new[] { "TransactionData.AddToPool" },
                 "TransactionData.SubmitOwnTransaction for a transaction this node made (it reports a refusal and records nothing until the mempool takes it), or read AddToPool's answer",
                 "Data/TransactionData.cs"),
+            new("base-client", new[] { "new Web3", "new RpcClient" },
+                "BaseRpc: an authorizing or an advisory read, or BaseRpc.SenderAsync to send (a client made anywhere else reads Base without the provider checks)",
+                "Bitcoin/Services/BaseRpc.cs"),
+        };
+
+        /// <summary>The clients of a Base provider: made in BaseRpc only.</summary>
+        private static readonly HashSet<string> BaseClientTypes = new(StringComparer.Ordinal) { "Web3", "RpcClient" };
+
+        /// <summary>The last identifier of a type: "Web3" for Nethereum.Web3.Web3.</summary>
+        private static string TypeName(TypeSyntax? type) => type switch
+        {
+            QualifiedNameSyntax q => q.Right.Identifier.Text,
+            AliasQualifiedNameSyntax a => a.Name.Identifier.Text,
+            SimpleNameSyntax n => n.Identifier.Text,
+            NullableTypeSyntax nullable => TypeName(nullable.ElementType),
+            _ => "",
         };
 
         private static string Root([System.Runtime.CompilerServices.CallerFilePath] string thisFile = "") =>
@@ -99,6 +115,14 @@ namespace VerifiedXCore.Tests
                     break;
                 case MemberAccessExpressionSyntax access when access.Name.Identifier.Text == "Body" && LastName(access.Expression) == "Request":
                     yield return "Request.Body";
+                    break;
+                // A client of a Base provider, written with its type or as new(...) where a variable or field of that type is declared.
+                case ObjectCreationExpressionSyntax created when BaseClientTypes.Contains(TypeName(created.Type)):
+                    yield return "new " + TypeName(created.Type);
+                    break;
+                case ImplicitObjectCreationExpressionSyntax { Parent: EqualsValueClauseSyntax { Parent: VariableDeclaratorSyntax { Parent: VariableDeclarationSyntax declaration } } }
+                    when BaseClientTypes.Contains(TypeName(declaration.Type)):
+                    yield return "new " + TypeName(declaration.Type);
                     break;
                 case MethodDeclarationSyntax declared when declared.Modifiers.Any(SyntaxKind.AsyncKeyword) && declared.ReturnType is PredefinedTypeSyntax { Keyword.Text: "void" }:
                     yield return "async void";
@@ -198,6 +222,23 @@ namespace VerifiedXCore.Tests
             Assert.Contains("async void", names);
             Assert.DoesNotContain("JObject.Parse", names);
             Assert.DoesNotContain("JToken.Parse", names);
+        }
+
+        [Fact]
+        public void A_client_of_a_Base_provider_is_found_however_its_type_is_written()
+        {
+            var code = "class C { Nethereum.Web3.Web3 f = new(u); void A() { var a = new Web3(u); var b = new Nethereum.Web3.Web3(account, u); Web3 c = new(u); var d = new RpcClient(new Uri(u)); /* new Web3(u) */ var s = \"new Web3(u)\"; var e = new Web3Other(u); } }";
+            var names = CSharpSyntaxTree.ParseText(code).GetRoot().DescendantNodes().SelectMany(Names).ToList();
+            Assert.Equal(4, names.Count(n => n == "new Web3")); // the field, a, b and c; not the comment, the string or the other type
+            Assert.Equal(1, names.Count(n => n == "new RpcClient"));
+        }
+
+        [Fact]
+        public void No_file_but_the_Base_layer_makes_a_client_of_a_Base_provider()
+        {
+            var uses = Count().Where(kv => kv.Key.EndsWith("|base-client", StringComparison.Ordinal)).Select(kv => $"{kv.Key}: {kv.Value}").ToList();
+            Assert.True(uses.Count == 0, "A client of a Base provider is made outside Bitcoin/Services/BaseRpc.cs: " + string.Join(", ", uses));
+            Assert.DoesNotContain(RawPrimitiveBaseline.Allowed.Keys, k => k.EndsWith("|base-client", StringComparison.Ordinal));
         }
 
         [Fact]
