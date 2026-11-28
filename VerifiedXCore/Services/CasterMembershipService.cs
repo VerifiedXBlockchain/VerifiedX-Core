@@ -181,9 +181,16 @@ namespace VerifiedXCore.Services
         /// Reconciles the live connectivity pool (Globals.BlockCasters) to the given record:
         /// removes entries not in the record, adds record members via the atomic capped add,
         /// and updates IsBlockCaster for self.
+        /// From the membership chain's start the pool follows the committee the chain has in force for the next block, not
+        /// a record this node holds that no block has carried yet: a member a pending demotion removes keeps casting, and a
+        /// caster it promotes is not one, until the block that carries it is written (MembershipChain.AfterCommit).
         /// </summary>
         public static void ReconcileBlockCastersToRecord(CasterMembershipRecord record)
         {
+            var next = (Globals.LastBlock?.Height ?? -1) + 1;
+            if (MembershipChain.ActiveAt(next) && CasterMembershipStore.GetForHeight(next) is { } inForce)
+                record = inForce;
+
             // A rotation replaces the whole committee a dozen blocks ahead: the outgoing members produce until then.
             if (VreeElection.RotationPending(record, Globals.LastBlock?.Height ?? -1, CasterMembershipStore.GetBySeq))
                 return;
@@ -245,7 +252,10 @@ namespace VerifiedXCore.Services
             CasterMembershipRecord? record = null,
             Func<string, Task<bool>>? probe = null)
         {
-            record ??= CasterMembershipStore.GetCurrent();
+            // From the membership chain's start the pool heals to the committee in force for the next block, as it is
+            // reconciled (ReconcileBlockCastersToRecord): a member of a record no block has carried yet is not re-added.
+            var next = (Globals.LastBlock?.Height ?? -1) + 1;
+            record ??= MembershipChain.ActiveAt(next) ? CasterMembershipStore.GetForHeight(next) : CasterMembershipStore.GetCurrent();
             if (record == null)
                 return 0;
 

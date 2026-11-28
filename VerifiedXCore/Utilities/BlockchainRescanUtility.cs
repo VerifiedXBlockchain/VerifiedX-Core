@@ -11,6 +11,7 @@ namespace VerifiedXCore.Utilities
     {
         public static async Task<bool> ValidateBlock(Block block, bool blockDownloads = false)
         {
+            using var judging = Services.MembershipChain.Judging(block);
             bool result = false;
 
             if (block == null) return result; //null block submitted. reject 
@@ -45,6 +46,7 @@ namespace VerifiedXCore.Utilities
                 ChainRefId = block.ChainRefId,
                 VrfProof = block.VrfProof,
                 VrfMix = block.VrfMix,
+                MembershipRun = block.MembershipRun,
             };
 
             newBlock.Rebuild(block);
@@ -59,6 +61,9 @@ namespace VerifiedXCore.Utilities
             {
                 return result;//block rejected
             }
+
+            if (Services.MembershipChain.RunRefusal(block) != null)
+                return result;
 
             if (block.Height != 0)
             {

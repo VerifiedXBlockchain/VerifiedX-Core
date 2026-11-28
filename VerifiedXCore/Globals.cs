@@ -1481,6 +1481,29 @@ namespace VerifiedXCore
         /// <summary>The same height on testnet (GlobalsNetworkHeights).</summary>
         public const long VreeActivationTestnetHeight = 107_700;
 
+        /// <summary>
+        /// From this height a block may carry the membership records that take effect after it (Block.MembershipRun),
+        /// covered by its hash, and the caster committee for a height is read from the chain instead of from the records
+        /// this node happens to hold (MembershipChain). The chain's rules start at the first block at or after it that
+        /// carries <see cref="MembershipAnchorRecordHash"/>. long.MaxValue: not active. This is the mainnet value; the
+        /// testnets' are in GlobalsNetworkHeights.
+        /// </summary>
+        public static long MembershipChainHeight = long.MaxValue;
+
+        /// <summary>
+        /// The membership record the chain starts from (its RecordHash), the mainnet value; empty: the chain's rules never
+        /// start. Pinned in the release that sets <see cref="MembershipChainHeight"/>, to a record that:
+        /// <list type="bullet">
+        /// <item>every node reports (valapi GetMembershipRecord: the same sequence and hash on every seed and on a sample of
+        /// validators), so every producer can carry it;</item>
+        /// <item>has been the head for days, so no sibling can still replace it;</item>
+        /// <item>is not inside an elected committee's term: the chain reads no record below its anchor.</item>
+        /// </list>
+        /// Normally the head when the release is cut. Records signed after it are carried with it on the first block, so a
+        /// rotation between the release and the height is not lost.
+        /// </summary>
+        public static string MembershipAnchorRecordHash = "";
+
         /// <summary>Blocks with Height &gt;= this require a valid <see cref="Models.Block.ConsensusCertificate"/>.
         /// Wave 6: armed automatically from the genesis membership record's EffectiveFromHeight
         /// (CasterMembershipStore.TryArmFromGenesis) — NOT hand-edited. long.MaxValue until a

@@ -88,9 +88,11 @@ namespace VerifiedXCore.Services
         /// Blocks past a signed candidate's EffectiveFromHeight before its mark is released. A live append refuses a
         /// candidate whose effective height has passed (<see cref="EffectiveHeightHasPassed"/>), so once every node near
         /// the tip is past it the signed candidate can no longer land, and a different set may be signed at the seq.
-        /// The margin covers nodes whose tip trails ours.
+        /// The margin covers nodes whose tip trails ours, and it is the membership chain's carry window: a block carries a
+        /// record at most that many blocks past its effective height (MembershipChain.CarryWindowBlocks), so a record
+        /// whose signers have released their marks can never land on the chain.
         /// </summary>
-        public const int SignedMarkReleaseMarginBlocks = MaxProposerTipLead;
+        public const int SignedMarkReleaseMarginBlocks = MembershipChain.CarryWindowBlocks;
 
         /// <summary>The expiry of a mark written before marks recorded an effective height (a one-time migration).</summary>
         public const long LegacyMarkExpirySeconds = 600;
@@ -419,6 +421,20 @@ namespace VerifiedXCore.Services
         /// </summary>
         public static CasterMembershipRecord? GetForHeight(long height)
         {
+            // From the membership chain's start the chain says which record governs a height, the same on every node
+            // that holds its blocks (MembershipChain); the records this node holds decide only below it. A block being
+            // judged is judged by the chain's record and the election or reset it carries itself, never by one this node
+            // happens to hold: two nodes, one holding a rotation and one not, would give the same block two verdicts.
+            if (MembershipChain.RecordFor(height) is { } onChain)
+                return MembershipChain.IsJudging
+                    ? MembershipChain.CarriedByJudgedBlock(height, onChain) ?? onChain
+                    : StartingAtNextBlock(height, onChain) ?? onChain;
+            return HeldForHeight(height);
+        }
+
+        /// <summary>The record this node holds that governs <paramref name="height"/> by its own records alone: max EffectiveFromHeight &lt;= height.</summary>
+        public static CasterMembershipRecord? HeldForHeight(long height)
+        {
             var head = GetCurrent();
             if (head == null) return null;
             if (head.EffectiveFromHeight <= height) return head;
@@ -426,6 +442,19 @@ namespace VerifiedXCore.Services
             if (col == null) return null;
             return col.Query().Where(x => x.EffectiveFromHeight <= height)
                 .OrderByDescending(x => x.RecordSeq).FirstOrDefault();
+        }
+
+        /// <summary>
+        /// Outside block judging (a caster's own round, the record it attaches to the block it certifies, the pool it works
+        /// with): an election or a seed reset this node holds that takes effect at the next block and extends the chain's
+        /// record. It governs that block only if the block carries it (MembershipChain.CarriedByJudgedBlock).
+        /// </summary>
+        private static CasterMembershipRecord? StartingAtNextBlock(long height, CasterMembershipRecord onChain)
+        {
+            if (height != (Globals.LastBlock?.Height ?? -1) + 1) return null;
+            var held = GetBySeq(onChain.RecordSeq + 1);
+            if (held == null || held.EffectiveFromHeight != height || !MembershipChain.IsCarriedType(held.ChangeType)) return null;
+            return string.Equals(held.PrevRecordHash, onChain.RecordHash, StringComparison.OrdinalIgnoreCase) ? held : null;
         }
 
         /// <summary>The record at a sequence number, or null.</summary>
@@ -462,7 +491,9 @@ namespace VerifiedXCore.Services
         /// applies to the candidate (VreeElection.TermRefusal).</param>
         /// <param name="bySeq">The record at a sequence number; the store's unless a run of records not stored yet is being
         /// judged (<see cref="ValidRunFromHead"/>).</param>
-        public static bool ValidateSuccessor(CasterMembershipRecord? prev, CasterMembershipRecord candidate, out string reason, bool termEnded = false, Func<long, CasterMembershipRecord?>? bySeq = null)
+        /// <param name="atHeight">Judging a record a block carries (MembershipChain): the height of the block before it, in
+        /// place of this node's tip.</param>
+        public static bool ValidateSuccessor(CasterMembershipRecord? prev, CasterMembershipRecord candidate, out string reason, bool termEnded = false, Func<long, CasterMembershipRecord?>? bySeq = null, long? atHeight = null)
         {
             reason = "";
             if (candidate == null) { reason = "null candidate"; return false; }
@@ -535,7 +566,7 @@ namespace VerifiedXCore.Services
 
             if (VreeElection.IsHoldRecord(candidate) && VreeElection.HoldShapeRefusal(prev, candidate) is { } notAHold)
             { reason = notAHold; return false; }
-            if (VreeElection.TermRefusal(prev, candidate, Globals.LastBlock?.Height ?? -1, bySeq ?? GetBySeq, termEnded) is { } termOver)
+            if (VreeElection.TermRefusal(prev, candidate, atHeight ?? Globals.LastBlock?.Height ?? -1, bySeq ?? GetBySeq, termEnded) is { } termOver)
             { reason = termOver; return false; }
 
             var prevSet = prev.Casters.Select(c => c.Address).ToHashSet(StringComparer.Ordinal);
@@ -769,7 +800,7 @@ namespace VerifiedXCore.Services
                     return false;
                 }
                 var tip = Globals.LastBlock?.Height ?? -1;
-                if (!fromSync && candidate.RecordSeq > 0 && EffectiveHeightHasPassed(candidate.EffectiveFromHeight, tip))
+                if (!fromSync && candidate.RecordSeq > 0 && EffectiveHeightHasPassed(candidate.EffectiveFromHeight, tip) && !MembershipChain.MayStillCarry(candidate, tip + 1))
                 {
                     reason = $"effective height {candidate.EffectiveFromHeight} has passed (tip {tip})";
                     return false;
@@ -1039,6 +1070,69 @@ namespace VerifiedXCore.Services
         /// <summary>This node, against the record heads its last membership pull observed.</summary>
         internal static bool MissingWhilePeersHaveOne()
             => MissingWhilePeersHaveOne(GetCurrent()?.RecordSeq, CasterDiscoveryService.LastObservedPeerHeads);
+
+        /// <summary>
+        /// After a block from the membership chain's start is written: this node's records are made to match the chain's
+        /// (<paramref name="chain"/>, the records in force for <paramref name="nextHeight"/>), and the records it holds above
+        /// the chain's that the chain can no longer carry go. Those are a promotion, demotion, departure or hold whose
+        /// carry window has passed, and everything signed on top of it: left as the head, every later proposal would build
+        /// on a record no block can carry and the committee could never change again (the head is the chain's record once
+        /// more). The marks this node keeps of what it signed are released for every sequence above the chain's record
+        /// whose record can no longer be carried, so it can sign another set there. Returns whether the head changed.
+        /// </summary>
+        public static bool FollowChain(IReadOnlyList<CasterMembershipRecord> chain, long nextHeight)
+        {
+            if (chain == null || chain.Count == 0) return false;
+            lock (Mut)
+            {
+                var col = Collection();
+                var before = GetCurrent();
+                if (col == null || before == null) return false; // a node that holds no records keeps none
+
+                // The chain decides: from the first of its records this node holds otherwise, its own records give way.
+                for (var i = 0; i < chain.Count; i++)
+                {
+                    var r = chain[i];
+                    var held = col.FindById(r.RecordSeq);
+                    if (held != null && string.Equals(held.RecordHash, r.RecordHash, StringComparison.OrdinalIgnoreCase)) continue;
+                    if (i == 0) break; // the anchor itself is not held here: this node's records are of another history, left as they are
+                    foreach (var stale in col.Query().Where(x => x.RecordSeq >= r.RecordSeq).ToList()) col.Delete(stale.RecordSeq);
+                    foreach (var c in chain.Skip(i)) col.Upsert(c.RecordSeq, c);
+                    CasterLogUtility.Log($"MEMBERSHIP: records from seq {r.RecordSeq} now follow the chain (head seq {chain[^1].RecordSeq}).", "MEMBERSHIP");
+                    break;
+                }
+
+                var head = chain[^1];
+                _cachedHead = null;
+                var pending = col.Query().Where(x => x.RecordSeq > head.RecordSeq).OrderBy(x => x.RecordSeq).ToList();
+                if (pending.Count > 0 && col.FindById(head.RecordSeq) is { } atHead
+                    && string.Equals(atHead.RecordHash, head.RecordHash, StringComparison.OrdinalIgnoreCase))
+                {
+                    var first = pending[0];
+                    var offChain = !string.Equals(first.PrevRecordHash, head.RecordHash, StringComparison.OrdinalIgnoreCase);
+                    if (MembershipChain.IsRunType(first.ChangeType) && (offChain || !MembershipChain.MayStillCarry(first, nextHeight)))
+                    {
+                        foreach (var p in pending) col.Delete(p.RecordSeq);
+                        CasterLogUtility.Log(
+                            $"MEMBERSHIP: {first.ChangeType} seq {first.RecordSeq} (effective {first.EffectiveFromHeight}) was not carried by the chain and can no longer be; "
+                            + $"{pending.Count} held record(s) above the chain's seq {head.RecordSeq} dropped.", "MEMBERSHIP");
+                    }
+                }
+
+                var marks = MarkerCollection();
+                if (marks != null)
+                    foreach (var mark in marks.Query().Where(x => x.Id > head.RecordSeq).ToList())
+                        if (mark.EffectiveFromHeight > 0 && col.FindById(mark.Id) == null
+                            && !MembershipChain.MayStillCarry(new CasterMembershipRecord { EffectiveFromHeight = mark.EffectiveFromHeight }, nextHeight))
+                        {
+                            marks.Delete(mark.Id);
+                            CasterLogUtility.Log($"MEMBERSHIP: signed-seq marker at seq {mark.Id} released: its record (effective {mark.EffectiveFromHeight}) can no longer be carried.", "MEMBERSHIP");
+                        }
+
+                var after = GetCurrent();
+                return !string.Equals(before.RecordHash, after?.RecordHash, StringComparison.OrdinalIgnoreCase);
+            }
+        }
 
         /// <summary>The stored records from this seq up, so a block refused after its carried record was adopted can put them back.</summary>
         public static List<CasterMembershipRecord> RecordsFrom(long seq) =>

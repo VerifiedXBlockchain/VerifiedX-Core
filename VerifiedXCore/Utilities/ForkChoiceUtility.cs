@@ -99,8 +99,8 @@ namespace VerifiedXCore.Utilities
             return signers.Count;
         }
 
-        /// <summary>True when the cert rule applies to a block at this height (cert-era + supported version).</summary>
+        /// <summary>True when the cert rule applies to a block at this height (cert-era or the membership chain's, + supported version).</summary>
         public static bool IsCertRuleApplicable(long height, int blockVersion)
-            => height >= Globals.CertEnforceHeight && ConsensusCertificateRules.SupportsConsensusCertificate(blockVersion);
+            => (height >= Globals.CertEnforceHeight || Services.MembershipChain.ActiveAt(height)) && ConsensusCertificateRules.SupportsConsensusCertificate(blockVersion);
     }
 }

@@ -32,6 +32,10 @@ namespace VerifiedXCore.Services
                 if (VreeService.StandDownReason(block.Height) != null)
                     return;
 
+                // Nor the block that starts the membership chain with a committee older than one in force here.
+                if (MembershipChain.ActivationSigningRefusal(block) != null)
+                    return;
+
                 // One block per height (AttestationGuard): a block accepted after this node signed another one at the
                 // height — e.g. the majority block adopted by fork resolution — is already certified without us.
                 if (!AttestationGuard.TryClaim(block.Height, block.Hash))

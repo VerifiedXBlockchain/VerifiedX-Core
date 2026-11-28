@@ -668,6 +668,10 @@ namespace VerifiedXCore.Services
             var result = await ValidateBlockOnce(block, ignoreAdjSignatures, blockDownloads, validateOnly, updateCLI, skipCasterCheck, source, refusal);
             if (result || !refusal.Noted || validateOnly)
                 return result;
+            // From the membership chain's start the committee comes from the chain, not from the record this node holds: a
+            // newer record would not change the verdict, and no pull is waited for.
+            if (block != null && MembershipChain.ActiveAt(block.Height))
+                return result;
 
             AfterFirstVerdictForTests?.Invoke();
 
@@ -726,6 +730,7 @@ namespace VerifiedXCore.Services
             }
 
             await ValidateBlockSemaphore.WaitAsync();
+            using var judging = MembershipChain.Judging(block); // committee reads in this validation: the chain's and this block's own
 
             long? committedHeight = null; // set once the block is written: from then on a failure leaves the state behind it
             Action? undoCarriedRecord = null; // set once the block's record replaces siblings, cleared once the block is taken
@@ -928,7 +933,7 @@ namespace VerifiedXCore.Services
 
                 // Without a membership record no certificate is required at all, so a synced node waits for the record
                 // its peers hold (ValidatorMembershipPull, every minute) before it takes the next block.
-                if (!validateOnly && AtSyncedTip(block) && CasterMembershipStore.MissingWhilePeersHaveOne())
+                if (!validateOnly && AtSyncedTip(block) && !MembershipChain.ActiveAt(block.Height) && CasterMembershipStore.MissingWhilePeersHaveOne())
                 {
                     ValidatorMembershipPull.RequestSoon(); // ask again within seconds, not at the next minute
                     DbContext.Rollback("BlockValidatorService.ValidateBlock()-noRecord");
@@ -1200,6 +1205,10 @@ namespace VerifiedXCore.Services
                     return result;
                 }
 
+                // Below the membership chain height a carried run is outside the hash: anyone could put one on the block.
+                if (block.Height < Globals.MembershipChainHeight)
+                    block.MembershipRun = null;
+
                 var newBlock = new Block
                 {
                     Height = block.Height,
@@ -1211,6 +1220,7 @@ namespace VerifiedXCore.Services
                     ValidatorAnswer = block.ValidatorAnswer,
                     VrfProof = block.VrfProof,
                     VrfMix = block.VrfMix,
+                    MembershipRun = block.MembershipRun,
                 };
 
                 newBlock.Build();
@@ -1226,6 +1236,14 @@ namespace VerifiedXCore.Services
                 {
                     DbContext.Rollback("BlockValidatorService.ValidateBlock()-11");
                     return result;//block rejected
+                }
+
+                // The membership records the block carries, under its hash and its producer's signature.
+                if (MembershipChain.RunRefusal(block) is { } runRefusal)
+                {
+                    NoteRefusedForItsContents(block);
+                    DbContext.Rollback("BlockValidatorService.ValidateBlock()-membershipRun", runRefusal);
+                    return result;
                 }
 
                 if (block.Height != 0)
@@ -2260,6 +2278,7 @@ namespace VerifiedXCore.Services
         //This method does not add block or update any treis
         public static async Task<bool> ValidateBlockForTask(Block block, bool ignoreAdjSignatures, bool blockDownloads = false)
         {
+            using var judging = MembershipChain.Judging(block);
             bool result = false;
 
             if (block == null) return result; //null block submitted. reject 
@@ -2319,6 +2338,7 @@ namespace VerifiedXCore.Services
                 ValidatorAnswer = block.ValidatorAnswer,
                 VrfProof = block.VrfProof,
                 VrfMix = block.VrfMix,
+                MembershipRun = block.MembershipRun,
             };
 
             newBlock.Build();
@@ -2334,6 +2354,11 @@ namespace VerifiedXCore.Services
             {
                 ValidatorLogUtility.Log("Block validated failed due to merkel root not matching", "BlockValidatorService.ValidateBlockForTask()");
                 return result;//block rejected
+            }
+            if (MembershipChain.RunRefusal(block) is { } runRefusal)
+            {
+                ValidatorLogUtility.Log($"Block refused: its membership records: {runRefusal}", "BlockValidatorService.ValidateBlockForTask()");
+                return result;
             }
             var blockCoinBaseResult = BlockchainData.ValidateBlock(block); //this checks the coinbase tx
 
