@@ -1129,6 +1129,15 @@ namespace VerifiedXCore
         public static long BaseBridgeV4Height = long.MaxValue;
         /// <summary>The same height on testnet (GlobalsNetworkHeights): live as soon as the testnet contract is V4.</summary>
         public const long BaseBridgeV4TestnetHeight = 0;
+
+        /// <summary>
+        /// The first epoch boundary at which the vBTCb contract's casters follow the caster committee by
+        /// BaseSignerSetPolicy.ComputeCastersContinuous (in after a day without a break, the whole change in one updateCasters)
+        /// instead of one in and one out an epoch after two days. Not a block rule: a node on an older build computes the
+        /// old change and does not co-sign the new one. Compared with the boundary, not the tip. Mainnet: set to
+        /// BaseBridgeV4Height at release, so its contract starts on this rule.
+        /// </summary>
+        public static long BaseCasterCatchUpHeight = long.MaxValue;
         public static int BlockTime = 12000; //12 seconds
         public static int BlockTimeMin = 10000; //10 seconds
         public static int BlockTimeMax = 15000; //15 seconds
