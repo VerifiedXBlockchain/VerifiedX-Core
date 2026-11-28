@@ -1022,6 +1022,26 @@ namespace VerifiedXCore.Tests
                 Assert.Contains("No pending removal names", Refusal(await Ask("CANCEL", Array.Empty<string>(), Epoch, 15)));
                 await Watch();
                 Assert.Empty(sent);
+
+                // V5: a replacement of a dark caster that seats a key outside the committee is vetoed; one that seats a
+                // committee member is not.
+                var stranger = NewKey();
+                Contract(16, validators, casters);
+                BaseBridgeService.ReadPendingRemovalForTests = () => Task.FromResult<BaseBridgeService.PendingRemoval?>(
+                    Pending(Array.Empty<string>(), new[] { dark.Base }) with { Nonce = 7, CasterAdds = new[] { stranger.Base } });
+                SignedBy(_me, await Ask("CANCEL", Array.Empty<string>(), Epoch, 16), VbtcbTypedData.CancelPendingDigest(16, 8453, Proxy));
+                Contract(17, validators, casters);
+                BaseBridgeService.ReadPendingRemovalForTests = () => Task.FromResult<BaseBridgeService.PendingRemoval?>(
+                    Pending(Array.Empty<string>(), new[] { dark.Base }) with { Nonce = 7, CasterAdds = new[] { casters[0].Base } });
+                Assert.Contains("No pending removal names", Refusal(await Ask("CANCEL", Array.Empty<string>(), Epoch, 17)));
+
+                // A removal proposed before V5 (nonce 0) is never executed by V5: not vetoed, even when it names a live caster.
+                Contract(18, validators, casters);
+                BaseBridgeService.ReadPendingRemovalForTests = () => Task.FromResult<BaseBridgeService.PendingRemoval?>(
+                    Pending(Array.Empty<string>(), casters.Take(2).Select(k => k.Base)) with { Nonce = 0 });
+                Assert.Contains("No pending removal names", Refusal(await Ask("CANCEL", Array.Empty<string>(), Epoch, 18)));
+                await Watch();
+                Assert.Empty(sent);
             }
             finally
             {

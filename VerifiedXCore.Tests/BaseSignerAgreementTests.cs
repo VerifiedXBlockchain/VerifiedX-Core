@@ -116,6 +116,9 @@ namespace VerifiedXCore.Tests
                 [Selector("getPendingRemovals()")] = Encoded("address[]", removing),
                 [Selector("getPendingCasterRemovals()")] = Encoded("address[]", new List<string>()),
                 [Selector("pendingRemovalHeight()")] = Encoded("uint256", new BigInteger(removing.Count == 0 ? 0 : Epoch)),
+                // V5: the pending removal's nonce (proposed on V5) and the casters a replacement would seat (none).
+                [Selector("pendingRemovalNonce()")] = Encoded("uint256", new BigInteger(removing.Count == 0 ? 0 : nonce)),
+                [Selector("getPendingCasterAdds()")] = Encoded("address[]", new List<string>()),
             };
             p.On = (method, args) =>
             {

@@ -256,12 +256,20 @@ namespace VerifiedXCore.Bitcoin.Services
         /// is not counted (BaseRemovalOverride, which tells that proposal from any other by the digest signed and the admin
         /// nonce the pending removal was proposed under): the node does not veto what its operator approved, for that
         /// validator. <paramref name="adminNonce"/> is the contract's now. Reads nothing from Base.
+        /// From V5, also the first caster a caster replacement would seat that is not in the current caster record. Null
+        /// for a removal proposed before V5: the contract never executes it, and cancelPending would also drop a pending upgrade.
         /// </summary>
         internal static string? LiveTargetOf(BaseBridgeService.PendingRemoval pending, long tip, System.Numerics.BigInteger adminNonce)
         {
-            if (pending.Eta == 0) return null;
+            if (pending.Eta == 0 || pending.Nonce == 0) return null;
             var live = BaseSignerSetPolicy.LiveForRemovalAt(tip);
             if (live.LiveCaster(pending.Casters) is { } caster) return caster;
+            if (pending.CasterAdds.Count > 0)
+            {
+                var committee = (VerifiedXCore.Services.CasterMembershipStore.GetCurrent()?.Casters ?? new List<VerifiedXCore.Models.CasterInfo>())
+                    .Select(c => BaseSignerSetPolicy.BaseAddressOf(c.PublicKey).ToLowerInvariant()).Where(a => a.Length > 0).ToHashSet();
+                if (pending.CasterAdds.FirstOrDefault(c => !committee.Contains((c ?? "").ToLowerInvariant())) is { } stranger) return stranger;
+            }
             if (live.LiveValidator(pending.Validators) == null) return null;
             var named = VerifiedXCore.Bitcoin.Models.BaseRemovalOverride.For(BaseBridgeService.ContractAddress, BaseBridgeService.BaseChainId,
                 pending, adminNonce, BaseRemovalProposal.ProposedUnder(pending));
@@ -508,8 +516,9 @@ namespace VerifiedXCore.Bitcoin.Services
                 return false;
             }
             var digest = VbtcbTypedData.UpdateCastersDigest(add, remove, epoch, view.AdminNonce, BaseBridgeService.BaseChainId, BaseBridgeService.ContractAddress);
-            var sigs = await CollectAsync("CASTERS", add, epoch, nonce, members, ipOf, myBase, view, digest, remove);
-            if (!UserBridgeMintService.Enough(view, view.RequiredMintSignatures, sigs.Keys))
+            var sigs = await CollectAsync("CASTERS", add, epoch, nonce, members, ipOf, myBase, view, digest, remove,
+                signed => UserBridgeMintService.EnoughForCasterChange(view, signed));
+            if (!UserBridgeMintService.EnoughForCasterChange(view, sigs.Keys))
             {
                 LogUtility.Log($"[BaseValidatorSync] Caster change for epoch {epoch}: {Tally(view, sigs)}.", "BaseValidatorSyncService");
                 return false;

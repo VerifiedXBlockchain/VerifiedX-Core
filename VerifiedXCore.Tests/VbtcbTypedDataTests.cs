@@ -76,6 +76,23 @@ namespace VerifiedXCore.Tests
         }
 
         [Fact]
+        public void TheV5Digests_MatchEthers()
+        {
+            Assert.Equal(Hex("0xed134b040f69c6615fa7f104421ea6ad6b00a99dcc136e51db6c6714a471aadf"), VbtcbTypedData.CancelPendingDigest(7, 8453, Proxy));
+            Assert.Equal(Hex("0x3ac46ce13dc71113270dc8dd2152fbce97140867e8917ae198d59850e0c70fad"),
+                VbtcbTypedData.CancelPendingKindsDigest(VbtcbTypedData.PendingRemoval, 7, 8453, Proxy));
+            // A burn named by its transaction hash, and the second burn of a transaction that holds several ("hash:1").
+            const string burnTx = "0xb80dd397372defb854c53f02b1b9bf28f7ce79d1225ea82ad3369cd1ff2f5a6b";
+            Assert.Equal(Hex("0xf4b76f61875d88d3a2409cbb14422f6f90b713cde9b78a8ca57c7cb2e764588f"),
+                VbtcbTypedData.RefundDigest("0x1111111111111111111111111111111111111111", 25_000, burnTx, 8453, Proxy));
+            Assert.Equal(Hex("0x2394f227f1fd726c7517059368f7e11870232fb79c997f018802550a0ddcc915"),
+                VbtcbTypedData.RefundDigest("0x1111111111111111111111111111111111111111", 25_000, burnTx + ":1", 8453, Proxy));
+            Assert.Equal(Hex("0x1fe6b0c827c2c9af0a59be5da77bbef45804114810b01aab97e4cab1f7e2d7f7"),
+                VbtcbTypedData.ReplaceCastersDigest(new[] { "0x1111111111111111111111111111111111111111", "0x2222222222222222222222222222222222222222" },
+                    new[] { "0x3333333333333333333333333333333333333333" }, 12345, 7, 8453, Proxy));
+        }
+
+        [Fact]
         public void TheDigest_ChangesWithEveryFieldOfTheDomainAndTheMint()
         {
             var baseline = VbtcbTypedData.MintDigest("0xD140DfAB7F08B5ce8E54A8b364E447b49E6EEda6", 400_000, "l", 1, 8453, Proxy);
@@ -88,12 +105,13 @@ namespace VerifiedXCore.Tests
         }
 
         [Fact]
-        public void TheContractAbi_IsV4_AndHoldsWhatCoreAndTheWalletCall()
+        public void TheContractAbi_IsV5_AndHoldsWhatCoreAndTheWalletCall()
         {
             var abi = new Nethereum.ABI.ABIDeserialisation.ABIJsonDeserialiser().DeserialiseContract(BaseBridgeService.CONTRACT_ABI);
             var functions = abi.Functions.Select(f => f.Name).ToHashSet();
             foreach (var name in new[] { "mintWithProof", "isLockIdUsed", "requiredMintSignatures", "balanceOf", "burnForVfxExit", "burnForBTCExit",
-                         "MESSAGE_VERSION", "getValidators", "getCasters", "requiredCasterSignatures", "updateCasters", "cancelPending", "proposeRemoval" })
+                         "MESSAGE_VERSION", "getValidators", "getCasters", "requiredCasterSignatures", "updateCasters", "cancelPending", "proposeRemoval",
+                         "cancelPendingKinds", "refundBurn", "burnForBTCExitWithMinPayout", "MIN_BTC_EXIT_SATS", "proposeCasterReplacement", "executeRemoval" })
                 Assert.Contains(name, functions);
             Assert.DoesNotContain("upgradeWithValidatorApproval", functions);
             Assert.Equal(4, abi.Functions.Single(f => f.Name == "addValidatorBatch").InputParameters.Length);

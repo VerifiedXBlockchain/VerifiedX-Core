@@ -662,7 +662,8 @@ namespace VerifiedXCore.Tests
                 {
                     asked.Clear();
                     BaseBridgeService.ReadSignerViewForTests = () => Task.FromResult<BaseBridgeService.SignerView?>(
-                        new BaseBridgeService.SignerView(new[] { BaseOf(a), BaseOf(b), BaseOf(c), BaseOf(d) }, version, 3, 0));
+                        new BaseBridgeService.SignerView(new[] { BaseOf(a), BaseOf(b), BaseOf(c), BaseOf(d) }, version, 3, 0,
+                            version == 4 ? new[] { BaseOf(a), BaseOf(b), BaseOf(c), BaseOf(d) } : null, version == 4 ? 3 : 0)); // V4: the same keys are its casters
 
                     var got = await UserBridgeMintService.CollectValidatorSignatures(record, 77, Globals.BaseEvmChainId, configured, 2);
 
@@ -757,7 +758,8 @@ namespace VerifiedXCore.Tests
                 foreach (var version in new[] { 4, 3 })
                 {
                     BaseBridgeService.ReadSignerViewForTests = () => Task.FromResult<BaseBridgeService.SignerView?>(
-                        new BaseBridgeService.SignerView(keys.Take(3).Select(BaseOf).ToArray(), version, 2, 0));
+                        new BaseBridgeService.SignerView(keys.Take(3).Select(BaseOf).ToArray(), version, 2, 0,
+                            version == 4 ? keys.Take(3).Select(BaseOf).ToArray() : null, version == 4 ? 2 : 0)); // V4: the same keys are its casters
                     BridgeLockRecord.Save(new BridgeLockRecord
                     {
                         LockId = lockId, SmartContractUID = vault.Uid, OwnerAddress = Minter.Address, Amount = 0.004M, AmountSats = 400_000,
