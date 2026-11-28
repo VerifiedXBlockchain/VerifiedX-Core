@@ -39,8 +39,9 @@ namespace VerifiedXCore.Models
         /// of its rebuilds ran (rows put back open before the rebuild closed them), and slots from before the anchor check on
         /// every cycle could have been re-anchored to a block they do not hold the state of (a dead branch diffed forward after
         /// a fast rollback). 3: the build with both, so a slot written by a build with only one of them is retaken too.
+        /// 4: slots hold the contracts' ledger entries (Globals.VaultLedgerHeight), so a slot taken without them is retaken.
         /// </remarks>
-        public const int CurrentSchemaVersion = 3;
+        public const int CurrentSchemaVersion = 4;
         public const int SlotCount = 3;
 
         /// <summary>Wave 5 deep anchors: dedicated slots refreshed on coarse cadences (~H-100 and

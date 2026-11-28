@@ -129,15 +129,7 @@ namespace VerifiedXCore.Bitcoin.Attestation
         /// <summary>The addresses the vault's ledger names (any balance, zero included).</summary>
         public static int LedgerAddresses(SmartContractStateTrei? contract)
         {
-            var rows = VaultLedgerStore.Rows(contract);
-            if (rows.Count == 0) return 0;
-            var named = new HashSet<string>(StringComparer.Ordinal);
-            foreach (var row in rows)
-            {
-                if (IsReal(row?.FromAddress)) named.Add(row!.FromAddress);
-                if (IsReal(row?.ToAddress)) named.Add(row!.ToAddress);
-            }
-            return named.Count;
+            return VaultLedgerStore.HolderCount(contract);
         }
 
         private static bool Names(SmartContractStateTrei contract, string address) => VaultLedgerStore.Names(contract, address);

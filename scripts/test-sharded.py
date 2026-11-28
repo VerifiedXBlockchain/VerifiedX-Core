@@ -12,10 +12,23 @@ Usage: python scripts/test-sharded.py [out-dir] [shards] [timings-log]
                shard logs in out-dir are used if present, otherwise each class counts a quarter second a test
 
 Each shard's full log is out-dir/shard-<n>.log. The exit code is 1 when any test failed.
+
+The tests write their temporary databases to one folder of their own, not the system temp folder: VFX_TEST_TEMP
+when set, otherwise %LOCALAPPDATA%/VfxTestTemp (~/.cache/VfxTestTemp elsewhere). An antivirus exclusion for that
+folder alone speeds the suite up without excluding the whole temp folder.
 """
 import collections, glob, os, re, shutil, subprocess, sys, time
 
 DOTNET = os.environ.get("DOTNET") or shutil.which("dotnet") or r"C:\Program Files\dotnet\dotnet.exe"
+
+def test_env():
+    """The environment for the build and the test processes: their temp folder is one of their own (see above)."""
+    base = os.environ.get("LOCALAPPDATA") or os.path.join(os.path.expanduser("~"), ".cache")
+    tmp = os.path.abspath(os.environ.get("VFX_TEST_TEMP") or os.path.join(base, "VfxTestTemp"))
+    os.makedirs(tmp, exist_ok=True)
+    env = dict(os.environ)
+    env["TMP"] = env["TEMP"] = env["TMPDIR"] = tmp
+    return env, tmp
 
 def main():
     repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -23,17 +36,19 @@ def main():
     shards = int(sys.argv[2]) if len(sys.argv) > 2 else 6
     timings = [sys.argv[3]] if len(sys.argv) > 3 else sorted(glob.glob(os.path.join(out, "shard-*.log")))
     os.makedirs(out, exist_ok=True)
+    env, tmp = test_env()
+    print(f"temp folder {tmp}")
     build = os.path.join(out, "build") + os.sep
     proj = os.path.join(repo, "VerifiedXCore.Tests", "VerifiedXCore.Tests.csproj")
     dll = os.path.join(build, "VerifiedXCore.Tests.dll")
 
     t0 = time.time()
-    r = subprocess.run([DOTNET, "build", proj, f"-p:OutDir={build}", "--nologo", "-v", "q"], capture_output=True, text=True)
+    r = subprocess.run([DOTNET, "build", proj, f"-p:OutDir={build}", "--nologo", "-v", "q"], capture_output=True, text=True, env=env)
     if r.returncode != 0:
         print(r.stdout[-4000:], r.stderr[-2000:]); sys.exit("build failed")
     print(f"build {time.time() - t0:.0f} s")
 
-    r = subprocess.run([DOTNET, "test", dll, "--list-tests"], capture_output=True, text=True)
+    r = subprocess.run([DOTNET, "test", dll, "--list-tests"], capture_output=True, text=True, env=env)
     names = [l.strip() for l in r.stdout.splitlines() if l.startswith("    VerifiedXCore.Tests.")]
     if r.returncode != 0 or not names:
         print(r.stdout[-4000:], r.stderr[-2000:]); sys.exit("test discovery failed")
@@ -68,7 +83,7 @@ def main():
         flt = "|".join(f"FullyQualifiedName~VerifiedXCore.Tests.{c}." for c in g)
         log = open(os.path.join(out, f"shard-{i}.log"), "w", encoding="utf-8")
         procs.append((subprocess.Popen([DOTNET, "test", dll, "--filter", flt, "--logger", "console;verbosity=normal"],
-                                       stdout=log, stderr=subprocess.STDOUT, cwd=out), log))
+                                       stdout=log, stderr=subprocess.STDOUT, cwd=out, env=env), log))
     codes = []
     for p, log in procs:
         codes.append(p.wait()); log.close()
@@ -99,7 +114,7 @@ def main():
     rerun_log = os.path.join(out, "rerun.log")
     with open(rerun_log, "w", encoding="utf-8") as log:
         code = subprocess.run([DOTNET, "test", dll, "--filter", flt, "--logger", "console;verbosity=normal"],
-                              stdout=log, stderr=subprocess.STDOUT, cwd=out).returncode
+                              stdout=log, stderr=subprocess.STDOUT, cwd=out, env=env).returncode
     again = read_log(rerun_log)
     listed = sum(by_class[c] for c in classes)
     if not again["totals"] or again["total"] < listed or (code != 0 and not again["failures"]):

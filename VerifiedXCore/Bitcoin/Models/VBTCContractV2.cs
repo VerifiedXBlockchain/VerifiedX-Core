@@ -350,9 +350,7 @@ namespace VerifiedXCore.Bitcoin.Models
 
                 if (VerifiedXCore.Bitcoin.Attestation.VaultLedgerStore.HasRows(scStateTreiRec))
                 {
-                    bool holdsBalance = localAddrs.Any(a => VerifiedXCore.Bitcoin.Attestation.VaultLedgerStore.Rows(scStateTreiRec)
-                        .Where(t => t.FromAddress == a || t.ToAddress == a)
-                        .Sum(t => t.Amount) > 0);
+                    bool holdsBalance = localAddrs.Any(a => VerifiedXCore.Bitcoin.Attestation.VaultLedgerStore.Balance(scStateTreiRec, a) > 0);
                     if (holdsBalance)
                         return false;
                 }
