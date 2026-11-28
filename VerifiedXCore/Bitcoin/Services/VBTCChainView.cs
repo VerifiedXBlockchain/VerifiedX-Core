@@ -78,7 +78,7 @@ namespace VerifiedXCore.Bitcoin.Services
             if (string.IsNullOrEmpty(address)) return new List<Vault>();
             return (SmartContractStateTrei.GetSCST()?.FindAll() ?? Enumerable.Empty<SmartContractStateTrei>())
                 .Where(s => s.OwnerAddress == address
-                         || (s.SCStateTreiTokenizationTXes?.Any(x => x.FromAddress == address || x.ToAddress == address) ?? false))
+                         || VerifiedXCore.Bitcoin.Attestation.VaultLedgerStore.Names(s, address))
                 .Select(FromState).Where(v => v != null).Select(v => v!).ToList();
         }
 

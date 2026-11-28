@@ -729,7 +729,7 @@ namespace VerifiedXCore.Bitcoin
                                 if(scState != null && postAuditTknz?.DepositAddress != null)
                                 {
                                     // Re-judged every pass, so a vault that is topped up again reads as solvent again.
-                                    var stateBalance = scState.SCStateTreiTokenizationTXes?.Sum(x => x.Amount) ?? 0M;
+                                    var stateBalance = VerifiedXCore.Bitcoin.Attestation.VaultLedgerStore.Rows(scState).Sum(x => x.Amount);
                                     await TokenizedBitcoin.SetInsolvent(postAuditTknz.DepositAddress, stateBalance > postAuditTknz.Balance);
                                 }
 
