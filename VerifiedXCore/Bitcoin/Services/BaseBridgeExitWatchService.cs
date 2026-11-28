@@ -171,16 +171,69 @@ namespace VerifiedXCore.Bitcoin.Services
             return Math.Max(1, span / 4);
         }
 
+        private static readonly object CursorLock = new();
+        /// <summary>The rescans asked for, each with its number in order and the cursor it set; the last few are kept.</summary>
+        private static readonly List<(long Number, long Cursor)> Rescans = new();
+        private static long _rescanNumber;
+        /// <summary>Which rescans each poll's state was read after: the number of the last one before the read.</summary>
+        private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<BridgeExitSyncState, object> ReadAfter = new();
+
+        /// <summary>The scan state as a poll starts from it. A rescan asked for before this is in it already.</summary>
+        internal static BridgeExitSyncState ReadCursorForPoll()
+        {
+            lock (CursorLock)
+            {
+                var state = BridgeExitSyncState.GetOrCreate();
+                ReadAfter.AddOrUpdate(state, _rescanNumber);
+                return state;
+            }
+        }
+
+        /// <summary>
+        /// Saves the scan state a poll holds. A rescan asked for after that poll read the state is kept: the cursor
+        /// saved is no later than the one the rescan asked for, so the next poll reads from there. Each poll is judged
+        /// by its own read, so another poll starting in between does not make it forget the rescan.
+        /// </summary>
+        internal static void SaveCursorFromPoll(BridgeExitSyncState state)
+        {
+            lock (CursorLock)
+            {
+                var readAfter = ReadAfter.TryGetValue(state, out var number) ? (long)number : _rescanNumber;
+                foreach (var rescan in Rescans)
+                    if (rescan.Number > readAfter)
+                        state.LastScannedBlock = Math.Min(state.LastScannedBlock, rescan.Cursor);
+                BridgeExitSyncState.Save(state);
+            }
+        }
+
+        /// <summary>Tests only: forgets the rescans asked for.</summary>
+        internal static void ForgetRescansForTests() { lock (CursorLock) Rescans.Clear(); }
+
         /// <summary>Reset the scan cursor to rescan from a specific block. Next poll will start from fromBlock.</summary>
         public static (bool Success, string Message) RescanFromBlock(long fromBlock)
         {
             if (fromBlock < 0)
                 return (false, "Block number must be >= 0");
 
-            var state = BridgeExitSyncState.GetOrCreate();
-            var previousBlock = state.LastScannedBlock;
-            state.LastScannedBlock = Math.Max(0, fromBlock - 1);
-            BridgeExitSyncState.Save(state);
+            long previousBlock;
+            BridgeExitSyncState state;
+            lock (CursorLock)
+            {
+                state = BridgeExitSyncState.GetOrCreate();
+                previousBlock = state.LastScannedBlock;
+                state.LastScannedBlock = Math.Max(0, fromBlock - 1);
+                BridgeExitSyncState.Save(state);
+                // A poll already under way read the cursor before this and saves where it got to when it ends: it is told.
+                Rescans.Add((++_rescanNumber, state.LastScannedBlock));
+                // The list stays short without forgetting what an unfinished poll still needs: the two oldest become
+                // one, under the later number and the earlier cursor, so any poll that predates either is still held
+                // to the earliest block asked for.
+                if (Rescans.Count > 64)
+                {
+                    Rescans[1] = (Rescans[1].Number, Math.Min(Rescans[0].Cursor, Rescans[1].Cursor));
+                    Rescans.RemoveAt(0);
+                }
+            }
 
             var msg = $"Reset exit scan cursor from {previousBlock} to {state.LastScannedBlock} (will rescan from block {fromBlock})";
             LogUtility.Log($"[BaseBridgeExit] {msg}", "BaseBridgeExitWatchService.RescanFromBlock");
@@ -236,7 +289,7 @@ namespace VerifiedXCore.Bitcoin.Services
             LogUtility.Log($"[BaseBridgeExit] Now handling burns: reading Base again from block {back + 1} (cursor was {state.LastScannedBlock}).",
                 "BaseBridgeExitWatchService.PollOnceInternal");
             state.LastScannedBlock = back;
-            BridgeExitSyncState.Save(state);
+            SaveCursorFromPoll(state);
         }
 
         /// <summary>Records a burn this node handed to the casters' consensus, read in Base block <paramref name="baseBlock"/>.</summary>
@@ -284,7 +337,7 @@ namespace VerifiedXCore.Bitcoin.Services
             LogUtility.Log($"[BaseBridgeExit] The path-audit rules have begun: reading Base again from block {back + 1} (cursor was {state.LastScannedBlock}).",
                 "BaseBridgeExitWatchService.PollOnceInternal");
             state.LastScannedBlock = back;
-            BridgeExitSyncState.Save(state);
+            SaveCursorFromPoll(state);
         }
 
         /// <summary>Test seam: forget the start and handling history.</summary>
@@ -326,14 +379,14 @@ namespace VerifiedXCore.Bitcoin.Services
             var latest = (long)latestHex.Value;
             _behind = false;
 
-            var state = BridgeExitSyncState.GetOrCreate();
+            var state = ReadCursorForPoll();
 
             if (state.LastScannedBlock == 0)
             {
                 if (_startBlockOverride.HasValue)
                 {
                     state.LastScannedBlock = Math.Max(0, _startBlockOverride.Value - 1);
-                    BridgeExitSyncState.Save(state);
+                    SaveCursorFromPoll(state);
                     LogUtility.Log(
                         $"[BaseBridgeExit] BASE_BRIDGE_EXIT_FROM_BLOCK={_startBlockOverride}; scanning from block {state.LastScannedBlock + 1}",
                         "BaseBridgeExitWatchService.PollOnceInternal");
@@ -341,7 +394,7 @@ namespace VerifiedXCore.Bitcoin.Services
                 else
                 {
                     state.LastScannedBlock = Math.Max(0, latest - 1);
-                    BridgeExitSyncState.Save(state);
+                    SaveCursorFromPoll(state);
                     LogUtility.Log($"[BaseBridgeExit] Initialized scan cursor at block {state.LastScannedBlock} (only new burns after this are processed).",
                         "BaseBridgeExitWatchService.PollOnceInternal");
                     _started = true;
@@ -562,7 +615,7 @@ namespace VerifiedXCore.Bitcoin.Services
             _singleBlockFailures = 0;
 
             state.LastScannedBlock = to;
-            BridgeExitSyncState.Save(state);
+            SaveCursorFromPoll(state);
             _behind = to < latest;
 
             return (processed, to, processed > 0 ? $"Processed {processed} exit burn(s)" : "OK");

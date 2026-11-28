@@ -221,26 +221,60 @@ namespace VerifiedXCore.Bitcoin.Services
         internal static Func<Task<SignerView?>>? ReadSignerViewForTests;
 
         /// <summary>The contract's <see cref="SignerView"/> from the first RPC that answers; null when none does.</summary>
+        /// <summary>
+        /// Whether a failed contract call is the contract reverting (which is how a contract without the function
+        /// answers) and not the provider failing to answer: a revert the client decoded, or an RPC error that says the
+        /// execution reverted. A rate limit, an internal error or a timeout is not.
+        /// </summary>
+        internal static bool SaysTheContractReverted(Exception ex) =>
+            ex is Nethereum.ABI.FunctionEncoding.SmartContractRevertException
+            || ex.GetType().Name == "SmartContractCustomErrorRevertException" // a revert carrying a custom error or no reason
+            || (ex is Nethereum.JsonRpc.Client.RpcResponseException rpc
+                && ((rpc.RpcError?.Message ?? rpc.Message ?? "").IndexOf("revert", StringComparison.OrdinalIgnoreCase) >= 0 || rpc.RpcError?.Code == 3));
+
         public static async Task<SignerView?> ReadSignerViewAsync()
         {
             if (ReadSignerViewForTests != null) return await ReadSignerViewForTests();
             if (!IsBridgeConfigured) return null;
-            var view = await BaseRpc.AuthorizingFirstAsync(async (web3, at) =>
+            return await ReadSignerViewFromAsync(RpcUrlCandidates(), ReadSignerViewAtAsync);
+        }
+
+        /// <summary>The signer view from the first provider that gives one: a provider whose read fails is passed over. Null when none gives one.</summary>
+        internal static async Task<SignerView?> ReadSignerViewFromAsync(IEnumerable<string> providers, Func<string, Task<SignerView>> read)
+        {
+            foreach (var url in providers)
+            {
+                try { return await read(url); }
+                catch { }
+            }
+            return null;
+        }
+
+        /// <summary>
+        /// The contract's message version as one provider reports it: 3 when the call reverts, which is how a contract
+        /// without the function (V3) answers. Any other failure of the call is the provider's and is thrown, so that
+        /// provider's read fails and the next is asked: it is not taken for a V3 contract.
+        /// </summary>
+        internal static async Task<int> ReadMessageVersionAsync(Func<Task<BigInteger>> call)
+        {
+            try { return (int)await call(); }
+            catch (Exception ex) when (SaysTheContractReverted(ex)) { return 3; }
+        }
+
+        /// <summary>One provider's signer view: an authorizing read, through the layer (the provider must be on this network's Base chain).</summary>
+        private static Task<SignerView> ReadSignerViewAtAsync(string url) =>
+            BaseRpc.AuthorizingAtAsync(url, async (web3, at) =>
             {
                 var c = web3.Eth.GetContract(SIGNER_VIEW_ABI, ContractAddress);
                 var validators = await c.GetFunction("getValidators").CallAsync<List<string>>(at);
                 var required = (int)await c.GetFunction("requiredMintSignatures").CallAsync<BigInteger>(at);
                 var nonce = await c.GetFunction("adminNonce").CallAsync<BigInteger>(at);
-                var version = 3;
-                try { version = (int)await c.GetFunction("MESSAGE_VERSION").CallAsync<BigInteger>(at); }
-                catch (Exception ex) when (ex is Nethereum.JsonRpc.Client.RpcResponseException or Nethereum.ABI.FunctionEncoding.SmartContractRevertException) { } // V3: no such function
+                var version = await ReadMessageVersionAsync(() => c.GetFunction("MESSAGE_VERSION").CallAsync<BigInteger>(at));
                 if (version != VbtcbTypedData.MessageVersion) return new SignerView(validators, version, Math.Max(2, required), nonce);
                 var casters = await c.GetFunction("getCasters").CallAsync<List<string>>(at);
                 var requiredCasters = (int)await c.GetFunction("requiredCasterSignatures").CallAsync<BigInteger>(at);
                 return new SignerView(validators, version, Math.Max(2, required), nonce, casters, requiredCasters);
             });
-            return view.Answered ? view.Value : null;
-        }
 
         /// <summary>The contract's pending proposeRemoval: the validators and casters it names, and when it can run (0: none).</summary>
         public sealed record PendingRemoval(IReadOnlyList<string> Validators, IReadOnlyList<string> Casters, BigInteger Eta);

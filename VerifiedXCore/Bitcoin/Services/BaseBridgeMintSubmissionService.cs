@@ -107,6 +107,8 @@ namespace VerifiedXCore.Bitcoin.Services
                 return;
             }
 
+            await ResolveUnfollowedSentMintsAsync(TimeUtil.GetTime());
+
             var records = BridgeLockRecord.GetByStatus(BridgeLockStatus.AttestationReady);
             if (records == null || records.Count == 0)
                 return;
@@ -125,6 +127,46 @@ namespace VerifiedXCore.Bitcoin.Services
                         errorMessage: $"Mint submission failed: {ex.Message}");
                 }
             }
+        }
+
+        /// <summary>
+        /// What a lock becomes once its sent mint's receipt is known (true: in a block and succeeded; false: reverted;
+        /// null: in no block). Minted when Base holds the mint in a block, or when the contract says it has minted the
+        /// lock (another submission was first). Otherwise back to ready, so that it is submitted again: the contract is
+        /// asked first then, and mints a lock once.
+        /// </summary>
+        internal static async Task ResolveSentMintAsync(string lockId, string txHash, bool? receipt)
+        {
+            if (receipt == true || await UserBridgeMintService.LockMintedOnBaseAsync(lockId) == true)
+            {
+                BridgeLockRecord.UpdateStatus(lockId, BridgeLockStatus.Minted, baseTxHash: txHash, errorMessage: "");
+                LogUtility.Log($"[MintSubmission] mintWithProof CONFIRMED for lock {lockId}: {txHash}", "BaseBridgeMintSubmissionService.SubmitMintWithProof");
+                return;
+            }
+            var why = receipt == false ? $"mintWithProof TX reverted: {txHash}" : $"mintWithProof TX {txHash} was in no Base block within the wait";
+            BridgeLockRecord.UpdateStatus(lockId, BridgeLockStatus.AttestationReady, errorMessage: why);
+            LogUtility.Log($"[MintSubmission] {why} (lock {lockId}); it is submitted again.", "BaseBridgeMintSubmissionService.SubmitMintWithProof");
+        }
+
+        /// <summary>Seconds after which a sent mint nobody is following any more (the node restarted) is looked at again.</summary>
+        internal const long SentMintFollowedSeconds = 10 * 60;
+
+        /// <summary>
+        /// Locks left as sent with a transaction hash for longer than <see cref="SentMintFollowedSeconds"/>: the task
+        /// that followed them into a block is gone. Each is resolved from its receipt as it is now. Returns how many.
+        /// </summary>
+        internal static async Task<int> ResolveUnfollowedSentMintsAsync(long now)
+        {
+            var resolved = 0;
+            foreach (var record in BridgeLockRecord.GetByStatus(BridgeLockStatus.ProofSubmitted))
+            {
+                if (string.IsNullOrEmpty(record.BaseTxHash) || now - (record.RelayedAtUtc ?? 0) < SentMintFollowedSeconds
+                    || UserBridgeMintService.MintIsUnderWay(record.LockId))
+                    continue;
+                await ResolveSentMintAsync(record.LockId, record.BaseTxHash, await UserBridgeMintService.MintReceiptAsync(record.BaseTxHash));
+                resolved++;
+            }
+            return resolved;
         }
 
         /// <summary>
@@ -153,6 +195,14 @@ namespace VerifiedXCore.Bitcoin.Services
             if (string.IsNullOrEmpty(rpcUrl) || string.IsNullOrEmpty(contractAddress))
             {
                 LogUtility.Log("[MintSubmission] RPC or contract not configured.", "BaseBridgeMintSubmissionService.SubmitMintWithProof");
+                return;
+            }
+
+            // The contract mints a lock once: one it has minted already (an earlier submission that was in no block when
+            // its wait ended, or the holder's own) is minted, and is not submitted again.
+            if (await UserBridgeMintService.LockMintedOnBaseAsync(record.LockId) == true)
+            {
+                BridgeLockRecord.UpdateStatus(record.LockId, BridgeLockStatus.Minted, errorMessage: "");
                 return;
             }
 
@@ -201,41 +251,19 @@ namespace VerifiedXCore.Bitcoin.Services
                 LogUtility.Log($"[MintSubmission] mintWithProof TX submitted for lock {record.LockId}: {txHash}",
                     "BaseBridgeMintSubmissionService.SubmitMintWithProof");
 
-                BridgeLockRecord.UpdateStatus(record.LockId, BridgeLockStatus.MintedOnBase, baseTxHash: txHash);
+                // Sent, and not yet in a block: the lock is minted only once Base holds the transaction in one.
+                BridgeLockRecord.UpdateStatus(record.LockId, BridgeLockStatus.ProofSubmitted, baseTxHash: txHash);
 
                 // Wait for confirmation in background
                 _ = Task.Run(async () =>
                 {
-                    try
+                    bool? receipt = null;
+                    for (var attempts = 0; receipt == null && attempts < UserBridgeMintService.MintReceiptPolls; attempts++)
                     {
-                        int attempts = 0;
-                        Nethereum.RPC.Eth.DTOs.TransactionReceipt? receipt = null;
-                        while (receipt == null && attempts < 60)
-                        {
-                            await Task.Delay(5000);
-                            receipt = await web3.Eth.Transactions.GetTransactionReceipt.SendRequestAsync(txHash);
-                            attempts++;
-                        }
-
-                        if (receipt != null && receipt.Status.Value == 1)
-                        {
-                            BridgeLockRecord.UpdateStatus(record.LockId, BridgeLockStatus.Minted, baseTxHash: txHash);
-                            LogUtility.Log($"[MintSubmission] mintWithProof CONFIRMED for lock {record.LockId} in block {receipt.BlockNumber.Value}",
-                                "BaseBridgeMintSubmissionService.SubmitMintWithProof");
-                        }
-                        else if (receipt != null)
-                        {
-                            BridgeLockRecord.UpdateStatus(record.LockId, BridgeLockStatus.AttestationReady,
-                                errorMessage: $"mintWithProof TX reverted: {txHash}");
-                            LogUtility.Log($"[MintSubmission] mintWithProof REVERTED for lock {record.LockId}: {txHash}",
-                                "BaseBridgeMintSubmissionService.SubmitMintWithProof");
-                        }
+                        await Task.Delay(UserBridgeMintService.MintReceiptPollMs);
+                        receipt = await UserBridgeMintService.MintReceiptAsync(txHash);
                     }
-                    catch (Exception ex)
-                    {
-                        LogUtility.Log($"[MintSubmission] Error waiting for confirmation of {txHash}: {ex.Message}",
-                            "BaseBridgeMintSubmissionService.SubmitMintWithProof");
-                    }
+                    await ResolveSentMintAsync(record.LockId, txHash, receipt);
                 });
             }
             catch (Exception ex)

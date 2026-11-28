@@ -191,6 +191,17 @@ namespace VerifiedXCore.Bitcoin.Services
         public static Task<T> AuthorizingPrimaryAsync<T>(Func<Web3, BlockParameter, Task<T>> read) =>
             PrimaryAsync(read);
 
+        /// <summary>
+        /// An authorizing read asked of one provider the caller names (a caller that walks the providers itself).
+        /// Throws when that provider is not on Base, or when the read does.
+        /// </summary>
+        public static async Task<T> AuthorizingAtAsync<T>(string url, Func<Web3, BlockParameter, Task<T>> read)
+        {
+            var (check, reason) = await CheckChainAsync(url);
+            if (check != BaseProviderCheck.OnBase) throw new BaseProviderException($"Base cannot be read: {reason}");
+            return await read(Client(url), BlockParameter.CreateLatest());
+        }
+
         // ── Advisory reads ───────────────────────────────────────────────────────────────
 
         /// <summary>An advisory read, asked of the providers in their configured order until one does not throw.</summary>
