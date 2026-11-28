@@ -159,7 +159,14 @@ namespace VerifiedXCore.Bitcoin.Services
             public string? LiveCaster(IEnumerable<string> named) => named.FirstOrDefault(c => Casters.Contains((c ?? "").Trim().ToLowerInvariant()));
         }
 
-        private static (long Height, string Hash, List<Models.VBTCValidator> Seen)? _seenForRemoval;
+        /// <summary>
+        /// One scan's result with the block it was made at. Kept as one reference that is read once and replaced whole
+        /// (the veto loop and signing requests ask together, across a tip change): a block's height and hash are never
+        /// read beside another block's list.
+        /// </summary>
+        private sealed record SeenAtBlock(long Height, string Hash, List<Models.VBTCValidator> Seen);
+
+        private static volatile SeenAtBlock? _seenForRemoval;
 
         /// <summary>
         /// Who is live when a removal of members is proposed, as of <paramref name="tip"/>: the validators that hold the
@@ -181,21 +188,21 @@ namespace VerifiedXCore.Bitcoin.Services
             else
             {
                 seen = VBTCValidatorRegistry.GetValidatorsSeenWithin(tip, RemovalLiveBlocks).Where(v => !v.IsS3C).ToList();
-                if (hash.Length > 0) _seenForRemoval = (tip, hash, seen);
+                if (hash.Length > 0) _seenForRemoval = new SeenAtBlock(tip, hash, seen);
             }
             var validators = VBTCValidatorRegistry.FundedOnly(seen).Select(v => BaseAddressOf(v.FrostPublicKey).ToLowerInvariant())
                 .Where(a => a.Length > 0).ToHashSet();
             return new RemovalLiveness(validators, casters);
         }
 
-        private static (long Height, string Hash, List<Models.VBTCValidator> Seen)? _seen;
+        private static volatile SeenAtBlock? _seen;
 
         /// <summary>The public validators seen in the KeepSeenBlocks up to the boundary: one block scan per boundary block.</summary>
         private static List<Models.VBTCValidator> SeenAt(long epochHeight, string blockHash)
         {
             if (_seen is { } s && s.Height == epochHeight && s.Hash == blockHash) return s.Seen;
             var seen = VBTCValidatorRegistry.GetValidatorsSeenWithin(epochHeight, KeepSeenBlocks).Where(v => !v.IsS3C).ToList();
-            _seen = (epochHeight, blockHash, seen);
+            _seen = new SeenAtBlock(epochHeight, blockHash, seen);
             return seen;
         }
 

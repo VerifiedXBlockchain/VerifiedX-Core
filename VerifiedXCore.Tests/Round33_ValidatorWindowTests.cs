@@ -85,5 +85,50 @@ namespace VerifiedXCore.Tests
             Assert.DoesNotContain(after, v => v.ValidatorAddress == validators[4].Address);
             Assert.InRange(VBTCValidatorRegistry.BlocksReadOnThisThread - before, 9, 10);    // the new 33..41 (and 32, to see it follows)
         }
+
+        /// <summary>
+        /// Two windows are asked at every new tip, the last 1,000 blocks and the two days a Base seat is judged over, and
+        /// the 1,000 before an epoch boundary below the tip in between. On a chain whose blocks name the one before them,
+        /// each of them reads only the block it has not seen: the short scan does not drop what the long one reuses, and a
+        /// scan below the tip does not drop the tip's.
+        /// </summary>
+        [Fact]
+        public void ScansOfTwoWindows_AndOneBelowTheTip_EachReadOnlyTheNewBlock()
+        {
+            const int twoDays = 14_400;
+            const long boundary = 7_200, start = twoDays + 30;
+            var (old, recent) = (NewKey(), NewKey());
+            var blocks = new List<Block>();
+            string? below = null;
+            for (long h = 0; h <= start; h++)
+            {
+                var hash = $"w{h}-{Guid.NewGuid():N}";
+                var tx = h == 100 ? Validator(TransactionType.VBTC_V2_VALIDATOR_REGISTER, old, h)
+                    : h == start - 50 ? Validator(TransactionType.VBTC_V2_VALIDATOR_REGISTER, recent, h) : null;
+                blocks.Add(new Block { Height = h, Hash = hash, PrevHash = below, Transactions = tx == null ? new List<Transaction>() : new List<Transaction> { tx } });
+                below = hash;
+            }
+            BlockchainData.GetBlocks().InsertBulkSafe(blocks);
+
+            long Reads(Action scan)
+            {
+                var before = VBTCValidatorRegistry.BlocksReadOnThisThread;
+                scan();
+                return VBTCValidatorRegistry.BlocksReadOnThisThread - before;
+            }
+            void Long(long tip) => Assert.Equal(2, VBTCValidatorRegistry.GetValidatorsSeenWithin(tip, twoDays).Count);
+            void Short(long tip) => Assert.Equal(recent.Address, Assert.Single(VBTCValidatorRegistry.GetActiveValidatorsAt(tip)).ValidatorAddress);
+
+            Assert.InRange(Reads(() => Long(start)), twoDays, twoDays + 1);           // the first long scan reads its whole window
+            Short(start);
+            for (var tip = start + 1; tip <= start + 3; tip++)
+            {
+                Chain(tip, tip, "w", _ => null);
+                Assert.Equal(1, Reads(() => Short(tip)));                              // the new block
+                Assert.Equal(1, Reads(() => Long(tip)));                               // again the new block only, after the short scan
+                Assert.InRange(Reads(() => VBTCValidatorRegistry.GetActiveValidatorsAt(boundary)), 0, 1);   // a scan below the tip: its own top block at most
+                Assert.Equal(1, Reads(() => Long(tip)));                               // and the tip's blocks are still kept
+            }
+        }
     }
 }
