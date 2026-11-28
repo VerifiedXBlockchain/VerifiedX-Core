@@ -61,6 +61,25 @@ namespace VerifiedXCore.Tests
             Assert.Equal(Casters.Take(3).Select(c => c.Address).ToHashSet(), Pool());
         }
 
+        /// <summary>The probed heal re-adds members of the committee in force, not of a promotion no block has carried.</summary>
+        [Fact]
+        public async Task TheHeal_DoesNotSeatAPromotionNoBlockCarried()
+        {
+            await AsTheFourthCaster();
+            var removal = Next(_anchor, new[] { Casters[0], Casters[1], Casters[3] }, "Demotion", Casters[2].Address, Tip + 1);
+            await Commit(NextBlock(Casters.Take(3), new List<CasterMembershipRecord> { removal }));
+            var promotion = Next(removal, new[] { Casters[0], Casters[1], Casters[3], Casters[4] }, "Promotion", Casters[4].Address, Tip + 2);
+            Assert.True(CasterMembershipStore.TryAppend(promotion, out var why), why);
+            CasterMembershipService.ResetHealState();
+            try
+            {
+                for (var i = 0; i <= CasterMembershipService.RequiredHealProbeStreak; i++)
+                    await CasterMembershipService.TryHealBlockCastersFromRecordAsync(probe: _ => Task.FromResult(true));
+                Assert.DoesNotContain(Casters[4].Address, Pool());
+            }
+            finally { CasterMembershipService.ResetHealState(); }
+        }
+
         [Fact]
         public async Task APromotedCaster_JoinsThePool_WhenTheBlockThatCarriesItIsWritten()
         {

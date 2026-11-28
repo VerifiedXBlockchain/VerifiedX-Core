@@ -252,7 +252,10 @@ namespace VerifiedXCore.Services
             CasterMembershipRecord? record = null,
             Func<string, Task<bool>>? probe = null)
         {
-            record ??= CasterMembershipStore.GetCurrent();
+            // From the membership chain's start the pool heals to the committee in force for the next block, as it is
+            // reconciled (ReconcileBlockCastersToRecord): a member of a record no block has carried yet is not re-added.
+            var next = (Globals.LastBlock?.Height ?? -1) + 1;
+            record ??= MembershipChain.ActiveAt(next) ? CasterMembershipStore.GetForHeight(next) : CasterMembershipStore.GetCurrent();
             if (record == null)
                 return 0;
 

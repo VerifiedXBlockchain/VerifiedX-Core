@@ -177,7 +177,9 @@ namespace VerifiedXCore.Bitcoin.Services
         /// </summary>
         public static RemovalLiveness LiveForRemovalAt(long tip)
         {
-            var casters = (VerifiedXCore.Services.CasterMembershipStore.GetCurrent()?.Casters ?? new List<VerifiedXCore.Models.CasterInfo>())
+            // The committee in force for the next block, not the newest record this node holds: one no block has carried
+            // yet may never govern (MembershipChain), and a caster it would demote is still live.
+            var casters = (VerifiedXCore.Services.CasterMembershipStore.GetForHeight(tip + 1)?.Casters ?? new List<VerifiedXCore.Models.CasterInfo>())
                 .Select(c => BaseAddressOf(c.PublicKey).ToLowerInvariant()).Where(a => a.Length > 0).ToHashSet();
             if (tip < 0) return new RemovalLiveness(new HashSet<string>(), casters);
             // One scan per tip block (a tip with no committed block to key on is scanned each time); the balance is read

@@ -266,7 +266,8 @@ namespace VerifiedXCore.Bitcoin.Services
             if (live.LiveCaster(pending.Casters) is { } caster) return caster;
             if (pending.CasterAdds.Count > 0)
             {
-                var committee = (VerifiedXCore.Services.CasterMembershipStore.GetCurrent()?.Casters ?? new List<VerifiedXCore.Models.CasterInfo>())
+                // The committee in force for the next block: a promotion no block has carried yet may never govern.
+                var committee = (VerifiedXCore.Services.CasterMembershipStore.GetForHeight(tip + 1)?.Casters ?? new List<VerifiedXCore.Models.CasterInfo>())
                     .Select(c => BaseSignerSetPolicy.BaseAddressOf(c.PublicKey).ToLowerInvariant()).Where(a => a.Length > 0).ToHashSet();
                 if (pending.CasterAdds.FirstOrDefault(c => !committee.Contains((c ?? "").ToLowerInvariant())) is { } stranger) return stranger;
             }
