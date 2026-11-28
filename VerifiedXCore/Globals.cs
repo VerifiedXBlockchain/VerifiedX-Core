@@ -1420,6 +1420,21 @@ namespace VerifiedXCore
         /// <summary>The same height on testnet (GlobalsNetworkHeights).</summary>
         public const long VreeActivationTestnetHeight = 107_700;
 
+        /// <summary>
+        /// From this height a block may carry the membership records that take effect after it (Block.MembershipRun),
+        /// covered by its hash, and the caster committee for a height is read from the chain instead of from the records
+        /// this node happens to hold (MembershipChain). The chain's rules start at the first block at or after it that
+        /// carries <see cref="MembershipAnchorRecordHash"/>. long.MaxValue: not active.
+        /// </summary>
+        public static long MembershipChainHeight = long.MaxValue;
+
+        /// <summary>
+        /// The membership record the chain starts from (its RecordHash). Pinned in a release to a record every node holds,
+        /// normally the head of the record chain when the release is cut; its successors are carried with it. Empty: the
+        /// chain's rules never start.
+        /// </summary>
+        public static string MembershipAnchorRecordHash = "";
+
         /// <summary>Blocks with Height &gt;= this require a valid <see cref="Models.Block.ConsensusCertificate"/>.
         /// Wave 6: armed automatically from the genesis membership record's EffectiveFromHeight
         /// (CasterMembershipStore.TryArmFromGenesis) — NOT hand-edited. long.MaxValue until a

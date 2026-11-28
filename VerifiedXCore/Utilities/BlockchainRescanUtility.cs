@@ -45,6 +45,7 @@ namespace VerifiedXCore.Utilities
                 ChainRefId = block.ChainRefId,
                 VrfProof = block.VrfProof,
                 VrfMix = block.VrfMix,
+                MembershipRun = block.MembershipRun,
             };
 
             newBlock.Rebuild(block);

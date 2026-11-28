@@ -1200,6 +1200,10 @@ namespace VerifiedXCore.Services
                     return result;
                 }
 
+                // Below the membership chain height a carried run is outside the hash: anyone could put one on the block.
+                if (block.Height < Globals.MembershipChainHeight)
+                    block.MembershipRun = null;
+
                 var newBlock = new Block
                 {
                     Height = block.Height,
@@ -1211,6 +1215,7 @@ namespace VerifiedXCore.Services
                     ValidatorAnswer = block.ValidatorAnswer,
                     VrfProof = block.VrfProof,
                     VrfMix = block.VrfMix,
+                    MembershipRun = block.MembershipRun,
                 };
 
                 newBlock.Build();
@@ -2318,6 +2323,7 @@ namespace VerifiedXCore.Services
                 ValidatorAnswer = block.ValidatorAnswer,
                 VrfProof = block.VrfProof,
                 VrfMix = block.VrfMix,
+                MembershipRun = block.MembershipRun,
             };
 
             newBlock.Build();

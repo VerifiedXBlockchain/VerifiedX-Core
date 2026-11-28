@@ -42,6 +42,16 @@ namespace VerifiedXCore.Models
 		[Newtonsoft.Json.JsonProperty(NullValueHandling = Newtonsoft.Json.NullValueHandling.Ignore)]
 		public string? VrfProof { get; set; }
 
+		/// <summary>
+		/// From Globals.MembershipChainHeight: the promotion, demotion, departure and hold records this block carries, in
+		/// sequence order. They take effect from the next block (MembershipChain). In <see cref="GetBlockHash"/> with their
+		/// signatures, so a copy with a record left out, added or re-signed is another block. Left out of the JSON when
+		/// null, so every other block serializes as it always did.
+		/// </summary>
+		[Newtonsoft.Json.JsonProperty(NullValueHandling = Newtonsoft.Json.NullValueHandling.Ignore)]
+		[VerifiedXCore.Utilities.JsonBound(VerifiedXCore.Utilities.ListSize.Committee)]
+		public List<CasterMembershipRecord>? MembershipRun { get; set; }
+
 		/// <summary>From Globals.VrfMixHeight: the running mix of the chain's VRF outputs up to this block, hex (BlockVrf).</summary>
 		[Newtonsoft.Json.JsonProperty(NullValueHandling = Newtonsoft.Json.NullValueHandling.Ignore)]
 		public string? VrfMix { get; set; }
@@ -116,8 +126,21 @@ namespace VerifiedXCore.Models
 			// is another block.
 			if (Height >= Globals.VrfMixHeight)
 				strSum += "|vrf|" + (VrfProof ?? "") + "|" + (VrfMix ?? "");
+			// From the membership chain height the records a block carries are the block's, signatures included. A block that
+			// carries none hashes as it always did.
+			if (Height >= Globals.MembershipChainHeight && MembershipRun is { Count: > 0 } run)
+				strSum += "|mrun|" + MembershipRunDigest(run);
 			var hash = HashingService.GenerateHash(strSum);
 			return hash;
+		}
+
+		/// <summary>The digest of a carried run of records as the block hash covers it: each record's sequence, hash and signatures, in order.</summary>
+		public static string MembershipRunDigest(IEnumerable<CasterMembershipRecord?> run)
+		{
+			var text = string.Join(";", run.Select(r => r == null ? "null" :
+				$"{r.RecordSeq}:{r.RecordHash}:{string.Join(",", (r.Signatures ?? new List<RecordSignature>()).Select(s => $"{s?.SignerAddress}={s?.Signature}"))}"));
+			using var sha = System.Security.Cryptography.SHA256.Create();
+			return Convert.ToHexString(sha.ComputeHash(System.Text.Encoding.UTF8.GetBytes(text))).ToLowerInvariant();
 		}
 		public string GetStateRoot()
 		{
