@@ -80,7 +80,7 @@ namespace VerifiedXCore.Tests
             Assert.Equal(401, Globals.CustomTestNetRulesHeight);
             // Rules added after Marigold was already running start at CustomTestNetInputRulesHeight instead (a past
             // height would judge blocks produced under the old rules); every other rule is active by 401.
-            var addedWhileRunning = new[] { nameof(Globals.CanonicalInputHeight), nameof(Globals.RawDataVerbatimHeight), nameof(Globals.StrictDataReaderHeight), nameof(Globals.ContractBodyKeySpellingHeight), nameof(Globals.ContractRunLimitsHeight), nameof(Globals.VrfMixHeight), nameof(Globals.BridgeLockMinimumHeight), nameof(Globals.BridgeAllocationsArrayHeight), nameof(Globals.PoolUnlockCreditsAddressHeight), nameof(Globals.BridgeLockEvmAddressHeight), nameof(Globals.WithdrawalOwnScriptAttributionHeight), nameof(Globals.VaultLedgerHeight), nameof(Globals.PlonkKeyBoundRulesHeight), nameof(Globals.BridgeVotesBoundToAttemptHeight), nameof(Globals.BridgeAllocationsSignableHeight), nameof(Globals.BridgeLockPartMinimumHeight), nameof(Globals.ExitPartTakeoverHeight), nameof(Globals.BridgeBurnRefundHeight), nameof(Globals.ExitMinPayoutHeight), nameof(Globals.ExitPartRefundHeight), nameof(Globals.MembershipChainHeight) };
+            var addedWhileRunning = new[] { nameof(Globals.CanonicalInputHeight), nameof(Globals.RawDataVerbatimHeight), nameof(Globals.StrictDataReaderHeight), nameof(Globals.ContractBodyKeySpellingHeight), nameof(Globals.ContractRunLimitsHeight), nameof(Globals.VrfMixHeight), nameof(Globals.BridgeLockMinimumHeight), nameof(Globals.BridgeAllocationsArrayHeight), nameof(Globals.PoolUnlockCreditsAddressHeight), nameof(Globals.BridgeLockEvmAddressHeight), nameof(Globals.WithdrawalOwnScriptAttributionHeight), nameof(Globals.VaultLedgerHeight), nameof(Globals.PlonkKeyBoundRulesHeight), nameof(Globals.BridgeVotesBoundToAttemptHeight), nameof(Globals.BridgeAllocationsSignableHeight), nameof(Globals.BridgeLockPartMinimumHeight), nameof(Globals.ExitPartTakeoverHeight), nameof(Globals.BridgeBurnRefundHeight), nameof(Globals.ExitMinPayoutHeight), nameof(Globals.ExitPartRefundHeight), nameof(Globals.BaseCasterCatchUpHeight), nameof(Globals.MembershipChainHeight) };
             var late = RuleHeights()
                 .Where(f => !addedWhileRunning.Contains(f.Name))
                 .Select(f => (f.Name, Value: (long)f.GetValue(null)!))
@@ -123,6 +123,10 @@ namespace VerifiedXCore.Tests
             Assert.Equal(Globals.CustomTestNetLateRulesHeight, Globals.ExitPartRefundHeight);
             Assert.True(Globals.CustomTestNetInputRulesHeight > Globals.CustomTestNetRulesHeight, "rules added while Marigold runs start after its tip, not at 401");
             Assert.True(Globals.CustomTestNetLateRulesHeight > Globals.CustomTestNetInputRulesHeight, "rules added after Marigold passed 8,500 start after its tip then");
+            // The Base casters' catch-up rule is judged at epoch boundaries: its own height, on one, past the late rules.
+            Assert.Equal(43_200L, Globals.BaseCasterCatchUpHeight);
+            Assert.Equal(0, Globals.BaseCasterCatchUpHeight % Bitcoin.Services.BaseSignerSetPolicy.EpochBlocks);
+            Assert.True(Globals.BaseCasterCatchUpHeight > Globals.CustomTestNetLateRulesHeight);
             Assert.Equal(Globals.CustomTestNetMembershipChainHeight, Globals.MembershipChainHeight);
             Assert.Equal(Globals.CustomTestNetMembershipAnchorRecordHash, Globals.MembershipAnchorRecordHash);
             Assert.True(Globals.CustomTestNetMembershipChainHeight > Globals.CustomTestNetLateRulesHeight, "the membership chain was added after the late rules' tip");
@@ -147,6 +151,7 @@ namespace VerifiedXCore.Tests
             Assert.Equal(long.MaxValue, Globals.BridgeBurnRefundHeight);
             Assert.Equal(long.MaxValue, Globals.ExitMinPayoutHeight);
             Assert.Equal(long.MaxValue, Globals.ExitPartRefundHeight);
+            Assert.Equal(long.MaxValue, Globals.BaseCasterCatchUpHeight);
             Assert.Equal(long.MaxValue, Globals.MembershipChainHeight);
             Assert.Equal("", Globals.MembershipAnchorRecordHash);
 
@@ -173,6 +178,7 @@ namespace VerifiedXCore.Tests
             Assert.Equal(long.MaxValue, Globals.BridgeBurnRefundHeight); // not in that release
             Assert.Equal(long.MaxValue, Globals.ExitMinPayoutHeight); // not in that release
             Assert.Equal(long.MaxValue, Globals.ExitPartRefundHeight); // not in that release
+            Assert.Equal(long.MaxValue, Globals.BaseCasterCatchUpHeight); // set at its release
         }
 
         [Fact]

@@ -108,6 +108,7 @@ namespace VerifiedXCore
             Globals.BitcoinAttestationHeight = Globals.IsTestNet ? Globals.BitcoinAttestationTestnetHeight : Globals.BitcoinAttestationHeight;
             Globals.VreeActivationHeight = Globals.IsTestNet ? Globals.VreeActivationTestnetHeight : Globals.VreeActivationHeight;
             Globals.BaseBridgeV4Height = Globals.IsTestNet ? Globals.BaseBridgeV4TestnetHeight : Globals.BaseBridgeV4Height;
+            Globals.BaseCasterCatchUpHeight = Globals.IsTestNet ? BaseCasterCatchUpTestnetHeight : Globals.BaseCasterCatchUpHeight;
             // The membership chain: its height and the record it starts from go together (Globals.MembershipAnchorRecordHash).
             Globals.MembershipChainHeight = Globals.IsTestNet ? Globals.MembershipChainTestnetHeight : Globals.MembershipChainHeight;
             Globals.MembershipAnchorRecordHash = Globals.IsTestNet ? Globals.MembershipAnchorRecordHashTestnet : Globals.MembershipAnchorRecordHash;
@@ -140,6 +141,18 @@ namespace VerifiedXCore
         /// upgrade every Marigold node first.
         /// </summary>
         public const long CustomTestNetLateRulesHeight = 30_000;
+
+        /// <summary>
+        /// <see cref="BaseCasterCatchUpHeight"/> on the live testnet: unset until the release that carries it, then the first
+        /// epoch boundary (a multiple of 7,200) a couple of days past the tip, so the contract's signers upgrade first.
+        /// </summary>
+        public const long BaseCasterCatchUpTestnetHeight = long.MaxValue;
+
+        /// <summary>
+        /// <see cref="BaseCasterCatchUpHeight"/> on a custom testnet: an epoch boundary (6 x 7,200) ahead of Marigold's tip when
+        /// it was set, so every signer runs the rule before the first boundary it governs.
+        /// </summary>
+        public const long CustomTestNetBaseCasterCatchUpHeight = 43_200;
 
         /// <summary>
         /// The membership chain on the live testnet (MembershipChain): not set yet. Set at release, at the tip plus room to
@@ -230,6 +243,7 @@ namespace VerifiedXCore
             Globals.BridgeVotesBoundToAttemptHeight = CustomTestNetLateRulesHeight;
             Globals.BridgeAllocationsSignableHeight = CustomTestNetLateRulesHeight;
             Globals.BridgeLockPartMinimumHeight = CustomTestNetLateRulesHeight;
+            Globals.BaseCasterCatchUpHeight = CustomTestNetBaseCasterCatchUpHeight;
             Globals.MembershipChainHeight = CustomTestNetMembershipChainHeight;
             Globals.MembershipAnchorRecordHash = CustomTestNetMembershipAnchorRecordHash;
         }
