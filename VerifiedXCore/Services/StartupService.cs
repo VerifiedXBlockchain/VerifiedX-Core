@@ -1801,9 +1801,9 @@ namespace VerifiedXCore.Services
 
                         bool holdsBalance = false;
                         if (!ownerLocal && !nextOwnerLocal &&
-                            scStateTreiRec.SCStateTreiTokenizationTXes != null && scStateTreiRec.SCStateTreiTokenizationTXes.Any())
+                            VerifiedXCore.Bitcoin.Attestation.VaultLedgerStore.HasRows(scStateTreiRec))
                         {
-                            holdsBalance = localAddrs.Any(a => scStateTreiRec.SCStateTreiTokenizationTXes
+                            holdsBalance = localAddrs.Any(a => VerifiedXCore.Bitcoin.Attestation.VaultLedgerStore.Rows(scStateTreiRec)
                                 .Where(t => t.FromAddress == a || t.ToAddress == a)
                                 .Sum(t => t.Amount) > 0);
                         }

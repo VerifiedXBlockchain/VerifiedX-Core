@@ -335,7 +335,7 @@ namespace VerifiedXCore.Bitcoin.Models
             if (scStateTreiRec == null)
                 return 0.0M;
 
-            var balances = scStateTreiRec.SCStateTreiTokenizationTXes?.Where(x => x.FromAddress == vfxAddress || x.ToAddress == vfxAddress).ToList();
+            var balances = VerifiedXCore.Bitcoin.Attestation.VaultLedgerStore.HasLedger(scStateTreiRec) ? VerifiedXCore.Bitcoin.Attestation.VaultLedgerStore.Rows(scStateTreiRec).Where(x => x.FromAddress == vfxAddress || x.ToAddress == vfxAddress).ToList() : null;
 
             if (scStateTreiRec.OwnerAddress == vfxAddress)
             {

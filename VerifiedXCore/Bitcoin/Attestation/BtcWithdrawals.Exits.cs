@@ -410,10 +410,10 @@ namespace VerifiedXCore.Bitcoin.Attestation
             var exit = VBTCBridgeBtcExitState.GetByBurnHash(row.ExitBurnHash ?? "");
             if (exit == null || exit.IsComplete || !IsPartOf(row, exit)) return;
             var parts = BtcAttestStore.ExitParts(row.RequestHash, row.RequestVfxHeight, db).OrderBy(p => p.Ref, StringComparer.Ordinal).ToList();
-            if (parts.Any(p => p.State != VaultWithdrawalState.Settled)) return;
+            if (parts.Any(p => p.State != VaultWithdrawalState.Settled && !ClosedAsNeverPayable(p, vfxHeight, db))) return;
 
             exit.IsComplete = true;
-            exit.BtcTxHash = string.Join(",", parts.Select(p => p.SettledTxid));
+            exit.BtcTxHash = string.Join(",", parts.Where(p => p.State == VaultWithdrawalState.Settled).Select(p => p.SettledTxid));
             VBTCBridgeBtcExitState.Update(exit);
             SCLogUtility.Log($"Bridge exit for burn {exit.BaseBurnTxHash} completed by Bitcoin ({parts.Count} vault(s): {exit.BtcTxHash}; last reported in {report?.Hash}).", "BtcWithdrawals.SettleExitPart()");
         }
@@ -454,13 +454,24 @@ namespace VerifiedXCore.Bitcoin.Attestation
             VBTCBridgeLockState.RestoreUnlock(allocation.LockId, allocation.UnlockAmount, SatsOf(allocation.UnlockAmount));
         }
 
+        /// <summary>
+        /// A part closed void that can never be paid: its destination is a script of its own vault (<see cref="PaysOwnVault"/>,
+        /// from <see cref="Globals.WithdrawalOwnScriptAttributionHeight"/>). Its exit counts it as done.
+        /// </summary>
+        private static bool ClosedAsNeverPayable(VaultWithdrawalRow part, long vfxHeight, LiteDatabase? db) =>
+            part.State == VaultWithdrawalState.Void && PaysOwnVault(part, part.DestinationScriptHex, vfxHeight, db);
+
         private static void VoidExitPart(VaultWithdrawalRow row, long vfxHeight, LiteDatabase? db, string why)
         {
             var exit = VBTCBridgeBtcExitState.GetByBurnHash(row.ExitBurnHash ?? "");
             if (exit == null || !IsPartOf(row, exit)) return;
             var parts = BtcAttestStore.ExitParts(row.RequestHash, row.RequestVfxHeight, db);
             var others = parts.Where(p => p.Ref != row.Ref).ToList();
-            if (row.State == VaultWithdrawalState.Void && !exit.IsComplete
+            // A part whose destination is an address of its own vault can never be paid (it is not fixed again, and its
+            // transaction would only pay the vault): from WithdrawalOwnScriptAttributionHeight it is not reopened. It stays
+            // void, its locks come back, and the exit completes once its other parts are paid.
+            var neverPayable = ClosedAsNeverPayable(row, vfxHeight, db);
+            if (row.State == VaultWithdrawalState.Void && !exit.IsComplete && !neverPayable
                 && others.Any(p => p.State is VaultWithdrawalState.Settled or VaultWithdrawalState.Pinned))
             {
                 row.State = VaultWithdrawalState.Waiting;
@@ -491,6 +502,13 @@ namespace VerifiedXCore.Bitcoin.Attestation
                 }
                 exit.IsComplete = true;
                 exit.BtcTxHash = $"{VBTCBridgeBtcExitState.FailedMarkerPrefix}void@{vfxHeight}";
+                VBTCBridgeBtcExitState.Update(exit);
+            }
+            else if (neverPayable && !exit.IsComplete && parts.All(p => p.State == VaultWithdrawalState.Settled || ClosedAsNeverPayable(p, vfxHeight, db)))
+            {
+                // Every other part is paid already: the exit is complete, paid in the parts that could be paid.
+                exit.IsComplete = true;
+                exit.BtcTxHash = string.Join(",", parts.Where(p => p.State == VaultWithdrawalState.Settled).OrderBy(p => p.Ref, StringComparer.Ordinal).Select(p => p.SettledTxid));
                 VBTCBridgeBtcExitState.Update(exit);
             }
             ErrorLogUtility.LogError($"Bridge exit for burn {exit.BaseBurnTxHash}: the part on vault {row.SmartContractUID} was voided ({why}). Its locks were restored" + (vfxHeight < Globals.BridgeVoidKeepsLocksHeight ? " and taken out of use." : "; its vault is left out of exit plans for a day.")

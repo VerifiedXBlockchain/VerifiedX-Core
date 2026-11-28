@@ -1629,14 +1629,10 @@ namespace VerifiedXCore.Services
                                                         : 0M;
 
                                                     bool isOwner = blkTransaction.FromAddress == scState.OwnerAddress;
-                                                    if (!isOwner && scState.SCStateTreiTokenizationTXes != null)
+                                                    if (!isOwner && VerifiedXCore.Bitcoin.Attestation.VaultLedgerStore.HasLedger(scState))
                                                     {
-                                                        var tokenTxs = scState.SCStateTreiTokenizationTXes
-                                                            .Where(x => x.FromAddress == blkTransaction.FromAddress || x.ToAddress == blkTransaction.FromAddress)
-                                                            .ToList();
-                                                        var received = tokenTxs.Where(x => x.ToAddress == blkTransaction.FromAddress).Sum(x => x.Amount);
-                                                        var sent = tokenTxs.Where(x => x.FromAddress == blkTransaction.FromAddress).Sum(x => x.Amount);
-                                                        decimal vbtcBalance = received + sent - pendingReserveOut;
+                                                        var receivedPlusSent = VerifiedXCore.Bitcoin.Attestation.VaultLedgerStore.ReceivedPlusSent(scState, blkTransaction.FromAddress);
+                                                        decimal vbtcBalance = receivedPlusSent - pendingReserveOut;
 
                                                         if (blockTotal > vbtcBalance)
                                                             rejectBlock = true; // vBTC overspend in block

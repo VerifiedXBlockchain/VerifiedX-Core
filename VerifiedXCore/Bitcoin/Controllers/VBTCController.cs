@@ -2255,9 +2255,9 @@ namespace VerifiedXCore.Bitcoin.Controllers
                         UniqueId = payload.UniqueId,
                     });
                 }
-                if (scState != null && scState.SCStateTreiTokenizationTXes != null)
+                if (scState != null && VerifiedXCore.Bitcoin.Attestation.VaultLedgerStore.HasLedger(scState))
                 {
-                    var tokenTxs = scState.SCStateTreiTokenizationTXes
+                    var tokenTxs = VerifiedXCore.Bitcoin.Attestation.VaultLedgerStore.Rows(scState)
                         .Where(x => x.FromAddress == payload.VFXAddress || x.ToAddress == payload.VFXAddress).ToList();
                     var vbtcBalance = tokenTxs.Sum(x => x.Amount);
                     if (payload.Amount > vbtcBalance)
@@ -4434,17 +4434,7 @@ namespace VerifiedXCore.Bitcoin.Controllers
 
                 // Calculate ledger balance from State Trei tokenization transactions.
                 // State entries use negative amounts for debits, so the net balance is simply the sum.
-                if (scState.SCStateTreiTokenizationTXes != null && scState.SCStateTreiTokenizationTXes.Any())
-                {
-                    var transactions = scState.SCStateTreiTokenizationTXes
-                        .Where(x => x.FromAddress == address || x.ToAddress == address)
-                        .ToList();
-
-                    if (transactions.Any())
-                    {
-                        ledgerBalance = transactions.Sum(x => x.Amount);
-                    }
-                }
+                ledgerBalance = VerifiedXCore.Bitcoin.Attestation.VaultLedgerStore.Balance(scState, address);
 
                 // Check if this address is the contract owner. State trei is authoritative (available
                 // on ALL nodes); the local VBTCContractV2 record only supplies the deposit address.
@@ -4509,7 +4499,7 @@ namespace VerifiedXCore.Bitcoin.Controllers
                     ExpiredEscrowAmount = expiredEscrowAmount,
                     EscrowedWithdrawals = escrowedRequests,
                     IsOwner = isOwner,
-                    TransactionCount = scState.SCStateTreiTokenizationTXes?.Count(x => x.FromAddress == address || x.ToAddress == address) ?? 0
+                    TransactionCount = VerifiedXCore.Bitcoin.Attestation.VaultLedgerStore.Rows(scState).Count(x => x.FromAddress == address || x.ToAddress == address)
                 });
             }
             catch (Exception ex)
@@ -4551,9 +4541,9 @@ namespace VerifiedXCore.Bitcoin.Controllers
                         decimal ledgerBalance = 0.0M;
                         int txCount = 0;
 
-                        if (scState?.SCStateTreiTokenizationTXes != null && scState.SCStateTreiTokenizationTXes.Any())
+                        if (VerifiedXCore.Bitcoin.Attestation.VaultLedgerStore.HasRows(scState))
                         {
-                            var transactions = scState.SCStateTreiTokenizationTXes
+                            var transactions = VerifiedXCore.Bitcoin.Attestation.VaultLedgerStore.Rows(scState)
                                 .Where(x => x.FromAddress == address || x.ToAddress == address)
                                 .ToList();
 

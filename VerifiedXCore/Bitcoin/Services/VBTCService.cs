@@ -305,15 +305,7 @@ namespace VerifiedXCore.Bitcoin.Services
         public static decimal GetOwnerLedgerBalance(SmartContractStateTrei scState, string ownerAddress, long currentHeight)
         {
             decimal ledgerBalance = 0M;
-            if (scState.SCStateTreiTokenizationTXes != null && scState.SCStateTreiTokenizationTXes.Any())
-            {
-                var ownerRows = scState.SCStateTreiTokenizationTXes
-                    .Where(x => x.FromAddress == ownerAddress || x.ToAddress == ownerAddress)
-                    .ToList();
-
-                if (ownerRows.Any())
-                    ledgerBalance = ownerRows.Sum(x => x.Amount);
-            }
+            ledgerBalance = VerifiedXCore.Bitcoin.Attestation.VaultLedgerStore.Balance(scState, ownerAddress);
 
             ledgerBalance += VBTCWithdrawalRequest.GetCompletedWithdrawalAmount(ownerAddress, scState.SmartContractUID, currentHeight);
 
@@ -350,34 +342,8 @@ namespace VerifiedXCore.Bitcoin.Services
         /// owner's leftover owner-era debits). Each address's position is computed exactly as its own balance is: the sum
         /// of the rows it appears in. Returns zero or less.
         /// </summary>
-        public static decimal NegativeNonOwnerPositions(SmartContractStateTrei scState, string ownerAddress)
-        {
-            var rows = scState?.SCStateTreiTokenizationTXes;
-            if (rows == null || rows.Count == 0)
-                return 0M;
-
-            var others = rows.SelectMany(r => new[] { r.FromAddress, r.ToAddress })
-                .Where(a => !string.IsNullOrEmpty(a) && a != "+" && a != "-" && a != ownerAddress)
-                .Distinct(StringComparer.Ordinal);
-
-            // One pass over the rows: a row counts for each address it names, as each address's own balance reads it.
-            // Summing the whole list again for every address took holders times rows, on every owner action on every
-            // node (fourth review, round 6).
-            var holders = new HashSet<string>(others, StringComparer.Ordinal);
-            var positions = new Dictionary<string, decimal>(StringComparer.Ordinal);
-            foreach (var r in rows)
-            {
-                if (r.FromAddress != null && holders.Contains(r.FromAddress))
-                    positions[r.FromAddress] = (positions.TryGetValue(r.FromAddress, out var a) ? a : 0M) + r.Amount;
-                if (r.ToAddress != null && r.ToAddress != r.FromAddress && holders.Contains(r.ToAddress))
-                    positions[r.ToAddress] = (positions.TryGetValue(r.ToAddress, out var b) ? b : 0M) + r.Amount;
-            }
-            decimal negative = 0M;
-            foreach (var position in positions.Values)
-                if (position < 0M)
-                    negative += position;
-            return negative;
-        }
+        public static decimal NegativeNonOwnerPositions(SmartContractStateTrei scState, string ownerAddress) =>
+            VerifiedXCore.Bitcoin.Attestation.VaultLedgerStore.NegativePositionsExcept(scState, ownerAddress);
 
         /// <summary>
         /// The address to deposit to: for a vault the chain watches, its newest key's (a re-key retires the earlier
@@ -476,19 +442,7 @@ namespace VerifiedXCore.Bitcoin.Services
 
                 // Calculate ledger balance from tokenization TXes (consensus data, available on all nodes)
                 decimal ledgerBalance = 0M;
-                if (scState.SCStateTreiTokenizationTXes != null && scState.SCStateTreiTokenizationTXes.Any())
-                {
-                    var transactions = scState.SCStateTreiTokenizationTXes
-                        .Where(x => x.FromAddress == fromAddress || x.ToAddress == fromAddress)
-                        .ToList();
-
-                    if (transactions.Any())
-                    {
-                        var received = transactions.Where(x => x.ToAddress == fromAddress).Sum(x => x.Amount);
-                        var sent = transactions.Where(x => x.FromAddress == fromAddress).Sum(x => x.Amount);
-                        ledgerBalance = received + sent;
-                    }
-                }
+                ledgerBalance = VerifiedXCore.Bitcoin.Attestation.VaultLedgerStore.ReceivedPlusSent(scState, fromAddress);
 
                 // A vault the chain watches: owner and deposit both come from state, never from this node's wallet
                 // records or from Electrum.
@@ -3807,8 +3761,7 @@ namespace VerifiedXCore.Bitcoin.Services
                         }
 
                         var isLocalOwner = localAddresses.Contains(scState.OwnerAddress);
-                        var hasLocalLedger = scState.SCStateTreiTokenizationTXes != null &&
-                            scState.SCStateTreiTokenizationTXes.Any(t => localAddresses.Contains(t.ToAddress) || localAddresses.Contains(t.FromAddress));
+                        var hasLocalLedger = VerifiedXCore.Bitcoin.Attestation.VaultLedgerStore.NamesAny(scState, localAddresses);
 
                         if (!isLocalOwner && !hasLocalLedger)
                             continue;

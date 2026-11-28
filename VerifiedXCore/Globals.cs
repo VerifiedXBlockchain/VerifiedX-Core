@@ -422,6 +422,17 @@ namespace VerifiedXCore
         public const long WithdrawalDestinationRecheckTestnetHeight = 205_615L;
 
         /// <summary>
+        /// From this height a Bitcoin output that pays a script of a withdrawal's or bridge-exit part's own vault (any key
+        /// the vault has had) is never taken for that row's payment: not when a transaction the chain had not fixed for it
+        /// confirms, and not when it claims a payment kept for a later request. Such an output leaves the Bitcoin in the
+        /// vault, so it pays nobody: a release, or a sweep, to the vault's current key settled a withdrawal asked for to
+        /// that address before the re-key gave it to the vault. Below it they are matched by script as before. Unset
+        /// (long.MaxValue) on mainnet and testnet until the release that activates it. Testnet value in GlobalsNetworkHeights.
+        /// </summary>
+        public static long WithdrawalOwnScriptAttributionHeight = long.MaxValue;
+        public const long WithdrawalOwnScriptAttributionTestnetHeight = long.MaxValue;
+
+        /// <summary>
         /// From this height a voided part of a bridge exit gives its locks back for use, as an expired exit does, instead
         /// of blacklisting them: a void is proven on Bitcoin (every pinned transaction's coins spent elsewhere or never
         /// to exist), so the exit was not paid and the locks' value is intact, and a blacklisted lock left its owner, and
