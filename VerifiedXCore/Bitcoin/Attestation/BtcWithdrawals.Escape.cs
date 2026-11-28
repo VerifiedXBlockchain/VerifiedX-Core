@@ -186,12 +186,12 @@ namespace VerifiedXCore.Bitcoin.Attestation
         /// payment of it can confirm. It is closed; its requester is refunded the amount less that Bitcoin fee, and the
         /// fee is added back to the owner's figure, so the one fee the vault paid is charged to the requester alone.
         /// </summary>
-        private static void CloseReleased(VaultWithdrawalRow row, VaultPin release, Transaction report, long vfxHeight, LiteDatabase? db)
+        private static void CloseReleased(VaultWithdrawalRow row, VaultPin release, Transaction report, long vfxHeight, LiteDatabase? db, string? why = null)
         {
             row.State = VaultWithdrawalState.Released;
             row.SettledTxid = release.Txid;
             row.ClosedAtVfxHeight = vfxHeight;
-            row.WaitingReason = $"its requester released it: Bitcoin transaction {release.Txid} returned its coins to the vault";
+            row.WaitingReason = why ?? $"its requester released it: Bitcoin transaction {release.Txid} returned its coins to the vault";
             BtcAttestStore.SaveWithdrawal(row, db);
             ReleasePinnedCoins(row, db);
             CloseWhatRestedOnItsOtherTransactions(row, release.Txid, vfxHeight, db);
