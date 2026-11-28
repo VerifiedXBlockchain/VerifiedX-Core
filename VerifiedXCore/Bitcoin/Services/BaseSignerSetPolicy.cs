@@ -230,6 +230,9 @@ namespace VerifiedXCore.Bitcoin.Services
                 if (record == null) return null;
                 if (record.EffectiveFromHeight > from && record.EffectiveFromHeight <= epochHeight) effective.Add(record.EffectiveFromHeight);
             }
+            // From the membership chain's start a record is in force from the block after the one that carried it, which may
+            // be well past its effective height: those heights are read too.
+            effective.AddRange(VerifiedXCore.Services.MembershipChain.ChangeHeights(from, epochHeight));
             var governing = new SortedDictionary<long, VerifiedXCore.Models.CasterMembershipRecord>();
             foreach (var height in effective.Distinct())
             {

@@ -129,6 +129,23 @@ namespace VerifiedXCore.Services
             return false;
         }
 
+        /// <summary>
+        /// The heights in (<paramref name="from"/>, <paramref name="to"/>] at which the chain's record in force changes: the
+        /// block after one that carried a run, and a block that carried an election or reset. A record's effective height
+        /// is only the earliest it may be carried, so reading the record in force at these heights (and at
+        /// <paramref name="from"/>) finds every committee that governed a block of the span.
+        /// </summary>
+        public static List<long> ChangeHeights(long from, long to)
+        {
+            var col = Collection();
+            if (!Configured || col == null || to <= from) return new List<long>();
+            return col.Query().Where(x => x.Id >= from && x.Id <= to).OrderBy(x => x.Id).ToList()
+                .Where(Holds)
+                .Select(row => row.IsRun ? row.Id + 1 : row.Id)
+                .Where(h => h > from && h <= to)
+                .ToList();
+        }
+
         /// <summary>The record in force for a block at <paramref name="height"/>, or null when the chain does not judge it.</summary>
         public static CasterMembershipRecord? RecordFor(long height) => ChainAt(height)?.LastOrDefault();
 
