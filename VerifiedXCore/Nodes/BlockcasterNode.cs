@@ -2319,6 +2319,15 @@ namespace VerifiedXCore.Nodes
                 reason = RecordHoldReason(CasterMembershipStore.GetCurrent()?.RecordSeq, CasterDiscoveryService.LastObservedPeerHeads,
                     CasterMembershipStore.GetCommitteeForHeight(height), Globals.ValidatorAddress, seedBootstrap);
             }
+            // From the membership chain's start the committee for the round is the chain's, the same on every caster at
+            // this tip: a record held by some casters and not yet carried changes nothing, so being behind on one is no
+            // reason to sit out. Only membership is.
+            if (MembershipChain.ActiveAt(height))
+            {
+                var committee = CasterMembershipStore.GetCommitteeForHeight(height);
+                reason = committee != null && (string.IsNullOrEmpty(Globals.ValidatorAddress) || !committee.Contains(Globals.ValidatorAddress))
+                    ? "this node is not in the chain's committee" : null;
+            }
             return reason ?? VreeService.StandDownReason(height);
         }
 

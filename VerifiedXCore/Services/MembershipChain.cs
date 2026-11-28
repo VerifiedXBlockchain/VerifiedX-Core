@@ -271,11 +271,16 @@ namespace VerifiedXCore.Services
             }
             _cache.Clear();
 
-            // This node's records follow what the chain now holds.
+            // This node's records follow what the chain now holds, and the casters it works with follow the committee the
+            // block's run puts in force from the next block.
             try
             {
                 if (ChainAt(block.Height + 1) is { } chain)
+                {
                     CasterMembershipStore.FollowChain(chain, block.Height + 1);
+                    if (block.MembershipRun is { Count: > 0 })
+                        CasterMembershipService.ReconcileBlockCastersToRecord(chain[^1]);
+                }
             }
             catch (Exception ex)
             {
