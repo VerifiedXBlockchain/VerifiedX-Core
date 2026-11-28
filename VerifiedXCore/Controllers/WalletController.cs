@@ -318,6 +318,47 @@ namespace VerifiedXCore.Controllers
             catch (Exception ex) { return StatusCode(500, new { success = false, message = ApiErrorText.For(ex) }); }
         }
 
+        /// <summary>
+        /// Refunds on Base a burn VFX recorded it cannot pay (VBTCBridgeRefundState): collects the validators' signatures and
+        /// sends refundBurn from the local account whose Base address is the refund's recipient.
+        /// </summary>
+        [HttpPost("api/vbtc/bridge/refund/{refundId}")]
+        public async Task<IActionResult> VBTCBridgeRefund(string refundId)
+        {
+            try
+            {
+                if (string.IsNullOrWhiteSpace(refundId))
+                    return BadRequest(new { success = false, message = "refundId is required." });
+                var (ok, txHashOrReason) = await Bitcoin.Services.UserBridgeRefundService.SubmitRefundAsync(refundId);
+                return Ok(ok ? new { success = true, message = "refundBurn sent", baseTxHash = txHashOrReason } : (object)new { success = false, message = txHashOrReason });
+            }
+            catch (Exception ex) { return StatusCode(500, new { success = false, message = ApiErrorText.For(ex) }); }
+        }
+
+        /// <summary>The refund with the validators' signatures, for a wallet that holds the recipient's key to send refundBurn itself.</summary>
+        [HttpGet("api/vbtc/bridge/refund/{refundId}/signatures")]
+        public async Task<IActionResult> VBTCBridgeRefundSignatures(string refundId)
+        {
+            try
+            {
+                if (string.IsNullOrWhiteSpace(refundId))
+                    return BadRequest(new { success = false, message = "refundId is required." });
+                var (signed, reason) = await Bitcoin.Services.UserBridgeRefundService.CollectSignaturesAsync(refundId);
+                if (signed == null) return Ok(new { success = false, message = reason });
+                return Ok(new
+                {
+                    success = true,
+                    refundId = signed.Refund.RefundId,
+                    to = signed.Refund.BaseBurner,
+                    amountSats = signed.Refund.AmountSats,
+                    chainId = signed.ChainId,
+                    contract = signed.ContractAddress,
+                    signatures = signed.Signatures,
+                });
+            }
+            catch (Exception ex) { return StatusCode(500, new { success = false, message = ApiErrorText.For(ex) }); }
+        }
+
         [HttpGet("api/vbtc/bridge/base-balance/{evmAddress}")]
         public async Task<IActionResult> VBTCBaseBalance(string evmAddress)
         {

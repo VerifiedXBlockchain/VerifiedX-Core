@@ -239,6 +239,48 @@ namespace VerifiedXCore.Tests
         }
 
         /// <summary>
+        /// From Globals.BridgeBurnRefundHeight a Bitcoin exit too small to pay is put to a refund round instead of being
+        /// given up: its votes are refund votes over the burn, the amount and the burner (the message the refund's
+        /// validation checks), its handler sends the refund, and a refund that is never mined is made again. Below the
+        /// height, and for a payable exit, the round is the exit round it always was.
+        /// </summary>
+        [Fact]
+        public void FromTheRefundHeight_ABitcoinExitTooSmallToPay_IsPutToARefundRound()
+        {
+            var prior = Globals.BridgeBurnRefundHeight;
+            var min = VerifiedXCore.Bitcoin.Attestation.BtcWithdrawals.MinExitPartSats;
+            var btc = BurnExitConsensusService.BurnExitType.BtcExit;
+            var small = Due("0x" + new string('1', 64), "0xBurner", 1, (min - 1) / 100_000_000M, btc);
+            small.BtcDestination = "bc1qdest";
+            var payable = Due("0x" + new string('2', 64), "0xBurner", 1, min / 100_000_000M, btc);
+            payable.BtcDestination = "bc1qdest";
+            try
+            {
+                Globals.BridgeBurnRefundHeight = 500;
+                Assert.Null(BurnExitConsensusService.RefundReasonFor(small, 499));
+                Assert.Equal("BTC_EXIT", BurnExitConsensusService.RoundBurnType(small, 499));
+                Assert.Equal(BridgeCasterConsensus.BuildBoundVoteMessage(small.BaseBurnTxHash, "BTC_EXIT", min - 1, "bc1qdest", 7), BurnExitConsensusService.RoundVoteMessage(small, 7, 499));
+                Assert.True(BurnExitConsensusService.IsUnpayableBtcExit(small)); // given up before its round below the height
+
+                Assert.Equal(VerifiedXCore.Bitcoin.Models.VBTCBridgeRefundState.BelowSmallestExitReason, BurnExitConsensusService.RefundReasonFor(small, 500));
+                Assert.Equal(BridgeCasterConsensus.RefundBurnType, BurnExitConsensusService.RoundBurnType(small, 500));
+                Assert.Equal(BridgeCasterConsensus.BuildRefundVoteMessage(small.BaseBurnTxHash, min - 1, "0xburner", 7), BurnExitConsensusService.RoundVoteMessage(small, 7, 500));
+                Assert.Null(BurnExitConsensusService.RefundReasonFor(payable, 500));
+                Assert.Equal(BridgeCasterConsensus.BuildBoundVoteMessage(payable.BaseBurnTxHash, "BTC_EXIT", min, "bc1qdest", 7), BurnExitConsensusService.RoundVoteMessage(payable, 7, 500));
+
+                // A refund sent and never mined is made again, as a pool unlock is.
+                small.Status = BurnExitConsensusService.BurnExitStatus.Complete;
+                small.CompletionVfxTxHash = "refund-tx";
+                small.CompletionBroadcastAtBlock = 500;
+                Assert.True(BurnExitConsensusService.UnlockToRemake(small, 600, burnUsed: _ => false));
+                Assert.False(BurnExitConsensusService.UnlockToRemake(small, 600, burnUsed: _ => true));
+                Globals.BridgeBurnRefundHeight = long.MaxValue;
+                Assert.Null(BurnExitConsensusService.UnlockToRemake(small, 600, burnUsed: _ => false));
+            }
+            finally { Globals.BridgeBurnRefundHeight = prior; }
+        }
+
+        /// <summary>
         /// Once a round has started on a record, the watch of Base does not change its fields under it: the round's evidence
         /// check reads the exit type it started with (a type changed mid-check failed a real burn). Only "found" is noted.
         /// </summary>

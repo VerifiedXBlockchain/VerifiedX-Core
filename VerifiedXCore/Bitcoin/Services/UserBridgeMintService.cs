@@ -373,7 +373,8 @@ namespace VerifiedXCore.Bitcoin.Services
         /// their signatures are kept too: spare ones cover a signer the contract stops counting before the mint is sent.
         /// </summary>
         internal static async Task AskSignersAsync(IEnumerable<ContractSigner> signers, string body, byte[] hash, bool typed,
-            Dictionary<string, string> signatures, Func<IEnumerable<string>, bool> enough, string lockId, TimeSpan graceAfterEnough = default)
+            Dictionary<string, string> signatures, Func<IEnumerable<string>, bool> enough, string lockId, TimeSpan graceAfterEnough = default,
+            string route = "SignMintAttestation")
         {
             using var stop = new CancellationTokenSource();
             var kept = new object();
@@ -383,7 +384,7 @@ namespace VerifiedXCore.Bitcoin.Services
             {
                 try
                 {
-                    var url = $"http://{v.IPAddress.Replace("::ffff:", "")}:{Globals.ValAPIPort}/valapi/Validator/SignMintAttestation";
+                    var url = $"http://{v.IPAddress.Replace("::ffff:", "")}:{Globals.ValAPIPort}/valapi/Validator/{route}"; // a refund's: SignRefundAttestation
                     var txt = await VerifiedXCore.Utilities.NodeHttp.PostForShortReplyAsync(url, body, stop.Token);
                     if (txt == null) return;
                     var jo = Newtonsoft.Json.Linq.JObject.Parse(txt);

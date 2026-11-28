@@ -3521,6 +3521,68 @@ namespace VerifiedXCore.Bitcoin.Services
         }
 
         /// <summary>
+        /// Broadcast <see cref="TransactionType.VBTC_V2_BRIDGE_BURN_REFUND"/> after the casters agreed that a Base burn VFX
+        /// cannot pay is refunded (Globals.BridgeBurnRefundHeight): a self-transaction of the handler caster, fee 0, amount 0.
+        /// </summary>
+        public static async Task<(bool Success, string TxHashOrError)> CreateBridgeBurnRefundTx(
+            string ownerAddress,
+            string baseBurnTxHash,
+            string baseBurner,
+            long amountSats,
+            string reason,
+            IReadOnlyList<CasterConsensusVote>? casterConsensusVotes)
+        {
+            try
+            {
+                var account = AccountData.GetSingleAccount(ownerAddress);
+                if (account == null)
+                    return (false, $"Account not found: {ownerAddress}");
+
+                var txData = JsonConvert.SerializeObject(new
+                {
+                    Function = "VBTCBridgeBurnRefund()",
+                    BaseBurnTxHash = baseBurnTxHash,
+                    BaseBurner = (baseBurner ?? "").Trim().ToLowerInvariant(),
+                    AmountSats = amountSats,
+                    Reason = reason,
+                    CasterConsensusVotes = casterConsensusVotes
+                });
+
+                var tx = new Transaction
+                {
+                    Timestamp = TimeUtil.GetTime(),
+                    FromAddress = ownerAddress,
+                    ToAddress = ownerAddress,
+                    Amount = 0.0M,
+                    Fee = 0.0M,
+                    Nonce = AccountStateTrei.GetNextNonce(ownerAddress),
+                    TransactionType = TransactionType.VBTC_V2_BRIDGE_BURN_REFUND,
+                    Data = txData
+                };
+                tx.Fee = VerifiedXCore.Services.LedgerIntegrityRules.SpellForNextBlock(0M, legacy: 0.00M);
+                tx.Build();
+                var privateKey = account.GetPrivKey;
+                if (privateKey == null)
+                    return (false, "Private key was null");
+                tx.Signature = VerifiedXCore.Services.SignatureService.CreateSignature(tx.Hash, privateKey, account.PublicKey);
+                if (tx.Signature == "ERROR")
+                    return (false, "TX Signature Failed");
+
+                var result = await TransactionValidatorService.VerifyTX(tx);
+                if (!result.Item1)
+                    return (false, $"TX Verify Failed: {result.Item2}");
+
+                if (await TransactionData.SubmitOwnTransaction(tx, ownerAddress, tx.Fee + tx.Amount) is { } notSent)
+                    return (false, notSent);
+                return (true, tx.Hash);
+            }
+            catch (Exception ex)
+            {
+                return (false, $"Error: {ApiErrorText.For(ex)}");
+            }
+        }
+
+        /// <summary>
         /// Broadcast <see cref="TransactionType.VBTC_V2_BRIDGE_EXIT_TO_BTC_COMPLETE"/> after the caster has
         /// FROST-signed and broadcast the Bitcoin withdrawal for a <c>burnForBTCExit</c>.
         /// This is the consensus-critical second half of the BTC-exit flow — it is what causes

@@ -791,6 +791,7 @@ namespace VerifiedXCore.Data
                                 tx.TransactionType != TransactionType.VBTC_V2_BRIDGE_EXIT_TO_BTC &&
                                 tx.TransactionType != TransactionType.VBTC_V2_BRIDGE_EXIT_TO_BTC_COMPLETE &&
                                 tx.TransactionType != TransactionType.VBTC_V2_BRIDGE_EXIT_TO_BTC_FAIL &&
+                                tx.TransactionType != TransactionType.VBTC_V2_BRIDGE_BURN_REFUND &&
                                 tx.TransactionType != TransactionType.VFX_SHIELD &&
                                 tx.TransactionType != TransactionType.VFX_UNSHIELD &&
                                 tx.TransactionType != TransactionType.VFX_PRIVATE_TRANSFER &&
@@ -1448,7 +1449,7 @@ namespace VerifiedXCore.Data
             TransactionType.VBTC_V2_BRIDGE_EXIT_TO_BTC, TransactionType.VBTC_V2_BRIDGE_EXIT_TO_BTC_COMPLETE,
             TransactionType.VBTC_V2_BRIDGE_EXIT_TO_BTC_FAIL, TransactionType.VFX_SHIELD, TransactionType.VFX_UNSHIELD,
             TransactionType.VFX_PRIVATE_TRANSFER, TransactionType.VBTC_V2_SHIELD, TransactionType.VBTC_V2_UNSHIELD,
-            TransactionType.VBTC_V2_PRIVATE_TRANSFER,
+            TransactionType.VBTC_V2_PRIVATE_TRANSFER, TransactionType.VBTC_V2_BRIDGE_BURN_REFUND,
         };
 
         /// <summary>The sibling types BlockValidatorService.ValidateBlock compares a Transfer() or Burn() with.</summary>
@@ -1695,6 +1696,7 @@ namespace VerifiedXCore.Data
                 tx.TransactionType != TransactionType.VBTC_V2_BRIDGE_EXIT_TO_BTC &&
                 tx.TransactionType != TransactionType.VBTC_V2_BRIDGE_EXIT_TO_BTC_COMPLETE &&
                 tx.TransactionType != TransactionType.VBTC_V2_BRIDGE_EXIT_TO_BTC_FAIL &&
+                tx.TransactionType != TransactionType.VBTC_V2_BRIDGE_BURN_REFUND &&
                 tx.TransactionType != TransactionType.VFX_SHIELD &&
                 tx.TransactionType != TransactionType.VFX_UNSHIELD &&
                 tx.TransactionType != TransactionType.VFX_PRIVATE_TRANSFER &&

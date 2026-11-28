@@ -63,6 +63,29 @@ namespace VerifiedXCore.Controllers
         }
 
         /// <summary>
+        /// Validators sign the vBTCb contract's Refund(to, amount, burnId) for a refund the chain recorded
+        /// (BaseBridgeAttestationService.HandleRefundAttestationRequest). Called by the refund's holder's node or wallet.
+        /// </summary>
+        [HttpPost]
+        [Route("SignRefundAttestation")]
+        public ActionResult<string> SignRefundAttestation([FromBody] Bitcoin.Models.RefundAttestationRequest? request)
+        {
+            try
+            {
+                if (request == null)
+                    return BadRequest(JsonConvert.SerializeObject(new { success = false, error = "Empty request body" }));
+                var (success, signatureHex, error) = Bitcoin.Services.BaseBridgeAttestationService.HandleRefundAttestationRequest(request);
+                return Ok(success
+                    ? JsonConvert.SerializeObject(new { success = true, signature = signatureHex })
+                    : JsonConvert.SerializeObject(new { success = false, error = error ?? "Attestation failed" }));
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(500, JsonConvert.SerializeObject(new { success = false, error = ApiErrorText.Generic(ex) }));
+            }
+        }
+
+        /// <summary>
         /// Validators sign a vBTCb validator addition or removal (BaseValidatorSyncService). Publicly reachable: the node
         /// signs only the change it computes itself for the current epoch, so the caller chooses nothing that is signed.
         /// </summary>

@@ -514,7 +514,8 @@ namespace VerifiedXCore.Services
                 && txRequest.TransactionType != TransactionType.VBTC_V2_BRIDGE_POOL_UNLOCK
                 && txRequest.TransactionType != TransactionType.VBTC_V2_BRIDGE_EXIT_TO_BTC
                 && txRequest.TransactionType != TransactionType.VBTC_V2_BRIDGE_EXIT_TO_BTC_COMPLETE
-                && txRequest.TransactionType != TransactionType.VBTC_V2_BRIDGE_EXIT_TO_BTC_FAIL)
+                && txRequest.TransactionType != TransactionType.VBTC_V2_BRIDGE_EXIT_TO_BTC_FAIL
+                && !(txRequest.TransactionType == TransactionType.VBTC_V2_BRIDGE_BURN_REFUND && (blockHeight ?? (Globals.LastBlock.Height + 1)) >= Globals.BridgeBurnRefundHeight))
             {
                 return (txResult, "Fee cannot be less than or equal to zero.");
             }
@@ -532,7 +533,8 @@ namespace VerifiedXCore.Services
                     && txRequest.TransactionType != TransactionType.VBTC_V2_BRIDGE_POOL_UNLOCK
                     && txRequest.TransactionType != TransactionType.VBTC_V2_BRIDGE_EXIT_TO_BTC
                     && txRequest.TransactionType != TransactionType.VBTC_V2_BRIDGE_EXIT_TO_BTC_COMPLETE
-                    && txRequest.TransactionType != TransactionType.VBTC_V2_BRIDGE_EXIT_TO_BTC_FAIL)
+                    && txRequest.TransactionType != TransactionType.VBTC_V2_BRIDGE_EXIT_TO_BTC_FAIL
+                    && !(txRequest.TransactionType == TransactionType.VBTC_V2_BRIDGE_BURN_REFUND && (blockHeight ?? (Globals.LastBlock.Height + 1)) >= Globals.BridgeBurnRefundHeight))
                 {
                     return (txResult, "Fee cannot be less than 0.000003 VFX");
                 }
@@ -4535,6 +4537,14 @@ namespace VerifiedXCore.Services
                 }
             }
 
+            // A refund of a Base burn VFX cannot pay (Globals.BridgeBurnRefundHeight; not a transaction type before it).
+            if (txRequest.TransactionType == TransactionType.VBTC_V2_BRIDGE_BURN_REFUND)
+            {
+                var refundRefusal = await BridgeBurnRefundRules.RefusalAsync(txRequest, blockHeight ?? (Globals.LastBlock.Height + 1), blockHeight, blockTime);
+                if (refundRefusal != null)
+                    return (txResult, refundRefusal);
+            }
+
             if (txRequest.TransactionType == TransactionType.VBTC_V2_BRIDGE_EXIT_TO_BTC_COMPLETE
                 || txRequest.TransactionType == TransactionType.VBTC_V2_BRIDGE_EXIT_TO_BTC_FAIL)
             {
@@ -5047,7 +5057,7 @@ namespace VerifiedXCore.Services
         /// "{hash}:{position}" for one of several burns in that transaction (BaseBridgeService.BurnId; #277). The position is
         /// written plainly (digits, no leading zero), so a burn has one spelling of it.
         /// </summary>
-        private static bool IsValidBurnId(string? id, long height)
+        internal static bool IsValidBurnId(string? id, long height)
         {
             if (IsValidEvmTxHash32(id)) return true;
             if (id == null || height < Globals.PathAuditRulesHeight) return false;

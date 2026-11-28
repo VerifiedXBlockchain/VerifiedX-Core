@@ -586,6 +586,17 @@ namespace VerifiedXCore
         public const long ExitPartTakeoverTestnetHeight = long.MaxValue;
 
         /// <summary>
+        /// From this height a Base burn for a Bitcoin exit that VFX cannot pay (below BtcWithdrawals.MinExitPartSats) is
+        /// refunded instead of left unpaid: the caster committee agrees on it and sends a VBTC_V2_BRIDGE_BURN_REFUND, whose
+        /// apply records a VBTCBridgeRefundState and consumes the burn, and the validators sign that record for the vBTCb
+        /// contract's refundBurn. Below it the type is not accepted. A consensus change to apply: an un-upgraded node refuses
+        /// the block that carries one. Unset (long.MaxValue) on mainnet and testnet until the release that activates it.
+        /// Testnet value in GlobalsNetworkHeights.
+        /// </summary>
+        public static long BridgeBurnRefundHeight = long.MaxValue;
+        public const long BridgeBurnRefundTestnetHeight = long.MaxValue;
+
+        /// <summary>
         /// From this height a reserve's Recover() reads each pending NFT_TX row's call as the dispatchers read it. Below it
         /// a row whose Data was not an array of objects made the recovery throw part-way, so every later row, the balance
         /// sweep, the contract re-own and the vBTC sweep never ran, and the reserve stayed under its vault key. Active from LedgerRulesBatchHeight.

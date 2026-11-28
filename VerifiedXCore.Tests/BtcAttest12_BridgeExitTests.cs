@@ -29,7 +29,7 @@ namespace VerifiedXCore.Tests
     /// UpdateTreis, under the bridge rules that are live on the network (submitter must be a caster).
     /// </summary>
     [Collection("DbContextSequential")]
-    public class BtcAttest12_BridgeExitTests : BtcAttestTestBase
+    public partial class BtcAttest12_BridgeExitTests : BtcAttestTestBase
     {
         private const long Checkpoint = 4032;
         private const string BtcDest = "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4";
@@ -38,6 +38,7 @@ namespace VerifiedXCore.Tests
         private readonly Network? _priorNetwork = Globals.BTCNetwork;
         private readonly long _priorGuard = Globals.BridgeIntraBlockGuardHeight;
         private readonly long _priorExitTakeover = Globals.ExitPartTakeoverHeight;
+        private readonly long _priorBurnRefund = Globals.BridgeBurnRefundHeight;
         private readonly Func<VaultWithdrawalRow, VaultPin, Task<(bool, string)>> _realSign = BtcWithdrawalSigner.SignAndBroadcast;
         private readonly Func<string, Task<bool?>> _realKnown = BtcWithdrawalSigner.KnownOnBitcoin;
 
@@ -65,6 +66,8 @@ namespace VerifiedXCore.Tests
             Globals.BootstrapCasterAddresses.Remove(Caster.Address);
             Globals.BridgeIntraBlockGuardHeight = _priorGuard;
             Globals.ExitPartTakeoverHeight = _priorExitTakeover;
+            Globals.BridgeBurnRefundHeight = _priorBurnRefund;
+            foreach (var signer in Signers.Skip(1)) Globals.BootstrapCasterAddresses.Remove(signer.Address); // seated by the refund tests
             Globals.BTCNetwork = _priorNetwork;
             base.Dispose();
         }

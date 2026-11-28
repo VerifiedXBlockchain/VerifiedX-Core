@@ -311,6 +311,7 @@ namespace VerifiedXCore.Utilities
             TransactionType.VBTC_V2_BRIDGE_EXIT_TO_BTC,
             TransactionType.VBTC_V2_BRIDGE_EXIT_TO_BTC_COMPLETE,
             TransactionType.VBTC_V2_BRIDGE_EXIT_TO_BTC_FAIL,
+            TransactionType.VBTC_V2_BRIDGE_BURN_REFUND,
             TransactionType.ADNR,
             TransactionType.VOTE_TOPIC,
             TransactionType.DSTR,

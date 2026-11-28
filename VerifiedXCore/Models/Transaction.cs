@@ -171,6 +171,7 @@ namespace VerifiedXCore.Models
         VBTC_V2_COIN_PIN = 44, // A requester pins its withdrawal again at a higher Bitcoin fee rate (fee bump; watched vaults)
         VBTC_V2_BTC_REORG = 45, // Rewind: Bitcoin reorganised below reported events; they are taken back and the headers replaced
         VBTC_V2_VAULT_REKEY = 46, // Sender-less: a vault's key is replaced by one the validators of the day made (plan 8.8)
+        VBTC_V2_BRIDGE_BURN_REFUND = 47, // A caster records a Base burn VFX cannot pay, for the vBTCb contract's refundBurn (Globals.BridgeBurnRefundHeight)
     }
 
     public enum ReserveTransactionType

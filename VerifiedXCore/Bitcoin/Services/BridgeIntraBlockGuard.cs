@@ -31,7 +31,8 @@ namespace VerifiedXCore.Bitcoin.Services
             || type == TransactionType.VBTC_V2_BRIDGE_EXIT_TO_BTC
             || type == TransactionType.VBTC_V2_BRIDGE_UNLOCK
             || type == TransactionType.VBTC_V2_BRIDGE_EXIT_TO_BTC_FAIL
-            || type == TransactionType.VBTC_V2_BRIDGE_EXIT_TO_BTC_COMPLETE;
+            || type == TransactionType.VBTC_V2_BRIDGE_EXIT_TO_BTC_COMPLETE
+            || type == TransactionType.VBTC_V2_BRIDGE_BURN_REFUND; // claims its burn: an exit and a refund of one burn do not share a block
 
         /// <summary>
         /// Registers the burn hash and lock IDs a bridge transaction claims. Returns false (with a
@@ -104,6 +105,9 @@ namespace VerifiedXCore.Bitcoin.Services
         public static string? RedeemedBurn(TransactionType type, JObject jobj, long height)
         {
             if (type == TransactionType.VBTC_V2_BRIDGE_EXIT_TO_BTC && height >= Globals.PathAuditRulesHeight)
+                return jobj["BaseBurnTxHash"]?.ToString();
+            // A refund consumes BaseBurnTxHash and reads no other burn field.
+            if (type == TransactionType.VBTC_V2_BRIDGE_BURN_REFUND)
                 return jobj["BaseBurnTxHash"]?.ToString();
             return jobj["ExitBurnTxHash"]?.ToString() ?? jobj["BaseBurnTxHash"]?.ToString();
         }

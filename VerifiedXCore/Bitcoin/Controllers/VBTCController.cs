@@ -5635,6 +5635,47 @@ namespace VerifiedXCore.Bitcoin.Controllers
         }
 
         /// <summary>
+        /// Validator node: sign the vBTCb contract's Refund(to, amount, burnId) for a refund the chain recorded
+        /// (<see cref="RefundAttestationRequest"/>); same answer shape as SignMintAttestation.
+        /// </summary>
+        [HttpPost("SignRefundAttestation")]
+        [ProducesResponseType(typeof(object), StatusCodes.Status200OK)]
+        public string SignRefundAttestation([FromBody] RefundAttestationRequest request)
+        {
+            try
+            {
+                if (request == null)
+                    return JsonConvert.SerializeObject(new { success = false, message = "Payload cannot be null" });
+                var (ok, sig, err) = Services.BaseBridgeAttestationService.HandleRefundAttestationRequest(request);
+                return ok
+                    ? JsonConvert.SerializeObject(new { success = true, signature = sig })
+                    : JsonConvert.SerializeObject(new { success = false, message = err ?? "Signing failed" });
+            }
+            catch (Exception ex)
+            {
+                return JsonConvert.SerializeObject(new { success = false, message = ApiErrorText.For(ex) });
+            }
+        }
+
+        /// <summary>A refund the chain recorded for a Base burn VFX cannot pay (VBTCBridgeRefundState), by its exact id.</summary>
+        [HttpGet("GetBridgeRefund/{refundId}")]
+        [ProducesResponseType(typeof(object), StatusCodes.Status200OK)]
+        public string GetBridgeRefund(string refundId)
+        {
+            try
+            {
+                var refund = VBTCBridgeRefundState.Get(refundId);
+                return refund == null
+                    ? JsonConvert.SerializeObject(new { Success = false, Message = "No refund recorded under this id" })
+                    : JsonConvert.SerializeObject(new { Success = true, Refund = refund });
+            }
+            catch (Exception ex)
+            {
+                return JsonConvert.SerializeObject(new { Success = false, Message = ApiErrorText.For(ex) });
+            }
+        }
+
+        /// <summary>
         /// Returns in-memory mint attestation progress for a lock ID on this node (caster-collected signatures).
         /// </summary>
         [HttpGet("GetMintAttestation/{lockId}")]

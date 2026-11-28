@@ -221,6 +221,63 @@ namespace VerifiedXCore.Bitcoin.Services
             }
         }
 
+        internal const string RefundNotFoundReason = "Refund not found on-chain";
+        internal const string RefundInsideReorgWindowReason = "The refund is still inside the reorg window; ask again once its block is deeper";
+
+        /// <summary>
+        /// Validator node: signs the vBTCb contract's Refund(to, amount, burnId) for a refund the chain recorded
+        /// (VBTCBridgeRefundState, from Globals.BridgeBurnRefundHeight), as it signs a mint for a lock: the record under the
+        /// exact id, at least MintAttestationDepth blocks deep, the recipient and amount it holds, this node's contract and
+        /// chain, the typed message (version 4), and only from a node on the network's chain. Returns the hex signature.
+        /// </summary>
+        public static (bool success, string? signatureHex, string? error) HandleRefundAttestationRequest(RefundAttestationRequest request)
+        {
+            const string TAG = "BaseBridgeAttestationService.HandleRefundAttestationRequest";
+            try
+            {
+                if (request == null) return (false, null, "Payload cannot be null");
+                if (string.IsNullOrEmpty(Globals.ValidatorAddress)) return (false, null, "Not a validator node");
+
+                // Exactly as stored: the contract refuses a second refund only by the exact bytes of the id.
+                var refund = VBTCBridgeRefundState.Get(request.RefundId);
+                if (refund == null || !string.Equals(refund.RefundId, request.RefundId, StringComparison.Ordinal))
+                {
+                    LogUtility.Log($"[BridgeAttest] REJECT refund: {request.RefundId} not found in consensus state.", TAG);
+                    return (false, null, RefundNotFoundReason);
+                }
+                if (refund.VfxHeight > 0 && (Globals.LastBlock?.Height ?? 0) - refund.VfxHeight < MintAttestationDepth)
+                    return (false, null, RefundInsideReorgWindowReason);
+                if (!string.Equals(refund.BaseBurner, (request.To ?? "").Trim(), StringComparison.OrdinalIgnoreCase))
+                    return (false, null, "Refund recipient mismatch");
+                if (DestinationStartsWithAdminTag(request.To))
+                    return (false, null, DestinationIsAdminTagReason);
+                if (refund.AmountSats != request.AmountSats)
+                    return (false, null, "Amount mismatch");
+                if (string.IsNullOrEmpty(request.ContractAddress) || request.ChainId != Globals.BaseEvmChainId
+                    || string.IsNullOrEmpty(BaseBridgeService.ContractAddress)
+                    || !string.Equals(request.ContractAddress.Trim(), BaseBridgeService.ContractAddress, StringComparison.OrdinalIgnoreCase))
+                    return (false, null, ContractOrChainMismatchReason);
+                if (request.MessageVersion != VbtcbTypedData.MessageVersion)
+                    return (false, null, UnsupportedMessageVersionReason);
+                if (NotReadyToAttest() is { } notReady)
+                    return (false, null, notReady);
+
+                var account = AccountData.GetSingleAccount(Globals.ValidatorAddress);
+                if (account == null) return (false, null, "Validator account not loaded");
+                var privHex = account.GetKey;
+                if (privHex.Length % 2 != 0) privHex = "0" + privHex;
+                var digest = VbtcbTypedData.RefundDigest(refund.BaseBurner, refund.AmountSats, refund.RefundId, request.ChainId, BaseBridgeService.ContractAddress);
+                var sigHex = ValidatorEthKeyService.SignDigestHex(digest, BoundedDecode.Hex(privHex, 33));
+                LogUtility.Log($"[BridgeAttest] Signed refund {refund.RefundId}: to={refund.BaseBurner}, amount={refund.AmountSats}", TAG);
+                return (true, sigHex, null);
+            }
+            catch (Exception ex)
+            {
+                LogUtility.Log($"[BridgeAttest] EXCEPTION signing refund {request?.RefundId}: {ex.Message}", TAG);
+                return (false, null, ApiErrorText.For(ex));
+            }
+        }
+
         /// <summary>Seconds a lock's collected state is kept for the progress route after it was last collected.</summary>
         internal const long AttestationStateSeconds = 30 * 60;
         /// <summary>The most locks whose collected state is kept at once; past it the oldest go first.</summary>
