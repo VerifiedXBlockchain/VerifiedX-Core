@@ -9,6 +9,11 @@
 	<GenerateDocumentationFile>true</GenerateDocumentationFile>
 	<NoWarn>$(NoWarn);1591</NoWarn>
 	<SignAssembly>False</SignAssembly>
+	<!-- The web SDK turns on the server collector: a heap per core, each with a large budget, given back slowly. A validator's
+	     gossip fills those budgets within minutes and the node holds them. The workstation collector, concurrent, keeps one
+	     heap. An operator can still choose the server collector with DOTNET_gcServer=1, no rebuild needed. -->
+	<ServerGarbageCollection>false</ServerGarbageCollection>
+	<ConcurrentGarbageCollection>true</ConcurrentGarbageCollection>
   </PropertyGroup>
 
   <ItemGroup>
