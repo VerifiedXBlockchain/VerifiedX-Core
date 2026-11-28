@@ -819,7 +819,7 @@ namespace VerifiedXCore.Utilities
         /// from the cache, and can bypass the cache. The gate uses this to re-query live before
         /// rejecting a candidate on a cached height that may be several blocks stale.
         /// </summary>
-        public static async Task<(long height, bool fromCache)> CheckValidatorHeightDetailedAsync(string validatorAddress, string cleanIP, bool forceRefresh = false)
+        public static async Task<(long height, bool fromCache)> CheckValidatorHeightDetailedAsync(string validatorAddress, string cleanIP, bool forceRefresh = false, CancellationToken ct = default)
         {
             // Check cache first
             var now = TimeUtil.GetTime();
@@ -837,12 +837,12 @@ namespace VerifiedXCore.Utilities
                 using var client = Globals.HttpClientFactory.CreateClient();
                 var hgTimeout = IsStalling ? 1500 : 2000;
                 var heightUri = $"http://{cleanIP}:{Globals.ValAPIPort}/valapi/validator/GetBlockHeight";
-                var heightResp = await client.GetAsync(heightUri).WaitAsync(TimeSpan.FromMilliseconds(hgTimeout));
+                var heightResp = await GetWithinAsync(client, heightUri, hgTimeout, ct);
 
                 if (heightResp != null && heightResp.IsSuccessStatusCode)
                 {
-                    var heightStr = await heightResp.Content.ReadAsStringAsync();
-                    if (long.TryParse(heightStr?.Trim(), out var peerHeight) && peerHeight > 0)
+                    var heightStr = await heightResp.Content.ReadAsStringAsync(ct);
+                    if (long.TryParse(heightStr?.Trim(), out var peerHeight) && peerHeight > 0 && !ct.IsCancellationRequested)
                     {
                         // Cache on the NetworkValidator entry
                         if (Globals.NetworkValidators.TryGetValue(validatorAddress, out var nvUpdate))
@@ -863,14 +863,30 @@ namespace VerifiedXCore.Utilities
         }
 
         /// <summary>
+        /// GET <paramref name="uri"/>, given up after <paramref name="timeoutMs"/> (a <see cref="TimeoutException"/>) or when
+        /// <paramref name="ct"/> is cancelled (an <see cref="OperationCanceledException"/>). Either way the request itself is
+        /// cancelled, not left running.
+        /// </summary>
+        private static async Task<HttpResponseMessage> GetWithinAsync(HttpClient client, string uri, int timeoutMs, CancellationToken ct)
+        {
+            using var call = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            call.CancelAfter(timeoutMs);
+            try { return await client.GetAsync(uri, call.Token); }
+            catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+            {
+                throw new TimeoutException($"no answer within {timeoutMs}ms");
+            }
+        }
+
+        /// <summary>
         /// HEIGHT-GATE: Checks whether a validator is close enough to chain tip to produce blocks.
         /// Returns true if at height or within HEIGHT_GATE_MAX_BEHIND blocks of chain tip.
         /// Returns true (pass) if height cannot be determined (fail-open to not break consensus
         /// for validators that don't have the endpoint yet).
         /// </summary>
-        public static async Task<bool> IsValidatorAtHeight(string validatorAddress, string cleanIP, long chainTip)
+        public static async Task<bool> IsValidatorAtHeight(string validatorAddress, string cleanIP, long chainTip, CancellationToken ct = default)
         {
-            var (peerHeight, fromCache) = await CheckValidatorHeightDetailedAsync(validatorAddress, cleanIP);
+            var (peerHeight, fromCache) = await CheckValidatorHeightDetailedAsync(validatorAddress, cleanIP, ct: ct);
             if (peerHeight < 0)
             {
                 // Can't determine height — fail open so we don't break consensus for older nodes
@@ -887,7 +903,7 @@ namespace VerifiedXCore.Utilities
                 // The cached height can be up to HEIGHT_CACHE_TTL_SECONDS (several blocks) old.
                 // Re-query live once before rejecting so a healthy validator is not skipped on
                 // stale data; only a confirmed lag rejects.
-                var (liveHeight, _) = await CheckValidatorHeightDetailedAsync(validatorAddress, cleanIP, forceRefresh: true);
+                var (liveHeight, _) = await CheckValidatorHeightDetailedAsync(validatorAddress, cleanIP, forceRefresh: true, ct: ct);
                 if (liveHeight >= 0)
                 {
                     CasterLogUtility.Log(
@@ -912,7 +928,44 @@ namespace VerifiedXCore.Utilities
             return true;
         }
 
-        public static async Task<(bool, Block?)> VerifyWinnerAvailability(Proof winningProof, long nextBlock)
+        /// <summary>The block a candidate served when it was checked this round: its producer and the block.</summary>
+        private static (string Producer, Block Block)? _verifiedDraft;
+
+        /// <summary>
+        /// Whether the candidate can produce the next block, and the block it serves. The check ends with the same request,
+        /// timeouts and checks the block fetch uses (<see cref="VerifyValAvailability"/>): a candidate that answered the
+        /// check but served no block, or a block that is not its own hash or not its whole copy, passed the check, was
+        /// elected, and was waited on for the whole fetch. The block is kept for the round, so the fetch takes it from here.
+        /// With <paramref name="budgetMs"/> the check takes no longer than that.
+        /// </summary>
+        public static async Task<(bool, Block?)> VerifyWinnerAvailability(Proof winningProof, long nextBlock, int budgetMs = 0)
+        {
+            // The budget cancels the check itself: once it is spent no request is left running, and nothing the check
+            // changes (a fail count, the proof cache, a cached height, a served block) is changed after it.
+            using var budget = budgetMs > 0 ? new CancellationTokenSource(budgetMs) : null;
+            var ct = budget?.Token ?? CancellationToken.None;
+            var result = await VerifyWinnerAvailabilityAtProducer(winningProof, nextBlock, ct);
+            if (!result.Item1 && ct.IsCancellationRequested)
+                CasterLogUtility.Log($"VERIFY: candidate {winningProof.Address} did not serve a block for {nextBlock} within {budgetMs}ms — candidate skipped.", "VERIFY");
+            if (result.Item1 && result.Item2 != null)
+                _verifiedDraft = (winningProof.Address, result.Item2);
+            else if (_verifiedDraft is { } kept && kept.Producer == winningProof.Address)
+                _verifiedDraft = null;
+            return result;
+        }
+
+        /// <summary>
+        /// The block <paramref name="producer"/> served when it was checked for <paramref name="height"/>, while that height
+        /// is still the next one on this node's tip; otherwise null.
+        /// </summary>
+        public static Block? VerifiedDraftOf(string? producer, long height)
+        {
+            var tip = Globals.LastBlock;
+            return _verifiedDraft is { } kept && kept.Producer == producer && kept.Block.Height == height
+                && tip != null && tip.Height + 1 == height && kept.Block.PrevHash == tip.Hash ? kept.Block : null;
+        }
+
+        private static async Task<(bool, Block?)> VerifyWinnerAvailabilityAtProducer(Proof winningProof, long nextBlock, CancellationToken ct)
         {
             using (var client = Globals.HttpClientFactory.CreateClient())
             {
@@ -961,7 +1014,9 @@ namespace VerifiedXCore.Utilities
                         // STALL-HEAL: Use shorter timeout during stall conditions (1.5s vs 3s)
                         // to cycle through offline validators faster.
                         var vgTimeout = IsStalling ? 1500 : 3000;
-                        var versionResp = await client.GetAsync(versionUri).WaitAsync(TimeSpan.FromMilliseconds(vgTimeout));
+                        var versionResp = await GetWithinAsync(client, versionUri, vgTimeout, ct);
+                        if (ct.IsCancellationRequested)
+                            return (false, null);
                         if (versionResp == null || !versionResp.IsSuccessStatusCode)
                         {
                             CasterLogUtility.Log($"VersionGate: Winner {winningProof.Address} at {cleanIP} — GetWalletVersion returned {versionResp?.StatusCode}. Rejecting.", "VERSIONGATE");
@@ -973,7 +1028,9 @@ namespace VerifiedXCore.Utilities
                             ClearProofGenerationCache();
                             return (false, null);
                         }
-                        var peerVersion = await versionResp.Content.ReadAsStringAsync();
+                        var peerVersion = await versionResp.Content.ReadAsStringAsync(ct);
+                        if (ct.IsCancellationRequested)
+                            return (false, null);
                         if (string.IsNullOrEmpty(peerVersion) || !IsMajorVersionCurrent(peerVersion))
                         {
                             CasterLogUtility.Log($"VersionGate: Winner {winningProof.Address} at {cleanIP} reports version '{peerVersion}' — outdated (need major >= {Globals.MajorVer}). Rejecting.", "VERSIONGATE");
@@ -986,6 +1043,8 @@ namespace VerifiedXCore.Utilities
                     }
                     catch (Exception vex)
                     {
+                        if (ct.IsCancellationRequested)
+                            return (false, null); // the budget ran out: not the candidate's failure to count
                         var isTimeout = vex is TimeoutException || vex is TaskCanceledException || vex is OperationCanceledException;
                         CasterLogUtility.Log($"VersionGate: Winner {winningProof.Address} at {cleanIP} — version check failed: {vex.Message}. Rejecting (timeout={isTimeout}).", "VERSIONGATE");
                         if (Globals.NetworkValidators.TryGetValue(winningProof.Address, out var nvFail3))
@@ -1020,7 +1079,9 @@ namespace VerifiedXCore.Utilities
                     // its own cache (HEIGHT_CACHE_TTL_SECONDS) to avoid excessive HTTP calls.
                     {
                         var chainTip = Globals.LastBlock.Height;
-                        var heightOk = await IsValidatorAtHeight(winningProof.Address, cleanIP, chainTip);
+                        var heightOk = await IsValidatorAtHeight(winningProof.Address, cleanIP, chainTip, ct);
+                        if (ct.IsCancellationRequested)
+                            return (false, null);
                         if (!heightOk)
                         {
                             // Validator is still syncing — exclude from future proof rounds
@@ -1041,11 +1102,11 @@ namespace VerifiedXCore.Utilities
                     try
                     {
                         var prUri = $"http://{cleanIP}:{Globals.ValAPIPort}/valapi/validator/ProducerReady";
-                        var prResp = await client.GetAsync(prUri).WaitAsync(TimeSpan.FromMilliseconds(1500));
+                        var prResp = await GetWithinAsync(client, prUri, 1500, ct);
                         if (prResp != null && prResp.IsSuccessStatusCode)
                         {
-                            var prBody = (await prResp.Content.ReadAsStringAsync())?.Trim().Trim('"').ToLowerInvariant();
-                            if (prBody == "false")
+                            var prBody = (await prResp.Content.ReadAsStringAsync(ct))?.Trim().Trim('"').ToLowerInvariant();
+                            if (prBody == "false" && !ct.IsCancellationRequested)
                             {
                                 CasterLogUtility.Log($"ProducerReadyGate: Winner {winningProof.Address} at {cleanIP} reports NOT READY (recovering). Skipping this round.", "PRODUCER-READY");
                                 ClearProofGenerationCache();
@@ -1055,24 +1116,9 @@ namespace VerifiedXCore.Utilities
                     }
                     catch { /* unreachable/legacy — fall through to the block-fetch check */ }
 
-                    var uri = $"http://{cleanIP}:{Globals.ValAPIPort}/valapi/validator/VerifyBlock/{nextBlock}/{winningProof.ProofHash}";
-                    var response = await client.GetAsync(uri).WaitAsync(new TimeSpan(0, 0, 3));
-
-                    if (response != null)
-                    {
-                        if (response.IsSuccessStatusCode)
-                        {
-                            return (true, null);
-                        }
-                        // VERIFY-REASON (Sep 2026): a candidate that fails VerifyBlock is silently skipped and the
-                        // next candidate becomes our vote. Record the status so a split vote (2 casters skip a
-                        // winner, 3 accept it) is explainable from the caster log.
-                        CasterLogUtility.Log($"VerifyBlock REJECT: candidate {winningProof.Address} at {cleanIP} returned HTTP {(int)response.StatusCode} for height {nextBlock} — candidate skipped.", "VERIFY");
-                    }
-                    else
-                    {
-                        CasterLogUtility.Log($"VerifyBlock NO-RESPONSE: candidate {winningProof.Address} at {cleanIP} for height {nextBlock} — candidate skipped.", "VERIFY");
-                    }
+                    // The block itself, fetched as the block fetch fetches it: a candidate passes only by serving it.
+                    // Every refusal is logged there (BlockFetch reason), so a split vote stays explainable from the log.
+                    return await VerifyValAvailability(cleanIP, winningProof.Address, nextBlock, ct);
                 }
                 catch (Exception ex)
                 {
@@ -1136,7 +1182,7 @@ namespace VerifiedXCore.Utilities
             block != null && !string.IsNullOrEmpty(block.Hash) && _servedByProducer.TryGetValue(block.Hash, out var served)
             && served.Height == block.Height && served.Fingerprint == CopyFingerprint(block);
 
-        public static async Task<(bool, Block?)> VerifyValAvailability(string ip, string winningAddress, long nextBlock)
+        public static async Task<(bool, Block?)> VerifyValAvailability(string ip, string winningAddress, long nextBlock, CancellationToken ct = default)
         {
             using (var client = Globals.HttpClientFactory.CreateClient())
             {
@@ -1150,6 +1196,8 @@ namespace VerifiedXCore.Utilities
                         return (true, Globals.NextValidatorBlock);
                     }
 
+                    if (ct.IsCancellationRequested)
+                        return (false, null);
                     var cleanIP = ip.Replace("::ffff:", "");
 
                     // FIX C: Version gate for block-crafting validators too.
@@ -1158,13 +1206,13 @@ namespace VerifiedXCore.Utilities
                     try
                     {
                         var versionUri = $"http://{cleanIP}:{Globals.ValAPIPort}/valapi/validator/GetWalletVersion";
-                        var versionResp = await client.GetAsync(versionUri).WaitAsync(TimeSpan.FromMilliseconds(1500));
+                        var versionResp = await GetWithinAsync(client, versionUri, 1500, ct);
                         if (versionResp == null || !versionResp.IsSuccessStatusCode)
                         {
                             CasterLogUtility.Log($"BlockFetch reason: {winningAddress} at {cleanIP} — GetWalletVersion returned {(versionResp == null ? "no response" : ((int)versionResp.StatusCode).ToString())}.", "BLOCKFETCH");
                             return (false, null);
                         }
-                        var peerVersion = await versionResp.Content.ReadAsStringAsync();
+                        var peerVersion = await versionResp.Content.ReadAsStringAsync(ct);
                         if (string.IsNullOrEmpty(peerVersion) || !IsMajorVersionCurrent(peerVersion))
                         {
                             CasterLogUtility.Log($"BlockFetch reason: {winningAddress} at {cleanIP} — version '{peerVersion}' outdated.", "BLOCKFETCH");
@@ -1178,13 +1226,13 @@ namespace VerifiedXCore.Utilities
                     }
 
                     var uri = $"http://{cleanIP}:{Globals.ValAPIPort}/valapi/validator/VerifyBlock/{nextBlock}/aaa";
-                    var response = await client.GetAsync(uri).WaitAsync(new TimeSpan(0, 0, 2));
+                    var response = await GetWithinAsync(client, uri, 2000, ct);
 
                     if (response != null)
                     {
                         if (response.IsSuccessStatusCode)
                         {
-                            var blockJson = await response.Content.ReadAsStringAsync();
+                            var blockJson = await response.Content.ReadAsStringAsync(ct);
                             if (string.IsNullOrWhiteSpace(blockJson) || blockJson == "0")
                             {
                                 CasterLogUtility.Log($"BlockFetch reason: {winningAddress} at {cleanIP} — VerifyBlock {nextBlock} returned HTTP 200 with an empty body (producer has no block staged for this height).", "BLOCKFETCH");
@@ -1206,6 +1254,8 @@ namespace VerifiedXCore.Utilities
                                 return (false, null);
                             }
 
+                            if (ct.IsCancellationRequested)
+                                return (false, null); // served after the budget: not recorded as served
                             NoteServedByProducer(block);
                             return (true, block);
                         }
