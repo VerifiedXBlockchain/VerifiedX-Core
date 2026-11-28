@@ -225,7 +225,14 @@ namespace VerifiedXCore.Bitcoin.Services
                 BridgeExitSyncState.Save(state);
                 // A poll already under way read the cursor before this and saves where it got to when it ends: it is told.
                 Rescans.Add((++_rescanNumber, state.LastScannedBlock));
-                if (Rescans.Count > 64) Rescans.RemoveAt(0);
+                // The list stays short without forgetting what an unfinished poll still needs: the two oldest become
+                // one, under the later number and the earlier cursor, so any poll that predates either is still held
+                // to the earliest block asked for.
+                if (Rescans.Count > 64)
+                {
+                    Rescans[1] = (Rescans[1].Number, Math.Min(Rescans[0].Cursor, Rescans[1].Cursor));
+                    Rescans.RemoveAt(0);
+                }
             }
 
             var msg = $"Reset exit scan cursor from {previousBlock} to {state.LastScannedBlock} (will rescan from block {fromBlock})";

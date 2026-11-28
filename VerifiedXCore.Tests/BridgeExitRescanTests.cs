@@ -135,5 +135,19 @@ namespace VerifiedXCore.Tests
             BaseBridgeExitWatchService.SaveCursorFromPoll(next);
             Assert.Equal(599, BridgeExitSyncState.GetOrCreate().LastScannedBlock);
         }
+
+        [Fact]
+        public void ManyRescansDuringOnePoll_StillKeepTheEarliest()
+        {
+            BridgeExitSyncState.Save(new BridgeExitSyncState { Id = 1, LastScannedBlock = 5_000 });
+            var polling = BaseBridgeExitWatchService.ReadCursorForPoll();
+            BaseBridgeExitWatchService.RescanFromBlock(1_200);
+            for (var i = 0; i < 200; i++)
+                BaseBridgeExitWatchService.RescanFromBlock(4_000);
+            polling.LastScannedBlock = 5_500;
+            BaseBridgeExitWatchService.SaveCursorFromPoll(polling);
+
+            Assert.Equal(1_199, BridgeExitSyncState.GetOrCreate().LastScannedBlock);
+        }
     }
 }
