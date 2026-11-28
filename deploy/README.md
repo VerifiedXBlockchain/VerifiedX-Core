@@ -19,6 +19,7 @@
 | Network | Proxy (what nodes and users use) | Notes |
 |---|---|---|
 | Base mainnet (8453) | `0x09096c6eBf35F0aDAEeC02D06a0dE77E790F132D` | V3 implementation `0xd2bB4BdA89A23c63eaaD464F15658845a2114Ffa`. Upgrade in place; never redeploy. |
+| Base Sepolia (84532), devnet | `0x9a922F72d5F3c51690C76eACaeBB25258e71b538` | V5, the devnet (Marigold) contract since 2026-11-28. Implementation `0xA51a3C62a48B77fA7b8011d8aec6fb5b24F65934`. Validators and casters: the three devnet seeds. Replaced `0x19e41519CE1Dbe9cED703E406B8a6C728D2B7a30` (V4, no supply). |
 | Base Sepolia (84532) | `0x3669EE313f9Aa14b9eBb787DfdB0E97Ca67A0510` | V4, the testnet contract. Implementation `0xa06e3B68B495e474B41595435675f94CF8e7C711`. Started with the three testnet seeds as both its validators and its casters. |
 | Base Sepolia (84532) | `0x1154DDB476A38c01A389E1324121E15Df6703D19` | V3, carries supply from the pre-reset testnet chain. Replaced by the V4 proxy above; no longer used. |
 | Base Sepolia (84532) | `0x969972475c375BE4c9Fe8fc47A9F7145ec63A97C` | Older, unused. |
