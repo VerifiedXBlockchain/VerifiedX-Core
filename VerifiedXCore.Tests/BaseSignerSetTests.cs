@@ -704,6 +704,239 @@ namespace VerifiedXCore.Tests
             return ((HttpStatusCode)ctx.Response.StatusCode, JObject.Parse(json));
         }
 
+        // ── From BaseCasterCatchUpHeight: the casters follow the committee after a day, the whole change at once ──────────
+
+        private BaseSignerSetPolicy.CasterPlan Continuous(IEnumerable<IEnumerable<string>>? window, IEnumerable<string> contract) =>
+            BaseSignerSetPolicy.ComputeCastersContinuous(Epoch, EpochHash, window, contract);
+
+        private static List<string> Applied(IEnumerable<string> contract, BaseSignerSetPolicy.CasterPlan plan) =>
+            contract.Select(a => a.ToLowerInvariant()).Except(plan.Remove).Concat(plan.Add).ToList();
+
+        [Fact]
+        public void FromTheCatchUpHeight_ACasterJoinsAfterADayIn_LeavesAfterADayOut_AndTheWholeChangeGoesAtOnce()
+        {
+            var c = Addresses(12, 'c').ToList();
+            var abc = c.Take(3).ToList();
+            var five = c.Take(5).ToList();
+
+            // The committee grew from A,B,C to A..E a day ago: D and E join together, nobody leaves.
+            var grown = Continuous(new[] { five }, abc);
+            Assert.Equal(c.Skip(3).Take(2).OrderBy(a => BaseSignerSetPolicy.RankOf(EpochHash, a), StringComparer.Ordinal), grown.Add);
+            Assert.Empty(grown.Remove);
+            // A and B then left the committee and stayed out a day: both leave together; C, D, E remain.
+            var shrunk = Continuous(new[] { c.Skip(2).Take(3) }, five);
+            Assert.Equal(c.Take(2).OrderBy(a => BaseSignerSetPolicy.RankOf(EpochHash, a), StringComparer.Ordinal), shrunk.Remove);
+            Assert.Empty(shrunk.Add);
+            // Two in and two out in one change.
+            var swap = Continuous(new[] { c.Skip(2).Take(5) }, five);
+            Assert.Equal(new[] { c[5], c[6] }.OrderBy(a => a), swap.Add.OrderBy(a => a));
+            Assert.Equal(new[] { c[0], c[1] }.OrderBy(a => a), swap.Remove.OrderBy(a => a));
+
+            // In for part of the day only (out at some record of it): does not join. Out for part of it: stays.
+            Assert.True(Continuous(new[] { c.Take(4), abc, c.Take(4) }, abc).Empty);
+            Assert.True(Continuous(new[] { c.Take(4), new[] { c[0], c[1], c[3] }, c.Take(4) }, c.Take(4)).Empty);
+            Assert.Equal(new[] { c[3] }, Continuous(new[] { abc, abc }, c.Take(4)).Remove);
+
+            // A whole new committee: the casters kept always outnumber those added, so it takes three epochs, and the list
+            // can sign at every step.
+            var list = abc.ToList();
+            var committee = c.Skip(3).Take(3).ToList();
+            for (var step = 0; step < 3; step++)
+            {
+                var plan = Continuous(new[] { committee }, list);
+                Assert.True(list.Count - plan.Remove.Count > plan.Add.Count, $"step {step}");
+                list = Applied(list, plan);
+            }
+            Assert.Equal(committee.OrderBy(a => a), list.OrderBy(a => a));
+
+            // Never below 3 by removals, never above 10; at 10 a newcomer comes in with the departed going out.
+            Assert.True(Continuous(new[] { c.Take(2) }, abc).Empty);
+            var full = Continuous(new[] { c.Take(5).Append(c[10]) }, c.Take(10));
+            Assert.Equal(new[] { c[10] }, full.Add);
+            Assert.Equal(c.Skip(5).Take(5).OrderBy(a => a), full.Remove.OrderBy(a => a));
+
+            // Fewer than 3 casters on the contract: additions only, enough to reach 3. No window: no change.
+            Assert.Equal(five.OrderBy(a => a), Continuous(new[] { five }, Array.Empty<string>()).Add.OrderBy(a => a));
+            Assert.True(Continuous(new[] { c.Take(2) }, Array.Empty<string>()).Empty);
+            var topUp = Continuous(new[] { c.Take(4) }, new[] { c[0], c[9] });
+            Assert.Equal(new[] { c[1], c[2], c[3] }.OrderBy(a => a), topUp.Add.OrderBy(a => a));
+            Assert.Empty(topUp.Remove);
+            Assert.True(Continuous(null, abc).Empty);
+            Assert.True(Continuous(Array.Empty<IEnumerable<string>>(), abc).Empty);
+        }
+
+        /// <summary>
+        /// For any committees and any list: additions were in the committee for the whole day and are not on the list,
+        /// removals were out of it for the whole day; the list stays 3 to 10 (removals alone never take it under 3), the
+        /// casters kept outnumber those added, and the share of the list in the committee never falls. The order the
+        /// addresses come in changes nothing.
+        /// </summary>
+        [Fact]
+        public void FromTheCatchUpHeight_EveryChange_KeepsTheListAbleToSign()
+        {
+            var pool = Addresses(12, 'c').ToList();
+            var rng = new Random(506);
+            List<string> Pick(int n) => pool.OrderBy(_ => rng.Next()).Take(n).ToList();
+            for (var i = 0; i < 3_000; i++)
+            {
+                var window = Enumerable.Range(0, rng.Next(1, 7)).Select(_ => Pick(rng.Next(3, 6))).ToList();
+                var contract = Pick(rng.Next(0, 11));
+                var plan = Continuous(window, contract);
+                var why = $"case {i}: window [{string.Join(" | ", window.Select(w => string.Join(",", w)))}] contract [{string.Join(",", contract)}]";
+
+                Assert.True(plan.Add.All(a => window.All(w => w.Contains(a)) && !contract.Contains(a)), why);
+                Assert.True(plan.Remove.All(r => contract.Contains(r) && window.All(w => !w.Contains(r))), why);
+                Assert.Equal(plan.Add.Count, plan.Add.Distinct().Count());
+                Assert.Equal(plan.Remove.Count, plan.Remove.Distinct().Count());
+                var kept = contract.Count - plan.Remove.Count;
+                if (contract.Count < BaseSignerSetPolicy.MinCasters)
+                    Assert.True(plan.Remove.Count == 0 && (plan.Empty || kept + plan.Add.Count >= BaseSignerSetPolicy.MinCasters), why);
+                else
+                {
+                    Assert.True(kept >= BaseSignerSetPolicy.MinCasters, why);
+                    Assert.True(kept > plan.Add.Count, why);
+                    var inCommittee = contract.Count(window[^1].Contains);
+                    Assert.True((long)(inCommittee + plan.Add.Count) * contract.Count >= (long)inCommittee * (kept + plan.Add.Count), why);
+                }
+                Assert.True(kept + plan.Add.Count <= BaseSignerSetPolicy.MaxCasters, why);
+
+                var shuffled = Continuous(window.AsEnumerable().Reverse().Select(w => w.OrderBy(_ => rng.Next()).ToList()).ToList(), contract.OrderBy(_ => rng.Next()).ToList());
+                Assert.Equal(plan.Add, shuffled.Add);
+                Assert.Equal(plan.Remove, shuffled.Remove);
+            }
+        }
+
+        /// <summary>
+        /// The rule from the height, through the validator API and the loop as they run. The committee grew from A,B,C to
+        /// A..E a day and some ago; the contract still lists A,B,C. One updateCasters seats D and E, each by its own
+        /// signature, on 2/3 of the validators and a majority of the casters; a node on the old rule refuses that change,
+        /// and after part of it went through nothing more is sent in the epoch.
+        /// </summary>
+        [Fact]
+        public async Task FromTheCatchUpHeight_TheCommitteesNewcomers_AreSeatedTogether_OnceAnEpoch()
+        {
+            const long boundary = 4 * BaseSignerSetPolicy.EpochBlocks;
+            var c = Enumerable.Range(0, 5).Select(_ => NewKey()).ToArray();
+            foreach (var k in c)
+                AccountData.GetAccounts().InsertSafe(new Account { Address = k.Address, PublicKey = k.Pub, PrivateKey = "0" + k.Key.secret.ToString("x") });
+            CasterMembershipRecord Record(long seq, long from, params int[] members) => new()
+            {
+                RecordSeq = seq, EffectiveFromHeight = from,
+                Casters = members.Select(i => new CasterInfo { Address = c[i].Address, PeerIP = $"10.0.5.{i + 1}", PublicKey = c[i].Pub }).ToList(),
+            };
+            var records = new[] { Record(1, 0, 0, 1, 2), Record(2, boundary - BaseSignerSetPolicy.CasterStableBlocks - 10, 0, 1, 2, 3, 4) };
+            foreach (var r in records) DbContext.DB_Config!.GetCollection<CasterMembershipRecord>("rsrv_caster_membership").Upsert(r.RecordSeq, r);
+            VerifiedXCore.Services.CasterMembershipStore.InvalidateCache();
+            BlockchainData.GetBlocks().InsertSafe(new Block { Height = boundary, Hash = $"b{boundary}-{Guid.NewGuid():N}", Transactions = new List<Transaction>() });
+
+            var validators = new[] { _me, _seed2, _seed3 };
+            BlockchainData.GetBlocks().InsertSafe(new Block
+            {
+                Height = boundary - 100, Hash = $"r{boundary}-{Guid.NewGuid():N}",
+                Transactions = validators.Select((v, i) => new Transaction
+                {
+                    TransactionType = TransactionType.VBTC_V2_VALIDATOR_REGISTER, FromAddress = v.Address, ToAddress = v.Address, Hash = $"rc{i}",
+                    Data = JsonConvert.SerializeObject(new { ValidatorAddress = v.Address, IPAddress = $"10.0.0.{i + 1}", FrostPublicKey = v.Pub, IsS3C = false }),
+                }).ToList(),
+            });
+            var at = validators.Select((v, i) => (v, ip: $"10.0.0.{i + 1}")).Concat(c.Select((k, i) => (v: k, ip: $"10.0.5.{i + 1}"))).ToDictionary(x => x.ip, x => x.v);
+            var priorFactory = Globals.HttpClientFactory;
+            var priorGate = Globals.BaseCasterCatchUpHeight;
+            Globals.HttpClientFactory = new ValidatorNetwork(at);
+            var sent = new List<(string Function, object[] Args)>();
+            BaseValidatorSyncService.SubmitForTests = (f, a) => { sent.Add((f, a)); return Task.FromResult<string?>("0xtx"); };
+            Globals.LastBlock = new Block { Height = boundary + BaseSignerSetPolicy.SettleBlocks + 8 * BaseValidatorSyncService.SubmitTurnBlocks, Timestamp = TimeUtil.GetTime() };
+            try
+            {
+                Contract(9, validators, c.Take(3).ToArray());
+                var seed = VrfSeed.SeedMaterialAt(boundary)!;
+                var newcomers = new[] { c[3].Base, c[4].Base }.OrderBy(a => BaseSignerSetPolicy.RankOf(seed, a), StringComparer.Ordinal).ToArray();
+                var digest = VbtcbTypedData.UpdateCastersDigest(newcomers, Array.Empty<string>(), boundary, 9, 8453, Proxy);
+
+                // A node on the old rule (in at three boundaries, one a day) sees nobody to seat yet, and refuses.
+                Globals.BaseCasterCatchUpHeight = long.MaxValue;
+                Assert.Contains("Not the caster change", Refusal(await AskCasters(newcomers, Array.Empty<string>(), boundary, 9)));
+                Globals.BaseCasterCatchUpHeight = boundary;
+                Globals.ValidatorAddress = c[0].Address;
+                SignedBy(c[0], await AskCasters(newcomers, Array.Empty<string>(), boundary, 9), digest);
+
+                Globals.ValidatorAddress = _me.Address;
+                await BaseValidatorSyncService.SyncOnceAsync();
+                var (fn, args) = Assert.Single(sent);
+                Assert.Equal("updateCasters", fn);
+                Assert.Equal(newcomers, (List<string>)args[0]);
+                Assert.Empty((List<string>)args[1]);
+                var signers = ((List<byte[]>)args[3]).Select(b => ValidatorEthKeyService.RecoverSigner(digest, "0x" + Convert.ToHexString(b), personalMessage: false)!.ToLowerInvariant()).ToList();
+                Assert.True(signers.Count(s => validators.Any(v => v.Base == s)) >= 2);
+                Assert.True(signers.Count(s => c.Take(3).Any(k => k.Base == s)) >= 2);
+                Assert.Equal(newcomers, ((List<byte[]>)args[4]).Select(b => ValidatorEthKeyService.RecoverSigner(digest, "0x" + Convert.ToHexString(b), personalMessage: false)!.ToLowerInvariant()));
+
+                // Only the first newcomer landed: the second waits for the next boundary, from this node's loop and route alike.
+                sent.Clear();
+                Contract(10, validators, c.Take(3).Append(c.Single(k => k.Base == newcomers[0])).ToArray());
+                await BaseValidatorSyncService.SyncOnceAsync();
+                Assert.DoesNotContain(sent, s => s.Function == "updateCasters");
+                Assert.Contains("already signed a caster change", Refusal(await AskCasters(new[] { newcomers[1] }, Array.Empty<string>(), boundary, 10)));
+            }
+            finally
+            {
+                foreach (var r in records) DbContext.DB_Config!.GetCollection<CasterMembershipRecord>("rsrv_caster_membership").Delete(r.RecordSeq);
+                VerifiedXCore.Services.CasterMembershipStore.InvalidateCache();
+                BaseValidatorSyncService.SubmitForTests = null;
+                Globals.HttpClientFactory = priorFactory;
+                Globals.BaseCasterCatchUpHeight = priorGate;
+            }
+        }
+
+        /// <summary>
+        /// The day a caster must be in, or out, is every record that governed it: from the one in force at its first block
+        /// to the one at the boundary. A record of it missing from this node changes nothing.
+        /// </summary>
+        [Fact]
+        public void TheCatchUpWindow_IsEveryRecordOfTheDay_AndAMissingOneChangesNothing()
+        {
+            const long boundary = 5 * BaseSignerSetPolicy.EpochBlocks;
+            var c = Enumerable.Range(0, 5).Select(_ => NewKey()).ToArray();
+            CasterMembershipRecord Record(long seq, long from, params int[] members) => new()
+            {
+                RecordSeq = seq, EffectiveFromHeight = from,
+                Casters = members.Select(i => new CasterInfo { Address = c[i].Address, PeerIP = $"10.0.6.{i + 1}", PublicKey = c[i].Pub }).ToList(),
+            };
+            var col = DbContext.DB_Config!.GetCollection<CasterMembershipRecord>("rsrv_caster_membership");
+            var records = new[]
+            {
+                Record(1, 0, 0, 1, 2, 3),                                                          // before the day: c[3] in
+                Record(2, boundary - BaseSignerSetPolicy.CasterStableBlocks + 50, 0, 1, 2, 3, 4),   // c[4] joins during the day
+                Record(3, boundary - 100, 0, 1, 2, 4),                                             // c[3] leaves during the day
+            };
+            foreach (var r in records) col.Upsert(r.RecordSeq, r);
+            VerifiedXCore.Services.CasterMembershipStore.InvalidateCache();
+            BlockchainData.GetBlocks().InsertSafe(new Block { Height = boundary, Hash = $"w{boundary}-{Guid.NewGuid():N}", Transactions = new List<Transaction>() });
+            var priorGate = Globals.BaseCasterCatchUpHeight;
+            try
+            {
+                var window = BaseSignerSetPolicy.CasterWindow(boundary)!;
+                Assert.Equal(3, window.Count);
+                Assert.Equal(new[] { c[0], c[1], c[2], c[4] }.Select(k => k.Base), window[2].Select(a => a.ToLowerInvariant()));
+
+                // c[4] was not in the whole day and c[3] not out of it: nothing changes on a contract listing c[0..3].
+                var listed = c.Take(4).Select(k => k.Base).ToList();
+                Globals.BaseCasterCatchUpHeight = boundary;
+                Assert.True(BaseSignerSetPolicy.CastersForEpoch(boundary, listed)!.Empty);
+                // The next record of the day missing from this node: no window, and no change.
+                col.Delete(2L);
+                VerifiedXCore.Services.CasterMembershipStore.InvalidateCache();
+                Assert.Null(BaseSignerSetPolicy.CasterWindow(boundary));
+                Assert.True(BaseSignerSetPolicy.CastersForEpoch(boundary, listed)!.Empty);
+            }
+            finally
+            {
+                foreach (var r in records) col.Delete(r.RecordSeq);
+                VerifiedXCore.Services.CasterMembershipStore.InvalidateCache();
+                Globals.BaseCasterCatchUpHeight = priorGate;
+            }
+        }
+
         /// <summary>
         /// Fewer than a third of the validators leave in one epoch through the loop as it runs, not only in one batch: once
         /// a removal went through, the loop computes the next batch against the smaller set but nobody signs it until the

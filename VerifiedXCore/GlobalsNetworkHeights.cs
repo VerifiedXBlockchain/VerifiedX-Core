@@ -104,6 +104,7 @@ namespace VerifiedXCore
             Globals.BitcoinAttestationHeight = Globals.IsTestNet ? Globals.BitcoinAttestationTestnetHeight : Globals.BitcoinAttestationHeight;
             Globals.VreeActivationHeight = Globals.IsTestNet ? Globals.VreeActivationTestnetHeight : Globals.VreeActivationHeight;
             Globals.BaseBridgeV4Height = Globals.IsTestNet ? Globals.BaseBridgeV4TestnetHeight : Globals.BaseBridgeV4Height;
+            Globals.BaseCasterCatchUpHeight = Globals.IsTestNet ? BaseCasterCatchUpTestnetHeight : Globals.BaseCasterCatchUpHeight;
             if (Globals.IsTestNet) Globals.ShieldedSupplyCorrections.Clear(); // the testnet pool was never forged against
             if (Globals.IsCustomTestNet) ApplyCustomTestNetHeights();
         }
@@ -133,6 +134,18 @@ namespace VerifiedXCore
         /// upgrade every Marigold node first.
         /// </summary>
         public const long CustomTestNetLateRulesHeight = 30_000;
+
+        /// <summary>
+        /// <see cref="BaseCasterCatchUpHeight"/> on the live testnet: unset until the release that carries it, then the first
+        /// epoch boundary (a multiple of 7,200) a couple of days past the tip, so the contract's signers upgrade first.
+        /// </summary>
+        public const long BaseCasterCatchUpTestnetHeight = long.MaxValue;
+
+        /// <summary>
+        /// <see cref="BaseCasterCatchUpHeight"/> on a custom testnet: an epoch boundary (6 x 7,200) ahead of Marigold's tip when
+        /// it was set, so every signer runs the rule before the first boundary it governs.
+        /// </summary>
+        public const long CustomTestNetBaseCasterCatchUpHeight = 43_200;
 
         /// <summary>
         /// The custom testnet's heights, over the testnet ones. Config.ProcessConfig selects a custom testnet after
@@ -199,6 +212,7 @@ namespace VerifiedXCore
             Globals.BridgeVotesBoundToAttemptHeight = CustomTestNetLateRulesHeight;
             Globals.BridgeAllocationsSignableHeight = CustomTestNetLateRulesHeight;
             Globals.BridgeLockPartMinimumHeight = CustomTestNetLateRulesHeight;
+            Globals.BaseCasterCatchUpHeight = CustomTestNetBaseCasterCatchUpHeight;
         }
     }
 }

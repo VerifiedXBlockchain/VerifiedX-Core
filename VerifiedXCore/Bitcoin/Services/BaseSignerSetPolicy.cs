@@ -89,13 +89,14 @@ namespace VerifiedXCore.Bitcoin.Services
         /// <summary>vBTCb.sol MIN_CASTERS and MAX_CASTERS.</summary>
         public const int MinCasters = 3, MaxCasters = 10;
 
-        /// <summary>The epoch's change to the contract's casters: at most one out and one in, sent as one updateCasters.</summary>
+        /// <summary>The epoch's change to the contract's casters, sent as one updateCasters.</summary>
         public sealed record CasterPlan(long EpochHeight, IReadOnlyList<string> Add, IReadOnlyList<string> Remove)
         {
             public bool Empty => Add.Count == 0 && Remove.Count == 0;
         }
 
         /// <summary>
+        /// The rule for boundaries before <see cref="Globals.BaseCasterCatchUpHeight"/> (from it, <see cref="ComputeCastersContinuous"/>).
         /// The contract's casters follow the VFX caster committee, slowly: a caster joins once it was in the committee at
         /// this boundary and the two before (two days), and leaves once it was out at all three, one of each per epoch.
         /// Taking a committee seat for hours (by knocking a caster offline, say) moves nothing on Base, and the team has
@@ -132,13 +133,99 @@ namespace VerifiedXCore.Bitcoin.Services
             return record?.Casters.Select(c => BaseAddressOf(c.PublicKey)).Where(a => a.Length > 0).ToList();
         }
 
-        /// <summary>The casters' change at <paramref name="epochHeight"/> from this node's caster records (see <see cref="ComputeCasters"/>).</summary>
+        /// <summary>
+        /// The casters' change at <paramref name="epochHeight"/> from this node's caster records: before
+        /// <see cref="Globals.BaseCasterCatchUpHeight"/> by <see cref="ComputeCasters"/>, from it by
+        /// <see cref="ComputeCastersContinuous"/>. The boundary decides which, so every signer judging one epoch uses one rule.
+        /// </summary>
         public static CasterPlan? CastersForEpoch(long epochHeight, IEnumerable<string> contractCasters)
         {
             var seed = VerifiedXCore.Utilities.VrfSeed.SeedMaterialAt(epochHeight);
             if (seed == null) return null;
+            if (epochHeight >= Globals.BaseCasterCatchUpHeight)
+                return ComputeCastersContinuous(epochHeight, seed, CasterWindow(epochHeight), contractCasters);
             return ComputeCasters(epochHeight, seed, CommitteeAt(epochHeight), CommitteeAt(epochHeight - EpochBlocks),
                 CommitteeAt(epochHeight - 2 * EpochBlocks), contractCasters);
+        }
+
+        /// <summary>
+        /// Blocks a caster must stay in the committee without a break before it joins the contract, and stay out of it
+        /// before it leaves (<see cref="ComputeCastersContinuous"/>): one epoch.
+        /// </summary>
+        public const int CasterStableBlocks = (int)EpochBlocks;
+
+        /// <summary>The most caster records one window is read from; a day with more is churn, and changes nothing on Base.</summary>
+        public const int MaxWindowRecords = 1_024;
+
+        /// <summary>
+        /// From <see cref="Globals.BaseCasterCatchUpHeight"/>: the contract's casters follow the committee within about a day,
+        /// in one updateCasters an epoch.
+        /// <list type="bullet">
+        /// <item>A caster joins once it was in every committee of <paramref name="window"/> (the records governing the
+        /// <see cref="CasterStableBlocks"/> up to the boundary), and leaves once it was in none of them. A caster that drops
+        /// out for minutes neither joins nor leaves.</item>
+        /// <item>All of it goes in one change, within three bounds: the removals alone never leave fewer than 3; the list
+        /// stays at most 10; the casters kept outnumber those added, so one epoch never hands the contract's caster
+        /// majority to casters that just joined. Additions take the room first, then removals; each in the order of
+        /// keccak256(seed, address).</item>
+        /// <item>Additions are always in the committee and removals never, so the share of the list that sits in the
+        /// committee never falls. Any in-order part of the additions is still a valid change.</item>
+        /// <item>A contract with fewer than 3 casters (upgraded from V3) gets additions only, at least enough to reach 3.</item>
+        /// </list>
+        /// Null <paramref name="window"/> (records missing for the window) changes nothing.
+        /// </summary>
+        public static CasterPlan ComputeCastersContinuous(long epochHeight, string seed, IEnumerable<IEnumerable<string>>? window, IEnumerable<string> contractCasters)
+        {
+            static string Norm(string a) => a.Trim().ToLowerInvariant();
+            var none = new CasterPlan(epochHeight, Array.Empty<string>(), Array.Empty<string>());
+            var samples = window?.Select(s => s.Where(IsAddress).Select(Norm).ToHashSet()).ToList();
+            if (samples == null || samples.Count == 0) return none;
+            var contract = contractCasters.Where(IsAddress).Select(Norm).Distinct().ToList();
+            var onContract = contract.ToHashSet();
+            string Rank(string a) => RankOf(seed, a);
+
+            var inAny = samples.SelectMany(s => s).ToHashSet();
+            var newcomers = samples[0].Where(c => !onContract.Contains(c) && samples.All(s => s.Contains(c)))
+                .OrderBy(Rank, StringComparer.Ordinal).ToList();
+            if (contract.Count < MinCasters)
+            {
+                var take = Math.Min(newcomers.Count, MaxCasters - contract.Count);
+                return contract.Count + take >= MinCasters ? new CasterPlan(epochHeight, newcomers.Take(take).ToList(), Array.Empty<string>()) : none;
+            }
+
+            var departed = contract.Where(c => !inAny.Contains(c)).OrderBy(Rank, StringComparer.Ordinal).ToList();
+            for (var a = Math.Min(newcomers.Count, MaxCasters); a >= 0; a--)
+            {
+                var most = Math.Min(departed.Count, contract.Count - Math.Max(MinCasters, a + 1));
+                var least = Math.Max(0, contract.Count + a - MaxCasters);
+                if (most >= least) return new CasterPlan(epochHeight, newcomers.Take(a).ToList(), departed.Take(most).ToList());
+            }
+            return none;
+        }
+
+        /// <summary>
+        /// The Base addresses of every committee that governed a height in [<paramref name="epochHeight"/> -
+        /// <see cref="CasterStableBlocks"/>, <paramref name="epochHeight"/>], in record order (effective heights advance with
+        /// the seq, so each record from the one governing the window's first block to the one governing the boundary governs
+        /// part of it). Null when a record of the window is missing from this node (the record era starts inside it, or
+        /// the store was reset) or the window holds more than <see cref="MaxWindowRecords"/>.
+        /// </summary>
+        public static List<List<string>>? CasterWindow(long epochHeight)
+        {
+            var from = epochHeight - CasterStableBlocks;
+            if (from < 0) return null;
+            var first = VerifiedXCore.Services.CasterMembershipStore.GetForHeight(from);
+            var last = VerifiedXCore.Services.CasterMembershipStore.GetForHeight(epochHeight);
+            if (first == null || last == null || last.RecordSeq < first.RecordSeq || last.RecordSeq - first.RecordSeq >= MaxWindowRecords) return null;
+
+            var committees = new List<List<string>>();
+            for (var seq = first.RecordSeq; seq <= last.RecordSeq; seq++)
+            {
+                var record = seq == first.RecordSeq ? first : seq == last.RecordSeq ? last : VerifiedXCore.Services.CasterMembershipStore.GetBySeq(seq);
+                if (record == null) return null;
+                committees.Add(record.Casters.Select(c => BaseAddressOf(c.PublicKey)).Where(a => a.Length > 0).ToList());
+            }
+            return committees;
         }
 
         // ── A proposed removal ──────────────────────────────────────────────────────────────────────────────
