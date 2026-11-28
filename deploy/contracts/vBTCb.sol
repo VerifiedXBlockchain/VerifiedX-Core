@@ -42,15 +42,31 @@ import "@openzeppelin/contracts/utils/cryptography/MessageHashUtils.sol";
  *   has no casters until updateCasters adds them; until then the caster part is not required.
  * - proposeRemoval also clears casters: with a majority of the validators and of the casters, or with 2/3 of the
  *   validators alone when the casters went dark. Either group's blocking minority cancels whatever is pending.
+ *
+ * V5 Changes (same EIP-712 domain and MESSAGE_VERSION; message types are only added):
+ * - Every function that changes state runs only through the proxy, and no approval is met while the contract holds
+ *   fewer than 3 validators, so the implementation contract itself accepts nothing.
+ * - With fewer than 3 casters (a V3 proxy upgraded in place) nothing passes except updateCasters adding casters, on 2/3
+ *   of the validators and each new caster's own signature, until there are 3. The validators alone never mint.
+ * - requiredRemoveSignatures() is computed from the validator count; its V3 storage slot is retired.
+ * - Each seat records the admin nonce it was given at. A pending removal leaves out a validator or caster seated after
+ *   it was proposed, so a member removed and admitted again is not removed by the older proposal.
+ * - cancelPendingKinds drops only the kinds it names (upgrade, delay change, removal), so vetoing a removal leaves a
+ *   pending upgrade alone. cancelPending still drops all three.
+ * - burnForVfxExit takes only a VFX address of this network. burnForBTCExit takes at least MIN_BTC_EXIT_SATS, the
+ *   smallest part a VFX vault pays in an exit to Bitcoin. burnForBTCExitWithMinPayout also names the least the holder
+ *   accepts after Bitcoin fees.
+ * - refundBurn mints back, once per burn, a burn that VFX recorded it cannot pay, with the mint approval.
  */
 contract vBTCb is ERC20Upgradeable, UUPSUpgradeable {
     mapping(address => bool) public isValidator;
     address[] public validators;
     uint256 public validatorCount;
     uint256 public requiredMintSignatures;
-    uint256 public requiredRemoveSignatures;
+    /// @dev V3's stored removal threshold; requiredRemoveSignatures() is computed since V5. Slot kept, never read.
+    /// @custom:oz-renamed-from requiredRemoveSignatures
+    uint256 private _retiredRemoveThreshold;
 
-    uint256 public constant MIN_VALIDATORS_FOR_HIGH_THRESHOLD = 5;
     uint256 public constant MIN_REQUIRED_SIGNATURES = 2;
     uint256 public constant MIN_VALIDATORS = 3;
     uint256 public constant MAX_VALIDATORS = 50;
@@ -61,28 +77,39 @@ contract vBTCb is ERC20Upgradeable, UUPSUpgradeable {
     /// @notice A proposal that is not executed within this long after it became executable lapses.
     uint256 public constant PROPOSAL_GRACE_PERIOD = 14 days;
     uint256 public constant MESSAGE_VERSION = 4;
+    /// @notice The smallest burnForBTCExit: the smallest part a VFX vault pays in an exit to Bitcoin (VFX's
+    ///         BtcWithdrawals.MinExitPartSats). VFX refuses any smaller exit, so a smaller burn could never be paid.
+    uint256 public constant MIN_BTC_EXIT_SATS = 25_186;
+    /// @notice Kinds for cancelPendingKinds, combined as bits.
+    uint256 public constant PENDING_UPGRADE = 1;
+    uint256 public constant PENDING_UPGRADE_DELAY = 2;
+    uint256 public constant PENDING_REMOVAL = 4;
 
     bytes32 private constant DOMAIN_TYPEHASH =
         keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)");
     bytes32 private constant DOMAIN_NAME_HASH = keccak256("vBTCb");
     bytes32 private constant DOMAIN_VERSION_HASH = keccak256("4");
 
-    bytes32 public constant MINT_TYPEHASH =
+    bytes32 private constant MINT_TYPEHASH =
         keccak256("Mint(address to,uint256 amount,string lockId,uint256 nonce)");
-    bytes32 public constant ADD_VALIDATORS_TYPEHASH =
+    bytes32 private constant ADD_VALIDATORS_TYPEHASH =
         keccak256("AddValidators(address[] validators,uint256 vfxBlockHeight,uint256 adminNonce)");
-    bytes32 public constant REMOVE_VALIDATORS_TYPEHASH =
+    bytes32 private constant REMOVE_VALIDATORS_TYPEHASH =
         keccak256("RemoveValidators(address[] validators,uint256 vfxBlockHeight,uint256 adminNonce)");
-    bytes32 public constant PROPOSE_UPGRADE_TYPEHASH =
+    bytes32 private constant PROPOSE_UPGRADE_TYPEHASH =
         keccak256("ProposeUpgrade(address implementation,uint256 adminNonce)");
-    bytes32 public constant PROPOSE_UPGRADE_DELAY_TYPEHASH =
+    bytes32 private constant PROPOSE_UPGRADE_DELAY_TYPEHASH =
         keccak256("ProposeUpgradeDelay(uint256 delay,uint256 adminNonce)");
-    bytes32 public constant PROPOSE_REMOVAL_TYPEHASH =
+    bytes32 private constant PROPOSE_REMOVAL_TYPEHASH =
         keccak256("ProposeRemoval(address[] validators,address[] casters,uint256 vfxBlockHeight,uint256 adminNonce)");
-    bytes32 public constant UPDATE_CASTERS_TYPEHASH =
+    bytes32 private constant UPDATE_CASTERS_TYPEHASH =
         keccak256("UpdateCasters(address[] add,address[] remove,uint256 vfxBlockHeight,uint256 adminNonce)");
-    bytes32 public constant CANCEL_PENDING_TYPEHASH =
+    bytes32 private constant CANCEL_PENDING_TYPEHASH =
         keccak256("CancelPending(uint256 adminNonce)");
+    bytes32 private constant CANCEL_PENDING_KINDS_TYPEHASH =
+        keccak256("CancelPendingKinds(uint256 kinds,uint256 adminNonce)");
+    bytes32 private constant REFUND_TYPEHASH =
+        keccak256("Refund(address to,uint256 amount,bytes32 burnId)");
 
     mapping(bytes32 => bool) public usedLockIds;
     uint256 public adminNonce;
@@ -99,6 +126,9 @@ contract vBTCb is ERC20Upgradeable, UUPSUpgradeable {
     event RemovalProposed(address[] validators, address[] casters, uint256 vfxBlockHeight, uint256 eta, uint256 adminNonce);
     event CastersUpdated(address[] added, address[] removed, uint256 vfxBlockHeight);
     event PendingCancelled(address implementation, uint256 upgradeDelay, uint256 removals, uint256 adminNonce);
+    /// @notice Emitted after BTCExitBurned by burnForBTCExitWithMinPayout: the least the holder accepts after Bitcoin fees.
+    event BTCExitMinPayout(address indexed burner, uint256 minPayoutSats);
+    event BurnRefunded(address indexed to, uint256 amount, bytes32 indexed burnId);
 
     bool private _upgradeAuthorized;
 
@@ -114,6 +144,16 @@ contract vBTCb is ERC20Upgradeable, UUPSUpgradeable {
     mapping(address => bool) public isCaster;
     address[] private _casters;
     address[] private _pendingCasterRemovals;
+
+    // V5 storage: appended after V4's and taken out of __gap.
+    /// @notice adminNonce + 1 at the validator's latest admission (0: seated before V5 or at initialize).
+    mapping(address => uint256) public validatorSince;
+    /// @notice adminNonce + 1 at the caster's latest admission (0: seated before V5 or at initialize).
+    mapping(address => uint256) public casterSince;
+    /// @notice The adminNonce the pending removal was proposed at; a seat given after it is left out of that removal.
+    uint256 public pendingRemovalNonce;
+    /// @notice Burns already refunded, by the burn's id (its Base transaction hash).
+    mapping(bytes32 => bool) public refundedBurns;
 
     /// @custom:oz-upgrades-unsafe-allow constructor
     constructor() {
@@ -160,7 +200,7 @@ contract vBTCb is ERC20Upgradeable, UUPSUpgradeable {
         string calldata lockId,
         uint256 nonce,
         bytes[] calldata signatures
-    ) external {
+    ) external onlyProxy {
         require(to != address(0), "Invalid recipient");
         require(amount > 0, "Amount must be > 0");
 
@@ -186,7 +226,7 @@ contract vBTCb is ERC20Upgradeable, UUPSUpgradeable {
      * @param amount Amount of vBTC.b to burn (8 decimals, in sats)
      * @param vfxDestinationAddress The VFX address to receive the unlocked vBTC
      */
-    function burnForVfxExit(uint256 amount, string calldata vfxDestinationAddress) external {
+    function burnForVfxExit(uint256 amount, string calldata vfxDestinationAddress) external onlyProxy {
         require(amount > 0, "Amount must be > 0");
         require(bytes(vfxDestinationAddress).length > 0, "VFX destination required");
         require(_isVfxAddress(vfxDestinationAddress), "Not a VFX address");
@@ -196,15 +236,49 @@ contract vBTCb is ERC20Upgradeable, UUPSUpgradeable {
 
     /**
      * @notice Burn vBTC.b tokens to exit directly to a BTC address.
-     * @dev The VFX network FROST-signs a BTC transaction to the specified destination.
-     * @param amount Amount of vBTC.b to burn (8 decimals, in sats)
+     * @dev The VFX network FROST-signs a BTC transaction to the specified destination. Bitcoin fees come out of the
+     *      amount, so the payout is less than it.
+     * @param amount Amount of vBTC.b to burn (8 decimals, in sats), at least MIN_BTC_EXIT_SATS
      * @param btcDestination The Bitcoin address to send BTC to
      */
-    function burnForBTCExit(uint256 amount, string calldata btcDestination) external {
-        require(amount > 0, "Amount must be > 0");
+    function burnForBTCExit(uint256 amount, string calldata btcDestination) external onlyProxy {
+        _burnForBTCExit(amount, btcDestination);
+    }
+
+    /**
+     * @notice burnForBTCExit with the least the holder accepts: VFX pays no Bitcoin transaction that would send less to
+     *         btcDestination, and an exit it cannot pay at or above it is refunded instead (refundBurn).
+     * @param minPayoutSats at most amount
+     */
+    function burnForBTCExitWithMinPayout(uint256 amount, string calldata btcDestination, uint256 minPayoutSats) external onlyProxy {
+        require(minPayoutSats <= amount, "Minimum payout above the amount");
+        _burnForBTCExit(amount, btcDestination);
+        emit BTCExitMinPayout(msg.sender, minPayoutSats);
+    }
+
+    function _burnForBTCExit(uint256 amount, string calldata btcDestination) internal {
+        require(amount >= MIN_BTC_EXIT_SATS, "Amount below the smallest exit");
         require(bytes(btcDestination).length >= 26, "Invalid BTC address");
         _burn(msg.sender, amount);
         emit BTCExitBurned(msg.sender, amount, btcDestination, block.chainid);
+    }
+
+    /**
+     * @notice Mints back a burn VFX recorded it cannot pay (an exit below what it can pay, or one that ran out of ways to
+     *         be paid), once per burn, with the mint approval: 2/3 of the validators and a majority of the casters.
+     * @param burnId the burn's Base transaction hash, as VFX keys the exit
+     */
+    function refundBurn(address to, uint256 amount, bytes32 burnId, bytes[] calldata signatures) external onlyProxy {
+        require(to != address(0), "Invalid recipient");
+        require(amount > 0, "Amount must be > 0");
+        require(!refundedBurns[burnId], "Burn already refunded");
+
+        bytes32 digest = _hashTypedData(keccak256(abi.encode(REFUND_TYPEHASH, to, amount, burnId)));
+        _requireApproval(digest, signatures, "Insufficient valid signatures");
+
+        refundedBurns[burnId] = true;
+        _mint(to, amount);
+        emit BurnRefunded(to, amount, burnId);
     }
 
     /**
@@ -217,7 +291,7 @@ contract vBTCb is ERC20Upgradeable, UUPSUpgradeable {
         uint256 vfxBlockHeight,
         bytes[] calldata signatures,
         bytes[] calldata newValidatorSignatures
-    ) external {
+    ) external onlyProxy {
         require(newValidators.length > 0, "Empty batch");
         require(validatorCount + newValidators.length <= MAX_VALIDATORS, "Too many validators");
         require(newValidatorSignatures.length == newValidators.length, "One signature per new validator");
@@ -233,6 +307,7 @@ contract vBTCb is ERC20Upgradeable, UUPSUpgradeable {
             require(error == ECDSA.RecoverError.NoError && own == newValidators[i], "New validator did not sign");
 
             isValidator[newValidators[i]] = true;
+            validatorSince[newValidators[i]] = adminNonce + 1;
             validators.push(newValidators[i]);
         }
 
@@ -243,7 +318,7 @@ contract vBTCb is ERC20Upgradeable, UUPSUpgradeable {
         emit ValidatorBatchAdded(newValidators, vfxBlockHeight);
     }
 
-    function removeValidatorBatch(address[] calldata oldValidators, uint256 vfxBlockHeight, bytes[] calldata signatures) external {
+    function removeValidatorBatch(address[] calldata oldValidators, uint256 vfxBlockHeight, bytes[] calldata signatures) external onlyProxy {
         require(oldValidators.length > 0, "Empty batch");
         require(oldValidators.length <= validatorCount && validatorCount - oldValidators.length >= MIN_VALIDATORS,
             "Cannot remove below minimum");
@@ -268,13 +343,14 @@ contract vBTCb is ERC20Upgradeable, UUPSUpgradeable {
         address[] calldata oldCasters,
         uint256 vfxBlockHeight,
         bytes[] calldata signatures
-    ) external {
+    ) external onlyProxy {
         require(oldValidators.length + oldCasters.length > 0, "Empty batch");
         require(oldValidators.length <= validatorCount && validatorCount - oldValidators.length >= MIN_VALIDATORS,
             "Cannot remove below minimum");
         require(oldCasters.length == 0 || (oldCasters.length <= _casters.length && _casters.length - oldCasters.length >= MIN_CASTERS),
             "Cannot remove casters below minimum");
         require(pendingRemovalEta == 0 || _lapsed(pendingRemovalEta), "Removal already pending");
+        require(_casters.length >= MIN_CASTERS, "Casters not set up");
 
         bytes32 digest = _hashTypedData(keccak256(abi.encode(
             PROPOSE_REMOVAL_TYPEHASH, keccak256(abi.encodePacked(oldValidators)), keccak256(abi.encodePacked(oldCasters)),
@@ -296,42 +372,30 @@ contract vBTCb is ERC20Upgradeable, UUPSUpgradeable {
         _pendingCasterRemovals = oldCasters;
         pendingRemovalHeight = vfxBlockHeight;
         pendingRemovalEta = block.timestamp + upgradeDelay();
+        pendingRemovalNonce = adminNonce;
 
         emit RemovalProposed(oldValidators, oldCasters, vfxBlockHeight, pendingRemovalEta, adminNonce);
         adminNonce++;
     }
 
-    /// @notice Anyone may carry out a proposed removal once its delay has passed.
-    function executeRemoval() external {
+    /// @notice Anyone may carry out a proposed removal once its delay has passed. A member seated again after the
+    ///         proposal is left out of it.
+    function executeRemoval() external onlyProxy {
         require(pendingRemovalEta != 0, "No removal pending");
         require(block.timestamp >= pendingRemovalEta, "Upgrade delay not elapsed");
         require(!_lapsed(pendingRemovalEta), "Proposal lapsed");
 
-        // Skip any already removed since the proposal (by the 2/3 path).
-        uint256 n = 0;
-        for (uint256 i = 0; i < _pendingRemovals.length; i++) {
-            if (isValidator[_pendingRemovals[i]]) n++;
-        }
-        address[] memory list = new address[](n);
-        uint256 k = 0;
-        for (uint256 i = 0; i < _pendingRemovals.length; i++) {
-            if (isValidator[_pendingRemovals[i]]) list[k++] = _pendingRemovals[i];
-        }
-        // Casters likewise, skipping any already gone.
-        uint256 m = 0;
-        for (uint256 i = 0; i < _pendingCasterRemovals.length; i++) {
-            if (isCaster[_pendingCasterRemovals[i]]) m++;
-        }
-        address[] memory casterList = new address[](m);
-        k = 0;
-        for (uint256 i = 0; i < _pendingCasterRemovals.length; i++) {
-            if (isCaster[_pendingCasterRemovals[i]]) casterList[k++] = _pendingCasterRemovals[i];
-        }
+        // Skip any already removed since the proposal (by the 2/3 path), and any seated again after it.
+        address[] memory list = _stillRemovable(_pendingRemovals, false);
+        address[] memory casterList = _stillRemovable(_pendingCasterRemovals, true);
+        uint256 n = list.length;
+        uint256 m = casterList.length;
         uint256 height = pendingRemovalHeight;
         delete _pendingRemovals;
         delete _pendingCasterRemovals;
         pendingRemovalHeight = 0;
         pendingRemovalEta = 0;
+        pendingRemovalNonce = 0;
 
         require(validatorCount - n >= MIN_VALIDATORS, "Cannot remove below minimum");
         require(m == 0 || _casters.length - m >= MIN_CASTERS, "Cannot remove casters below minimum");
@@ -340,6 +404,19 @@ contract vBTCb is ERC20Upgradeable, UUPSUpgradeable {
             for (uint256 i = 0; i < m; i++) _removeCaster(casterList[i]);
             emit CastersUpdated(new address[](0), casterList, height);
         }
+    }
+
+    /// @dev The members of `pending` still seated and not seated again after the pending removal was proposed.
+    function _stillRemovable(address[] storage pending, bool casters) internal view returns (address[] memory kept) {
+        kept = new address[](pending.length);
+        uint256 n = 0;
+        for (uint256 i = 0; i < pending.length; i++) {
+            address a = pending[i];
+            bool seated = casters ? isCaster[a] : isValidator[a];
+            uint256 since = casters ? casterSince[a] : validatorSince[a];
+            if (seated && since <= pendingRemovalNonce) kept[n++] = a;
+        }
+        assembly ("memory-safe") { mstore(kept, n) } // trim to the n kept
     }
 
     function getPendingRemovals() external view returns (address[] memory) {
@@ -352,6 +429,8 @@ contract vBTCb is ERC20Upgradeable, UUPSUpgradeable {
 
     /**
      * @notice Brings the caster list in step with the VFX caster committee: removals, then additions, in one call.
+     *         While the contract has fewer than 3 casters (a V3 proxy upgraded in place) it only adds, on 2/3 of the
+     *         validators, and must reach 3: nothing else is approved until it has.
      * @param newCasterSignatures one per added caster, in the same order: its own signature over the same UpdateCasters
      *        message, so no seat goes to an address whose key nobody holds.
      */
@@ -361,13 +440,20 @@ contract vBTCb is ERC20Upgradeable, UUPSUpgradeable {
         uint256 vfxBlockHeight,
         bytes[] calldata signatures,
         bytes[] calldata newCasterSignatures
-    ) external {
+    ) external onlyProxy {
         require(add.length + remove.length > 0, "Empty batch");
         require(newCasterSignatures.length == add.length, "One signature per new caster");
 
         bytes32 digest = _hashTypedData(keccak256(abi.encode(
             UPDATE_CASTERS_TYPEHASH, keccak256(abi.encodePacked(add)), keccak256(abi.encodePacked(remove)), vfxBlockHeight, adminNonce)));
-        _requireApproval(digest, signatures, "Insufficient valid admin signatures");
+        if (_casters.length < MIN_CASTERS) {
+            // The bootstrap: there are no casters to approve, so 2/3 of the validators add them, each signing its own seat.
+            require(remove.length == 0, "Only additions until there are 3 casters");
+            (uint256 v, ) = _countSigners(digest, signatures, requiredMintSignatures, 0);
+            require(v >= requiredMintSignatures, "Insufficient valid admin signatures");
+        } else {
+            _requireApproval(digest, signatures, "Insufficient valid admin signatures");
+        }
 
         for (uint256 i = 0; i < remove.length; i++) {
             require(isCaster[remove[i]], "Not a caster"); // also rejects a repeat within the batch
@@ -379,6 +465,7 @@ contract vBTCb is ERC20Upgradeable, UUPSUpgradeable {
             (address own, ECDSA.RecoverError error, ) = ECDSA.tryRecover(digest, newCasterSignatures[i]);
             require(error == ECDSA.RecoverError.NoError && own == add[i], "New caster did not sign");
             isCaster[add[i]] = true;
+            casterSince[add[i]] = adminNonce + 1;
             _casters.push(add[i]);
         }
         require(_casters.length >= MIN_CASTERS && _casters.length <= MAX_CASTERS, "Caster count out of range");
@@ -424,7 +511,7 @@ contract vBTCb is ERC20Upgradeable, UUPSUpgradeable {
         return _upgradeDelay == 0 ? DEFAULT_UPGRADE_DELAY : _upgradeDelay;
     }
 
-    function proposeUpgrade(address newImplementation, bytes[] calldata signatures) external {
+    function proposeUpgrade(address newImplementation, bytes[] calldata signatures) external onlyProxy {
         require(newImplementation.code.length > 0, "Invalid implementation");
         require(pendingImplementation == address(0) || _lapsed(pendingUpgradeEta), "Upgrade already pending");
 
@@ -439,7 +526,7 @@ contract vBTCb is ERC20Upgradeable, UUPSUpgradeable {
     }
 
     /// @notice Anyone may execute a proposed upgrade once its delay has passed. No call data is passed to it.
-    function executeUpgrade() external {
+    function executeUpgrade() external onlyProxy {
         address impl = pendingImplementation;
         require(impl != address(0), "No upgrade pending");
         require(block.timestamp >= pendingUpgradeEta, "Upgrade delay not elapsed");
@@ -453,7 +540,7 @@ contract vBTCb is ERC20Upgradeable, UUPSUpgradeable {
         emit ContractUpgraded(impl, adminNonce);
     }
 
-    function proposeUpgradeDelay(uint256 newDelay, bytes[] calldata signatures) external {
+    function proposeUpgradeDelay(uint256 newDelay, bytes[] calldata signatures) external onlyProxy {
         require(newDelay >= DEFAULT_UPGRADE_DELAY && newDelay <= MAX_UPGRADE_DELAY, "Delay out of range");
         require(pendingUpgradeDelayEta == 0 || _lapsed(pendingUpgradeDelayEta), "Delay change already pending");
 
@@ -467,7 +554,7 @@ contract vBTCb is ERC20Upgradeable, UUPSUpgradeable {
         adminNonce++;
     }
 
-    function executeUpgradeDelay() external {
+    function executeUpgradeDelay() external onlyProxy {
         require(pendingUpgradeDelayEta != 0, "No delay change pending");
         require(block.timestamp >= pendingUpgradeDelayEta, "Upgrade delay not elapsed");
         require(!_lapsed(pendingUpgradeDelayEta), "Proposal lapsed");
@@ -479,10 +566,14 @@ contract vBTCb is ERC20Upgradeable, UUPSUpgradeable {
         emit UpgradeDelayChanged(_upgradeDelay);
     }
 
-    /// @dev A strict majority of the validators, from the count itself: the stored requiredRemoveSignatures may still be
-    ///      V3's (a 51% figure, lower at 4 validators) until the first validator change after an upgrade from V3.
+    /// @dev A strict majority of the validators, from the count itself.
     function _validatorMajority() internal view returns (uint256) {
         return _max(MIN_REQUIRED_SIGNATURES, validatorCount / 2 + 1);
+    }
+
+    /// @notice The validators proposeRemoval needs with a majority of the casters: a strict majority, from the count.
+    function requiredRemoveSignatures() public view returns (uint256) {
+        return _validatorMajority();
     }
 
     /// @notice The validators who could refuse a mint: validatorCount - requiredMintSignatures + 1.
@@ -490,7 +581,8 @@ contract vBTCb is ERC20Upgradeable, UUPSUpgradeable {
         return validatorCount - requiredMintSignatures + 1;
     }
 
-    /// @notice A majority of the casters (0 while the contract has none, after an upgrade from V3).
+    /// @notice A majority of the casters (0 while the contract has none, after an upgrade from V3: then nothing but the
+    ///         caster bootstrap in updateCasters is approved).
     function requiredCasterSignatures() public view returns (uint256) {
         return _casters.length == 0 ? 0 : _casters.length / 2 + 1;
     }
@@ -501,25 +593,53 @@ contract vBTCb is ERC20Upgradeable, UUPSUpgradeable {
     }
 
     /// @notice Either group's blocking minority drops whatever is pending: an upgrade, a delay change and a removal.
-    function cancelPending(bytes[] calldata signatures) external {
+    function cancelPending(bytes[] calldata signatures) external onlyProxy {
         require(pendingImplementation != address(0) || pendingUpgradeDelayEta != 0 || pendingRemovalEta != 0, "Nothing pending");
+        _requireVeto(_hashTypedData(keccak256(abi.encode(CANCEL_PENDING_TYPEHASH, adminNonce))), signatures);
+        _cancel(PENDING_UPGRADE | PENDING_UPGRADE_DELAY | PENDING_REMOVAL);
+    }
 
-        bytes32 digest = _hashTypedData(keccak256(abi.encode(CANCEL_PENDING_TYPEHASH, adminNonce)));
+    /// @notice Either group's blocking minority drops the pending kinds it names (PENDING_UPGRADE, PENDING_UPGRADE_DELAY,
+    ///         PENDING_REMOVAL as bits) and leaves the others pending.
+    function cancelPendingKinds(uint256 kinds, bytes[] calldata signatures) external onlyProxy {
+        require(kinds != 0 && kinds <= (PENDING_UPGRADE | PENDING_UPGRADE_DELAY | PENDING_REMOVAL), "Unknown kinds");
+        require((kinds & PENDING_UPGRADE != 0 && pendingImplementation != address(0))
+            || (kinds & PENDING_UPGRADE_DELAY != 0 && pendingUpgradeDelayEta != 0)
+            || (kinds & PENDING_REMOVAL != 0 && pendingRemovalEta != 0), "Nothing pending");
+        _requireVeto(_hashTypedData(keccak256(abi.encode(CANCEL_PENDING_KINDS_TYPEHASH, kinds, adminNonce))), signatures);
+        _cancel(kinds);
+    }
+
+    /// @dev Either group's blocking minority: requiredVetoSignatures() validators or requiredCasterVetoSignatures() casters.
+    function _requireVeto(bytes32 digest, bytes[] calldata signatures) internal view {
         uint256 validatorVeto = requiredVetoSignatures();
         uint256 casterVeto = requiredCasterVetoSignatures();
         (uint256 v, uint256 c) = _countSigners(digest, signatures, validatorVeto, casterVeto == 0 ? type(uint256).max : casterVeto);
         require(v >= validatorVeto || (casterVeto > 0 && c >= casterVeto), "Insufficient valid admin signatures");
+    }
 
-        emit PendingCancelled(pendingImplementation, pendingUpgradeDelay, _pendingRemovals.length + _pendingCasterRemovals.length, adminNonce);
+    function _cancel(uint256 kinds) internal {
+        bool upgrade = kinds & PENDING_UPGRADE != 0;
+        bool delay = kinds & PENDING_UPGRADE_DELAY != 0;
+        bool removal = kinds & PENDING_REMOVAL != 0;
+        emit PendingCancelled(upgrade ? pendingImplementation : address(0), delay ? pendingUpgradeDelay : 0,
+            removal ? _pendingRemovals.length + _pendingCasterRemovals.length : 0, adminNonce);
 
-        pendingImplementation = address(0);
-        pendingUpgradeEta = 0;
-        pendingUpgradeDelay = 0;
-        pendingUpgradeDelayEta = 0;
-        delete _pendingRemovals;
-        delete _pendingCasterRemovals;
-        pendingRemovalHeight = 0;
-        pendingRemovalEta = 0;
+        if (upgrade) {
+            pendingImplementation = address(0);
+            pendingUpgradeEta = 0;
+        }
+        if (delay) {
+            pendingUpgradeDelay = 0;
+            pendingUpgradeDelayEta = 0;
+        }
+        if (removal) {
+            delete _pendingRemovals;
+            delete _pendingCasterRemovals;
+            pendingRemovalHeight = 0;
+            pendingRemovalEta = 0;
+            pendingRemovalNonce = 0;
+        }
         adminNonce++;
     }
 
@@ -555,14 +675,12 @@ contract vBTCb is ERC20Upgradeable, UUPSUpgradeable {
     function _recalculateThresholds() internal {
         // Mints ALWAYS use 2/3 Byzantine fault tolerance — no exceptions
         requiredMintSignatures = _max(MIN_REQUIRED_SIGNATURES, (validatorCount * 2 + 2) / 3);
-
-        // A strict majority, for proposeRemoval only (the timelocked way out when too many validators went dark for
-        // 2/3 to be reached). MIN_VALIDATORS_FOR_HIGH_THRESHOLD is V3's and no longer used.
-        requiredRemoveSignatures = _max(MIN_REQUIRED_SIGNATURES, validatorCount / 2 + 1);
     }
 
-    /// @dev Both groups: 2/3 of the validators and a majority of the casters.
+    /// @dev Both groups: 2/3 of the validators and a majority of at least 3 casters. Without 3 casters nothing is approved
+    ///      here (only the caster bootstrap in updateCasters).
     function _requireApproval(bytes32 digest, bytes[] calldata signatures, string memory err) internal view {
+        require(_casters.length >= MIN_CASTERS, "Casters not set up");
         uint256 needCasters = requiredCasterSignatures();
         (uint256 v, uint256 c) = _countSigners(digest, signatures, requiredMintSignatures, needCasters);
         require(v >= requiredMintSignatures && c >= needCasters, err);
@@ -571,10 +689,13 @@ contract vBTCb is ERC20Upgradeable, UUPSUpgradeable {
     /**
      * @dev Distinct current validators and distinct current casters that signed `digest` (an address on both lists counts
      *      on both); malformed signatures and other signers are skipped. Stops once both counts reach what is asked.
+     *      Counts nothing while the contract holds fewer than MIN_VALIDATORS validators (the implementation itself holds
+     *      none), so no threshold computed from an empty set is ever met.
      */
     function _countSigners(bytes32 digest, bytes[] calldata signatures, uint256 needValidators, uint256 needCasters)
         internal view returns (uint256 v, uint256 c)
     {
+        if (validatorCount < MIN_VALIDATORS) return (0, 0);
         address[] memory seen = new address[](signatures.length);
         uint256 n = 0;
         for (uint256 i = 0; i < signatures.length && (v < needValidators || c < needCasters); i++) {
@@ -654,9 +775,9 @@ contract vBTCb is ERC20Upgradeable, UUPSUpgradeable {
     }
 
     /**
-     * @dev Reserved storage slots for future upgrades. V4 took ten slots (its address shares V3's last slot).
+     * @dev Reserved storage slots for future upgrades. V4 took ten slots (its address shares V3's last slot), V5 four.
      */
-    uint256[40] private __gap;
+    uint256[36] private __gap;
 
     function _authorizeUpgrade(address newImplementation) internal override {
         newImplementation; // silence

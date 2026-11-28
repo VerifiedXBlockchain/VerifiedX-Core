@@ -4,14 +4,15 @@
 
 | Path | What it is |
 |---|---|
-| `contracts/vBTCb.sol` | The current contract (V4). Deployed behind a UUPS proxy. |
+| `contracts/vBTCb.sol` | The current contract (V5). Deployed behind a UUPS proxy. |
 | `contracts/legacy/vBTCbV3.sol` | The V3 source that is live behind the Base mainnet proxy, kept unchanged (contract renamed) so the tests can upgrade a real V3 proxy. Never deploy it. |
-| `test/vBTCb.test.js` | Hardhat tests: every signed message type, the timelock, the validator set limits, and the V3 → V4 upgrade. |
+| `contracts/legacy/vBTCbV4.sol` | The V4 source live behind the Base Sepolia proxy (`VBTCbV4.flattened.sol`), kept unchanged (contract renamed) so the tests can upgrade a real V4 proxy. Never deploy it. |
+| `test/vBTCb.test.js` | Hardhat tests: every signed message type, the timelock, the validator set limits, and the V3 → V5 and V4 → V5 upgrades. |
 | `scripts/deploy.js` | Deploys a **new** proxy (fresh network, e.g. Base Sepolia). |
 | `scripts/prepare-upgrade.js`, `submit-upgrade.js`, `execute-upgrade.js` | Upgrade an **existing** proxy (Base mainnet). |
 | `scripts/mint.js` | Manual `mintWithProof` with signatures you already have. |
 | `.openzeppelin/<network>.json` | Records each deployed implementation's storage layout. Upgrades are checked against it. Keep it committed. |
-| `VBTCbV4.flattened.sol` | `contracts/vBTCb.sol` with its imports inlined (`npx hardhat flatten contracts/vBTCb.sol`), for verifying the V4 implementation on BaseScan: solc 0.8.28, optimizer on with 200 runs, EVM cancun. `VBTCbV2`, `VBTCbV3` and `vBTCb.flattened.sol` (V3) are the earlier versions. |
+| `VBTCbV5.flattened.sol` | `contracts/vBTCb.sol` with its imports inlined (`npx hardhat flatten contracts/vBTCb.sol`), for verifying the V5 implementation on BaseScan: solc 0.8.28, optimizer on with 200 runs, EVM cancun. `VBTCbV2`, `VBTCbV3`, `VBTCbV4` and `vBTCb.flattened.sol` (V3) are the earlier versions. |
 
 ### Deployed addresses
 
@@ -22,7 +23,7 @@
 | Base Sepolia (84532) | `0x1154DDB476A38c01A389E1324121E15Df6703D19` | V3, carries supply from the pre-reset testnet chain. Replaced by the V4 proxy above; no longer used. |
 | Base Sepolia (84532) | `0x969972475c375BE4c9Fe8fc47A9F7145ec63A97C` | Older, unused. |
 
-## How V4 is governed
+## How V5 is governed
 
 There is no owner. The deployer account gets no rights. Two groups sign, and every message is EIP-712 typed data
 under the domain `("vBTCb", "4", chainId, proxy)`:
@@ -44,6 +45,8 @@ the casters cannot without the validators.
 | Propose a code upgrade | `ProposeUpgrade(implementation, adminNonce)` | both |
 | Propose a new upgrade delay | `ProposeUpgradeDelay(delay, adminNonce)` | both |
 | Cancel what is pending | `CancelPending(adminNonce)` | either group's blocking minority: `validatorCount - requiredMintSignatures + 1` validators, or `requiredCasterVetoSignatures()` casters |
+| Cancel some kinds of what is pending (V5) | `CancelPendingKinds(kinds, adminNonce)`, `kinds` = bits `PENDING_UPGRADE` 1, `PENDING_UPGRADE_DELAY` 2, `PENDING_REMOVAL` 4 | either group's blocking minority |
+| Refund a burn VFX cannot pay (V5) | `Refund(to, amount, burnId)`, `burnId` = the burn's Base transaction hash; once per burn | both |
 
 - No group short of 2/3 can change the validators at once, so none can remove the others and become 2/3 of what is left.
 - If so many validators or casters go dark that the approval can no longer be reached, a proposal removes them: a
@@ -60,6 +63,14 @@ the casters cannot without the validators.
   replaced by a new proposal.
 - The set stays between 3 and 50 validators and 3 to 10 casters. Each admin message carries `adminNonce`, so a
   signature set is used once.
+- V5: every state-changing function runs only through the proxy (the implementation contract accepts nothing), and no
+  approval is met with fewer than 3 validators.
+- V5: each seat records the `adminNonce` it was given at (`validatorSince`, `casterSince`), and a pending removal records
+  the nonce it was proposed at (`pendingRemovalNonce`). `executeRemoval` leaves out a member seated after the proposal,
+  so a member removed and admitted again is not removed by the older proposal.
+- V5: `burnForBTCExit` takes at least `MIN_BTC_EXIT_SATS` (25,186 sats, the smallest part a VFX vault pays in an exit
+  to Bitcoin). `burnForBTCExitWithMinPayout(amount, btcDestination, minPayoutSats)` also emits `BTCExitMinPayout`, the
+  least the holder accepts after Bitcoin fees, right after `BTCExitBurned`.
 
 ## Setup and tests
 
@@ -122,10 +133,19 @@ The proxy address, balances, used lock ids and validators all stay. Only the imp
 The V3 → V4 upgrade changes the mint message from V3's packed hash to EIP-712. VFX nodes read `MESSAGE_VERSION()`
 from the contract and sign the form it reads, so mints carry on across the upgrade without a gap.
 
-The upgraded proxy has no casters yet. Until `updateCasters` adds them the caster part is not required, so the
-validators alone mint, as on V3 today (on mainnet the validators are the three seed casters). The casters are added
-from `BaseBridgeV4Height` by the validators' own sync; after that nothing passes without them, and the list can no
-longer drop below 3.
+The upgraded proxy has no casters yet. On V5 nothing is approved until it has 3: not a mint, not a validator change,
+not an upgrade. The one thing that passes is `updateCasters` adding casters (no removals) on 2/3 of the validators,
+each new caster signing its own seat. The casters are added from `BaseBridgeV4Height` by the validators' own sync,
+which sends the caster change first, so mints pause from the upgrade until that change goes through. Collect the
+bootstrap signatures in advance to keep the pause short. After that nothing passes without the casters, and the list
+can no longer drop below 3.
+
+### Upgrading to V5
+
+- **Base Sepolia (V4)**: `proposeUpgrade` (both groups), wait 48 hours, `executeUpgrade`. No call data is passed.
+  Don't propose a removal while it waits: a node's automatic veto uses `cancelPending`, which also drops the upgrade.
+- **Base mainnet (V3)**: straight to V5 with `upgradeWithValidatorApproval`, then the caster bootstrap above.
+- Core's `CONTRACT_ABI` (`VerifiedXCore/Bitcoin/Services/BaseBridgeService.cs`) is this build's ABI; a test checks it.
 
 ## Testing the bridge (from a regular node)
 

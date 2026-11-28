@@ -1,6 +1,7 @@
 const { expect } = require("chai");
 const { ethers, upgrades, artifacts } = require("hardhat");
 const { time, loadFixture } = require("@nomicfoundation/hardhat-network-helpers");
+const { anyUint } = require("@nomicfoundation/hardhat-chai-matchers/withArgs");
 const fs = require("fs");
 const path = require("path");
 
@@ -39,6 +40,15 @@ const TYPES = {
         { name: "adminNonce", type: "uint256" },
     ],
     CancelPending: [{ name: "adminNonce", type: "uint256" }],
+    CancelPendingKinds: [
+        { name: "kinds", type: "uint256" },
+        { name: "adminNonce", type: "uint256" },
+    ],
+    Refund: [
+        { name: "to", type: "address" },
+        { name: "amount", type: "uint256" },
+        { name: "burnId", type: "bytes32" },
+    ],
     UpdateCasters: [
         { name: "add", type: "address[]" },
         { name: "remove", type: "address[]" },
@@ -152,6 +162,30 @@ function vfxAddress(version, hash20 = ethers.randomBytes(20)) {
         n /= 58n;
     }
     return out;
+}
+
+// Storage slots V5 renamed (the variable is kept, under a new name, at the same slot).
+const RENAMED = { requiredRemoveSignatures: "_retiredRemoveThreshold" };
+
+/** Every slot of a deployed layout keeps its place in the current build, and the gap ends where it did. */
+function expectSlotsKept(deployed, current) {
+    const end = (s) => BigInt(s.slot) + (s.label === "__gap" ? BigInt(s.type.match(/\)(\d+)_storage/)[1]) : 1n);
+    for (const d of deployed.filter((s) => s.label !== "__gap")) {
+        const label = RENAMED[d.label] ?? d.label;
+        const n = current.find((s) => s.label === label);
+        expect(n, d.label).to.not.equal(undefined);
+        expect([n.slot, n.offset], d.label).to.deep.equal([d.slot, d.offset]);
+    }
+    const oldGap = deployed.find((s) => s.label === "__gap");
+    const newGap = current.find((s) => s.label === "__gap");
+    expect(end(newGap)).to.equal(end(oldGap));
+    const added = current.filter((s) => !deployed.some((d) => (RENAMED[d.label] ?? d.label) === s.label));
+    for (const s of added) expect(BigInt(s.slot) < BigInt(newGap.slot), s.label).to.equal(true);
+}
+
+async function currentLayout() {
+    const buildInfo = await artifacts.getBuildInfo("contracts/vBTCb.sol:vBTCb");
+    return buildInfo.output.contracts["contracts/vBTCb.sol"]["vBTCb"].storageLayout.storage;
 }
 
 async function newImplementation() {
@@ -894,8 +928,11 @@ describe("vBTCb V4", function () {
             expect(await v4.isLockIdUsed("lock-a")).to.equal(true);
             expect(v4.interface.getFunction("upgradeWithValidatorApproval")).to.equal(null);
 
-            await expect(mint(v4, vals.slice(0, 2), user.address, 1n, "lock-a")).to.be.revertedWith("LockId already used");
-            await mint(v4, vals.slice(1, 3), user.address, 5_000n, "lock-c");
+            const casters = wallets(3);
+            await updateCasters(v4, vals.slice(0, 2), casters);
+            const both = [...vals.slice(1, 3), ...casters.slice(0, 2)];
+            await expect(mint(v4, both, user.address, 1n, "lock-a")).to.be.revertedWith("LockId already used");
+            await mint(v4, both, user.address, 5_000n, "lock-c");
             expect(await v4.balanceOf(user.address)).to.equal(95_000n);
             await v4.connect(user).burnForVfxExit(5_000n, vfxAddress(0x89));
             expect(await v4.totalSupply()).to.equal(90_000n);
@@ -907,29 +944,47 @@ describe("vBTCb V4", function () {
             );
         });
 
-        it("has no casters after the upgrade until updateCasters adds them, and then needs them", async function () {
+        it("approves nothing but adding the casters until there are 3, and then needs them", async function () {
             const { token, vals, user, self } = await loadFixture(deployV3Fixture);
-            const V4 = await ethers.getContractFactory("vBTCb");
-            const impl = await upgrades.prepareUpgrade(self, V4, { kind: "uups" });
+            const V5 = await ethers.getContractFactory("vBTCb");
+            const impl = await upgrades.prepareUpgrade(self, V5, { kind: "uups" });
             const { chainId } = await ethers.provider.getNetwork();
             const h = ethers.solidityPackedKeccak256(["string", "address", "uint256", "uint256", "address"], ["UPGRADE", impl, 0n, chainId, self]);
             await token.upgradeWithValidatorApproval(impl, await Promise.all(vals.slice(0, 2).map((v) => v.signMessage(ethers.getBytes(h)))));
-            const v4 = V4.attach(self);
+            const v5 = V5.attach(self);
 
-            // As today until the casters are set: the validators alone mint.
-            expect(await v4.getCasters()).to.deep.equal([]);
-            expect(await v4.requiredCasterSignatures()).to.equal(0n);
-            await mint(v4, vals.slice(0, 2), user.address, 1n, "before-casters");
+            // No casters: the validators alone mint nothing and change nothing.
+            expect(await v5.getCasters()).to.deep.equal([]);
+            expect(await v5.requiredCasterSignatures()).to.equal(0n);
+            await expect(mint(v5, vals, user.address, 1n, "before-casters")).to.be.revertedWith("Casters not set up");
+            await expect(addBatch(v5, vals, wallets(1))).to.be.revertedWith("Casters not set up");
+            await expect(removeBatch(v5, vals, [vals[0].address])).to.be.reverted;
+            const later = await newImplementation();
+            await expect(v5.proposeUpgrade(later, await signTyped(v5, vals, "ProposeUpgrade", { implementation: later, adminNonce: 1n }))).to.be.revertedWith(
+                "Casters not set up"
+            );
+            await expect(v5.proposeUpgradeDelay(BigInt(3 * DAY), await signTyped(v5, vals, "ProposeUpgradeDelay", { delay: BigInt(3 * DAY), adminNonce: 1n }))).to.be.revertedWith(
+                "Casters not set up"
+            );
 
+            // The bootstrap: 2/3 of the validators add at least 3 casters, only adding, each signing its own seat.
             const casters = wallets(3);
-            await expect(updateCasters(v4, vals, casters.slice(0, 2))).to.be.revertedWith("Caster count out of range");
-            await expect(updateCasters(v4, vals, casters)).to.emit(v4, "CastersUpdated");
-            expect(await v4.getCasters()).to.deep.equal(casters.map((c) => c.address));
-            expect(await v4.requiredCasterSignatures()).to.equal(2n);
+            await expect(updateCasters(v5, vals.slice(0, 1), casters)).to.be.revertedWith("Insufficient valid admin signatures");
+            await expect(updateCasters(v5, vals, casters.slice(0, 2))).to.be.revertedWith("Caster count out of range");
+            await expect(updateCasters(v5, vals, casters, [vals[0].address])).to.be.revertedWith("Only additions until there are 3 casters");
+            const value = { add: casters.map((c) => c.address), remove: [], vfxBlockHeight: 100n, adminNonce: await v5.adminNonce() };
+            const notOwn = await signTyped(v5, [vals[0], vals[1], vals[2]], "UpdateCasters", value);
+            await expect(v5.updateCasters(value.add, [], 100n, await signTyped(v5, vals.slice(0, 2), "UpdateCasters", value), notOwn)).to.be.revertedWith(
+                "New caster did not sign"
+            );
+            await expect(updateCasters(v5, vals.slice(0, 2), casters)).to.emit(v5, "CastersUpdated");
+            expect(await v5.getCasters()).to.deep.equal(casters.map((c) => c.address));
+            expect(await v5.requiredCasterSignatures()).to.equal(2n);
 
-            await expect(mint(v4, vals, user.address, 1n, "after-casters")).to.be.revertedWith("Insufficient valid signatures");
-            await mint(v4, [...vals.slice(0, 2), ...casters.slice(0, 2)], user.address, 1n, "after-casters");
-            await expect(updateCasters(v4, [...vals, ...casters], [], casters.map((c) => c.address))).to.be.revertedWith(
+            await expect(mint(v5, vals, user.address, 1n, "after-casters")).to.be.revertedWith("Insufficient valid signatures");
+            await mint(v5, [...vals.slice(0, 2), ...casters.slice(0, 2)], user.address, 1n, "after-casters");
+            await expect(updateCasters(v5, vals, wallets(1))).to.be.revertedWith("Insufficient valid admin signatures");
+            await expect(updateCasters(v5, [...vals, ...casters], [], casters.map((c) => c.address))).to.be.revertedWith(
                 "Caster count out of range"
             );
         });
@@ -952,8 +1007,12 @@ describe("vBTCb V4", function () {
                 const value = { validators: target, casters: [], vfxBlockHeight: 9n, adminNonce: await v4.adminNonce() };
                 return v4.proposeRemoval(target, [], 9n, await signTyped(v4, signers, "ProposeRemoval", value));
             };
-            await expect(propose(vals.slice(0, 2))).to.be.revertedWith("Insufficient valid admin signatures");
-            await expect(propose(vals.slice(0, 3))).to.emit(v4, "RemovalProposed");
+            expect(await v4.requiredRemoveSignatures()).to.equal(3n);             // computed from the count since V5
+            await expect(propose(vals)).to.be.revertedWith("Casters not set up"); // nothing but the caster bootstrap until then
+            const casters = wallets(3);
+            await updateCasters(v4, vals.slice(0, 3), casters);
+            await expect(propose([...vals.slice(0, 2), ...casters.slice(0, 2)])).to.be.revertedWith("Insufficient valid admin signatures");
+            await expect(propose([...vals.slice(0, 3), ...casters.slice(0, 2)])).to.emit(v4, "RemovalProposed");
         });
 
         it("the submit script sends only the signatures that count: V3 reverts the whole upgrade on one malformed signature", async function () {
@@ -980,20 +1039,235 @@ describe("vBTCb V4", function () {
             expect(impls.length).to.equal(1);
             const deployed = impls[0].layout.storage;
 
-            const buildInfo = await artifacts.getBuildInfo("contracts/vBTCb.sol:vBTCb");
-            const v4 = buildInfo.output.contracts["contracts/vBTCb.sol"]["vBTCb"].storageLayout.storage;
-            const end = (s) => BigInt(s.slot) + (s.label === "__gap" ? BigInt(s.type.match(/\)(\d+)_storage/)[1]) : 1n);
+            const v4 = await currentLayout();
 
-            for (const d of deployed.filter((s) => s.label !== "__gap")) {
-                const n = v4.find((s) => s.label === d.label);
-                expect(n, d.label).to.not.equal(undefined);
-                expect([n.slot, n.offset], d.label).to.deep.equal([d.slot, d.offset]);
-            }
-            const oldGap = deployed.find((s) => s.label === "__gap");
-            const newGap = v4.find((s) => s.label === "__gap");
-            expect(end(newGap)).to.equal(end(oldGap));
-            const added = v4.filter((s) => !deployed.some((d) => d.label === s.label));
-            for (const s of added) expect(BigInt(s.slot) < BigInt(newGap.slot), s.label).to.equal(true);
+            expectSlotsKept(deployed, v4);
+        });
+    });
+
+    describe("V5: the implementation contract accepts nothing", function () {
+        // ERC-20 transfers and approvals act on the implementation's own (empty) balances and grant nothing; initialize is
+        // disabled there; upgradeToAndCall was always proxy-only. Every other function that changes state is listed.
+        const ERC20_OWN = ["approve", "transfer", "transferFrom", "initialize", "upgradeToAndCall"];
+
+        it("every other state-changing function reverts on the implementation, whatever it is given", async function () {
+            const { token } = await loadFixture(deployV4Fixture);
+            const impl = (await ethers.getContractFactory("vBTCb")).attach(await upgrades.erc1967.getImplementationAddress(await token.getAddress()));
+            const mutators = impl.interface.fragments.filter(
+                (f) => f.type === "function" && !["view", "pure"].includes(f.stateMutability) && !ERC20_OWN.includes(f.name)
+            );
+            expect(mutators.map((f) => f.name).sort()).to.deep.equal([
+                "addValidatorBatch", "burnForBTCExit", "burnForBTCExitWithMinPayout", "burnForVfxExit", "cancelPending",
+                "cancelPendingKinds", "executeRemoval", "executeUpgrade", "executeUpgradeDelay", "mintWithProof", "proposeRemoval",
+                "proposeUpgrade", "proposeUpgradeDelay", "refundBurn", "removeValidatorBatch", "updateCasters",
+            ]);
+            const dummy = (t) => (t.baseType === "array" ? [] : t.baseType === "string" ? "x" : t.baseType === "address" ? ethers.ZeroAddress
+                : t.baseType === "bytes" ? "0x" : t.baseType === "bytes32" ? ethers.ZeroHash : t.baseType === "bool" ? false : 1n);
+            for (const f of mutators)
+                await expect(impl[f.format()](...f.inputs.map(dummy)), f.name).to.be.revertedWithCustomError(impl, "UUPSUnauthorizedCallContext");
+        });
+
+        it("on the implementation, an empty signature list meets no threshold (it holds no validators)", async function () {
+            const V5 = await ethers.getContractFactory("vBTCb");
+            const impl = await V5.deploy();
+            expect(await impl.validatorCount()).to.equal(0n);
+            expect(await impl.requiredMintSignatures()).to.equal(0n);
+            await expect(impl.mintWithProof(ethers.Wallet.createRandom().address, 1n, "x", 1n, [])).to.be.revertedWithCustomError(
+                impl,
+                "UUPSUnauthorizedCallContext"
+            );
+            expect(await impl.totalSupply()).to.equal(0n);
+        });
+    });
+
+    describe("V5: a pending removal does not remove a member seated again after it", function () {
+        async function deploy7Fixture() {
+            const vals = wallets(7);
+            const [, user] = await ethers.getSigners();
+            const V5 = await ethers.getContractFactory("vBTCb");
+            const token = await upgrades.deployProxy(V5, ["n", "s", vals.map((v) => v.address), vals.slice(0, 3).map((v) => v.address)], { kind: "uups" });
+            return { token, vals, user, majority: vals.slice(0, 4), others: vals.slice(4) };
+        }
+        async function proposeRemoval(token, signers, validators, casters = []) {
+            const value = { validators, casters, vfxBlockHeight: 9n, adminNonce: await token.adminNonce() };
+            return token.proposeRemoval(validators, casters, 9n, await signTyped(token, signers, "ProposeRemoval", value));
+        }
+
+        it("a validator removed and admitted again keeps its seat when the older removal runs", async function () {
+            const { token, vals, majority, others } = await loadFixture(deploy7Fixture);
+            const target = others[0];
+            await proposeRemoval(token, majority, [target.address, others[1].address]);
+            await removeBatch(token, vals.slice(0, 5), [target.address]);
+            await addBatch(token, vals.slice(0, 5), [target]);
+            expect(await token.validatorSince(target.address)).to.equal(await token.adminNonce());
+            expect(await token.validatorSince(target.address)).to.be.greaterThan(await token.pendingRemovalNonce());
+
+            await time.increase(24 * HOUR);
+            await expect(token.executeRemoval()).to.be.revertedWith("Upgrade delay not elapsed");
+            await time.increase(24 * HOUR);
+            await token.executeRemoval();
+            expect(await token.isValidator(target.address)).to.equal(true);       // seated after the proposal: left out
+            expect(await token.isValidator(others[1].address)).to.equal(false);   // seated before it: removed
+            expect(await token.validatorCount()).to.equal(6n);
+            expect(await token.pendingRemovalNonce()).to.equal(0n);
+        });
+
+        it("a caster removed and admitted again keeps its seat when the older removal runs", async function () {
+            const { token, vals } = await loadFixture(deploy7Fixture);
+            const extra = wallets(2);
+            await updateCasters(token, vals.slice(0, 5), extra);                  // 5 casters: vals 0-2 and extra
+            const target = extra[0];
+            await proposeRemoval(token, vals.slice(0, 5), [], [target.address, extra[1].address]);
+            await updateCasters(token, vals.slice(0, 5), [], [target.address]);
+            await updateCasters(token, vals.slice(0, 5), [target]);
+            await time.increase(48 * HOUR);
+            await token.executeRemoval();
+            expect(await token.isCaster(target.address)).to.equal(true);
+            expect(await token.isCaster(extra[1].address)).to.equal(false);
+        });
+    });
+
+    describe("V5: cancelPendingKinds drops only what it names", function () {
+        it("a removal veto leaves a pending upgrade to run", async function () {
+            const { token, vals, casters } = await loadFixture(deploySplitFixture);
+            const more = wallets(4);
+            await addBatch(token, [...vals, ...casters], more);                  // 7 validators: majority 4, veto 3
+            const seven = [...vals, ...more];
+            const impl = await newImplementation();
+            await token.proposeUpgrade(impl, await signTyped(token, [...seven.slice(0, 5), ...casters.slice(0, 2)], "ProposeUpgrade", { implementation: impl, adminNonce: await token.adminNonce() }));
+            const value = { validators: [more[3].address], casters: [], vfxBlockHeight: 9n, adminNonce: await token.adminNonce() };
+            await token.proposeRemoval(value.validators, [], 9n, await signTyped(token, [...seven.slice(0, 4), ...casters.slice(0, 2)], "ProposeRemoval", value));
+
+            const kinds = async (k, signers) =>
+                token.cancelPendingKinds(k, await signTyped(token, signers, "CancelPendingKinds", { kinds: k, adminNonce: await token.adminNonce() }));
+            const REMOVAL = await token.PENDING_REMOVAL();
+            await expect(kinds(0n, seven.slice(4))).to.be.revertedWith("Unknown kinds");
+            await expect(kinds(8n, seven.slice(4))).to.be.revertedWith("Unknown kinds");
+            await expect(kinds(await token.PENDING_UPGRADE_DELAY(), seven.slice(4))).to.be.revertedWith("Nothing pending");
+            await expect(kinds(REMOVAL, seven.slice(5))).to.be.revertedWith("Insufficient valid admin signatures");
+            // CancelPending signatures are not CancelPendingKinds signatures.
+            const plain = await signTyped(token, seven.slice(4), "CancelPending", { adminNonce: await token.adminNonce() });
+            await expect(token.cancelPendingKinds(REMOVAL, plain)).to.be.revertedWith("Insufficient valid admin signatures");
+
+            await expect(kinds(REMOVAL, seven.slice(4))).to.emit(token, "PendingCancelled").withArgs(ethers.ZeroAddress, 0n, 1n, anyUint);
+            expect(await token.pendingRemovalEta()).to.equal(0n);
+            expect(await token.pendingImplementation()).to.equal(impl);
+            await time.increase(48 * HOUR);
+            await token.executeUpgrade();
+            expect(await upgrades.erc1967.getImplementationAddress(await token.getAddress())).to.equal(impl);
+        });
+    });
+
+    describe("V5: exits to Bitcoin and refunds", function () {
+        const BTC = "bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq";
+
+        it("burnForBTCExit takes at least the smallest exit VFX can pay", async function () {
+            const { token, vals, user } = await loadFixture(deployV4Fixture);
+            await mint(token, vals.slice(0, 2), user.address, 100_000n, "lock-btc");
+            expect(await token.MIN_BTC_EXIT_SATS()).to.equal(25_186n);
+            await expect(token.connect(user).burnForBTCExit(25_185n, BTC)).to.be.revertedWith("Amount below the smallest exit");
+            await expect(token.connect(user).burnForBTCExit(25_186n, BTC)).to.emit(token, "BTCExitBurned").withArgs(user.address, 25_186n, BTC, anyUint);
+            expect(await token.balanceOf(user.address)).to.equal(100_000n - 25_186n);
+        });
+
+        it("burnForBTCExitWithMinPayout names the least the holder accepts, at most the amount", async function () {
+            const { token, vals, user } = await loadFixture(deployV4Fixture);
+            await mint(token, vals.slice(0, 2), user.address, 100_000n, "lock-btc");
+            await expect(token.connect(user).burnForBTCExitWithMinPayout(30_000n, BTC, 30_001n)).to.be.revertedWith("Minimum payout above the amount");
+            await expect(token.connect(user).burnForBTCExitWithMinPayout(25_185n, BTC, 1n)).to.be.revertedWith("Amount below the smallest exit");
+            const tx = token.connect(user).burnForBTCExitWithMinPayout(30_000n, BTC, 28_000n);
+            await expect(tx).to.emit(token, "BTCExitBurned").withArgs(user.address, 30_000n, BTC, anyUint);
+            await expect(tx).to.emit(token, "BTCExitMinPayout").withArgs(user.address, 28_000n);
+            // BTCExitBurned comes first and once, as VFX reads one exit per burn transaction.
+            const receipt = await (await tx).wait();
+            const names = receipt.logs.map((l) => token.interface.parseLog(l)?.name).filter((n) => n && n !== "Transfer");
+            expect(names).to.deep.equal(["BTCExitBurned", "BTCExitMinPayout"]);
+        });
+
+        it("refundBurn mints a burn back once, with both groups' approval", async function () {
+            const { token, vals, casters, user } = await loadFixture(deploySplitFixture);
+            const burnId = ethers.keccak256(ethers.toUtf8Bytes("burn-tx"));
+            const both = [...vals.slice(0, 2), ...casters.slice(0, 2)];
+            const refund = async (signers, value) => token.refundBurn(value.to, value.amount, value.burnId, await signTyped(token, signers, "Refund", value));
+            const value = { to: user.address, amount: 25_000n, burnId };
+
+            await expect(refund(vals, value)).to.be.revertedWith("Insufficient valid signatures");
+            await expect(refund(casters, value)).to.be.revertedWith("Insufficient valid signatures");
+            const sigs = await signTyped(token, both, "Refund", value);
+            await expect(token.refundBurn(user.address, 25_001n, burnId, sigs)).to.be.revertedWith("Insufficient valid signatures");
+            // A mint signature over the same numbers is not a refund signature.
+            const mintSigs = await signTyped(token, both, "Mint", { to: user.address, amount: 25_000n, lockId: "burn-tx", nonce: 0n });
+            await expect(token.refundBurn(user.address, 25_000n, burnId, mintSigs)).to.be.revertedWith("Insufficient valid signatures");
+
+            await expect(token.refundBurn(user.address, 25_000n, burnId, sigs)).to.emit(token, "BurnRefunded").withArgs(user.address, 25_000n, burnId);
+            expect(await token.balanceOf(user.address)).to.equal(25_000n);
+            expect(await token.refundedBurns(burnId)).to.equal(true);
+            await expect(token.refundBurn(user.address, 25_000n, burnId, sigs)).to.be.revertedWith("Burn already refunded");
+        });
+    });
+
+    describe("V5: upgrade from the deployed V4", function () {
+        async function deployLegacyV4Fixture() {
+            const vals = wallets(3);
+            const casters = wallets(3);
+            const [, user] = await ethers.getSigners();
+            const V4 = await ethers.getContractFactory("vBTCbV4");
+            const token = await upgrades.deployProxy(V4, ["Verified Bitcoin on Base", "vBTC.b", vals.map((v) => v.address), casters.map((c) => c.address)], {
+                kind: "uups",
+            });
+            return { token, vals, casters, user, self: await token.getAddress(), both: [...vals.slice(0, 2), ...casters.slice(0, 2)] };
+        }
+
+        async function upgradeToV5({ token, both, self }) {
+            const V5 = await ethers.getContractFactory("vBTCb");
+            const impl = await upgrades.prepareUpgrade(self, V5, { kind: "uups" }); // storage layout check
+            await token.proposeUpgrade(impl, await signTyped(token, both, "ProposeUpgrade", { implementation: impl, adminNonce: await token.adminNonce() }));
+            await time.increase(48 * HOUR);
+            await token.executeUpgrade();
+            expect(await upgrades.erc1967.getImplementationAddress(self)).to.equal(impl);
+            return V5.attach(self);
+        }
+
+        it("proposes, waits and executes through V4's timelock, keeping balances, locks and both lists", async function () {
+            const f = await loadFixture(deployLegacyV4Fixture);
+            await mint(f.token, f.both, f.user.address, 60_000n, "lock-v4");
+            const v5 = await upgradeToV5(f);
+            expect(await v5.balanceOf(f.user.address)).to.equal(60_000n);
+            expect(await v5.isLockIdUsed("lock-v4")).to.equal(true);
+            expect(await v5.getValidators()).to.deep.equal(f.vals.map((v) => v.address));
+            expect(await v5.getCasters()).to.deep.equal(f.casters.map((c) => c.address));
+            expect(await v5.requiredRemoveSignatures()).to.equal(2n);
+            await expect(mint(v5, f.both, f.user.address, 1n, "lock-v4")).to.be.revertedWith("LockId already used");
+            await mint(v5, f.both, f.user.address, 30_000n, "lock-v5");
+            await expect(v5.connect(f.user).burnForBTCExit(25_185n, "bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq")).to.be.revertedWith(
+                "Amount below the smallest exit"
+            );
+        });
+
+        it("a removal pending across the upgrade still runs for members seated before it, and not for one seated after", async function () {
+            const f = await loadFixture(deployLegacyV4Fixture);
+            const more = wallets(4);
+            await addBatch(f.token, [...f.vals, ...f.casters.slice(0, 2)], more);       // 7 validators
+            const seven = [...f.vals, ...more];
+            const both7 = [...seven.slice(0, 5), ...f.casters.slice(0, 2)];
+            const targets = [more[2].address, more[3].address];
+            const value = { validators: targets, casters: [], vfxBlockHeight: 9n, adminNonce: await f.token.adminNonce() };
+            await f.token.proposeRemoval(targets, [], 9n, await signTyped(f.token, [...seven.slice(0, 4), ...f.casters.slice(0, 2)], "ProposeRemoval", value));
+
+            const v5 = await upgradeToV5({ ...f, both: both7 });
+            expect(await v5.pendingRemovalNonce()).to.equal(0n);
+            await removeBatch(v5, both7, [more[3].address]);
+            await addBatch(v5, both7, [more[3]]);                                    // seated again on V5, after the proposal
+            await v5.executeRemoval();
+            expect(await v5.isValidator(more[2].address)).to.equal(false);
+            expect(await v5.isValidator(more[3].address)).to.equal(true);
+        });
+
+        it("keeps every V4 storage slot recorded in the Base Sepolia manifest", async function () {
+            const manifest = JSON.parse(fs.readFileSync(path.join(__dirname, "..", ".openzeppelin", "base-sepolia.json"), "utf8"));
+            const v4 = Object.values(manifest.impls).find((i) => i.address === "0xa06e3B68B495e474B41595435675f94CF8e7C711");
+            expect(v4, "the V4 implementation behind the Base Sepolia proxy").to.not.equal(undefined);
+            expectSlotsKept(v4.layout.storage, await currentLayout());
         });
     });
 

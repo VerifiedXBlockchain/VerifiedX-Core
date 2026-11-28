@@ -497,8 +497,9 @@ namespace VerifiedXCore.Bitcoin.Services
                 return false;
             }
             var digest = VbtcbTypedData.UpdateCastersDigest(add, remove, epoch, view.AdminNonce, BaseBridgeService.BaseChainId, BaseBridgeService.ContractAddress);
-            var sigs = await CollectAsync("CASTERS", add, epoch, nonce, members, ipOf, myBase, view, digest, remove);
-            if (!UserBridgeMintService.Enough(view, view.RequiredMintSignatures, sigs.Keys))
+            var sigs = await CollectAsync("CASTERS", add, epoch, nonce, members, ipOf, myBase, view, digest, remove,
+                signed => UserBridgeMintService.EnoughForCasterChange(view, signed));
+            if (!UserBridgeMintService.EnoughForCasterChange(view, sigs.Keys))
             {
                 LogUtility.Log($"[BaseValidatorSync] Caster change for epoch {epoch}: {Tally(view, sigs)}.", "BaseValidatorSyncService");
                 return false;

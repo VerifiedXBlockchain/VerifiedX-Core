@@ -76,6 +76,18 @@ namespace VerifiedXCore.Tests
         }
 
         [Fact]
+        public void TheV5Digests_MatchEthers()
+        {
+            Assert.Equal(Hex("0xed134b040f69c6615fa7f104421ea6ad6b00a99dcc136e51db6c6714a471aadf"), VbtcbTypedData.CancelPendingDigest(7, 8453, Proxy));
+            Assert.Equal(Hex("0x3ac46ce13dc71113270dc8dd2152fbce97140867e8917ae198d59850e0c70fad"),
+                VbtcbTypedData.CancelPendingKindsDigest(VbtcbTypedData.PendingRemoval, 7, 8453, Proxy));
+            // burnId: keccak256("burn-tx"), standing in for a Base transaction hash.
+            Assert.Equal(Hex("0xe2d9ce929bc6be8968596e184cf98f2c441710d9c465cff809c4f19ed166be80"), VbtcbTypedData.RefundDigest(
+                "0x1111111111111111111111111111111111111111", 25_000, "0xb80dd397372defb854c53f02b1b9bf28f7ce79d1225ea82ad3369cd1ff2f5a6b", 8453, Proxy));
+            Assert.Throws<ArgumentException>(() => VbtcbTypedData.RefundDigest("0x1111111111111111111111111111111111111111", 25_000, "0xb80d", 8453, Proxy));
+        }
+
+        [Fact]
         public void TheDigest_ChangesWithEveryFieldOfTheDomainAndTheMint()
         {
             var baseline = VbtcbTypedData.MintDigest("0xD140DfAB7F08B5ce8E54A8b364E447b49E6EEda6", 400_000, "l", 1, 8453, Proxy);
@@ -88,12 +100,13 @@ namespace VerifiedXCore.Tests
         }
 
         [Fact]
-        public void TheContractAbi_IsV4_AndHoldsWhatCoreAndTheWalletCall()
+        public void TheContractAbi_IsV5_AndHoldsWhatCoreAndTheWalletCall()
         {
             var abi = new Nethereum.ABI.ABIDeserialisation.ABIJsonDeserialiser().DeserialiseContract(BaseBridgeService.CONTRACT_ABI);
             var functions = abi.Functions.Select(f => f.Name).ToHashSet();
             foreach (var name in new[] { "mintWithProof", "isLockIdUsed", "requiredMintSignatures", "balanceOf", "burnForVfxExit", "burnForBTCExit",
-                         "MESSAGE_VERSION", "getValidators", "getCasters", "requiredCasterSignatures", "updateCasters", "cancelPending", "proposeRemoval" })
+                         "MESSAGE_VERSION", "getValidators", "getCasters", "requiredCasterSignatures", "updateCasters", "cancelPending", "proposeRemoval",
+                         "cancelPendingKinds", "refundBurn", "burnForBTCExitWithMinPayout", "MIN_BTC_EXIT_SATS" })
                 Assert.Contains(name, functions);
             Assert.DoesNotContain("upgradeWithValidatorApproval", functions);
             Assert.Equal(4, abi.Functions.Single(f => f.Name == "addValidatorBatch").InputParameters.Length);
