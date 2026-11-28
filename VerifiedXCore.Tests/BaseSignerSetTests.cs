@@ -1156,8 +1156,9 @@ namespace VerifiedXCore.Tests
         /// <summary>
         /// The operator's desk for a test of named removals: the contract holds this node, two more members and a
         /// validator that is registered, funded and seen on VFX (the one named); the other members' nodes answer over the
-        /// network; what the veto loop sends is kept; and Base answers which admin nonce a pending removal was proposed
-        /// under (its RemovalProposed event) only for the removals a test says it can.
+        /// network; what the veto loop sends is kept; and an attempt to find which admin nonce a pending removal was
+        /// proposed under (its RemovalProposed event, BaseRemovalProposal) finds it only for the removals a test says it
+        /// can. The read of Base itself is tested in BaseRemovalProposalReadTests.
         /// </summary>
         private sealed class NamedRemovals : IDisposable
         {
@@ -1169,7 +1170,7 @@ namespace VerifiedXCore.Tests
             public readonly V[] Members, OnContract;
             public readonly string[] Targets;
             public readonly BaseBridgeService.PendingRemoval Nothing = new(Array.Empty<string>(), Array.Empty<string>(), 0);
-            /// <summary>How often Base was asked for a removal's proposing nonce.</summary>
+            /// <summary>How many attempts were made to find a removal's proposing nonce on Base.</summary>
             public int EventReads;
 
             public NamedRemovals(BaseSignerSetTests t)
@@ -1180,7 +1181,8 @@ namespace VerifiedXCore.Tests
                 Targets = new[] { t._new1.Base };
                 Globals.HttpClientFactory = new ValidatorNetwork(OnContract.Select((v, i) => (v, ip: $"10.0.0.{i + 1}")).ToDictionary(x => x.ip, x => x.v));
                 BaseValidatorSyncService.SubmitForTests = (f, _) => { _sent.Add(f); return Task.FromResult<string?>("0xtx"); };
-                BaseBridgeService.ReadRemovalProposalNonceForTests = pending =>
+                BaseRemovalProposal.ForgetForTests();
+                BaseRemovalProposal.AttemptForTests = pending =>
                 {
                     EventReads++;
                     return Task.FromResult(_proposedUnder.TryGetValue(pending.Eta.ToString(), out var nonce) ? new System.Numerics.BigInteger(nonce) : (System.Numerics.BigInteger?)null);
@@ -1189,8 +1191,8 @@ namespace VerifiedXCore.Tests
 
             public void Dispose()
             {
-                BaseBridgeService.ReadRemovalProposalNonceForTests = null;
-                BaseValidatorSyncService.ProposedUnderCache.Clear();
+                BaseRemovalProposal.AttemptForTests = null;
+                BaseRemovalProposal.ForgetForTests();
                 BaseValidatorSyncService.SubmitForTests = null;
                 Globals.HttpClientFactory = _priorFactory;
             }
@@ -1209,11 +1211,11 @@ namespace VerifiedXCore.Tests
             /// <summary>Base can now say which nonce this removal was proposed under.</summary>
             public void EventReadable(BaseBridgeService.PendingRemoval removal, int proposedUnder) => _proposedUnder[removal.Eta.ToString()] = proposedUnder;
 
-            /// <summary>What the contract shows as pending, read afresh (and Base asked afresh for its event).</summary>
+            /// <summary>What the contract shows as pending, read afresh (and nothing known yet of its event).</summary>
             public void PendingIs(BaseBridgeService.PendingRemoval pending)
             {
                 BaseValidatorSyncService.PendingCache = null;
-                BaseValidatorSyncService.ProposedUnderCache.Clear();
+                BaseRemovalProposal.ForgetForTests();
                 BaseBridgeService.ReadPendingRemovalForTests = () => Task.FromResult<BaseBridgeService.PendingRemoval?>(pending);
             }
 
@@ -1354,7 +1356,8 @@ namespace VerifiedXCore.Tests
         /// <summary>
         /// When Base cannot say which nonce a pending removal was proposed under, nothing is proven: the record of what the
         /// operator signed stays, a pending removal that gives the signed digest is not vetoed meanwhile, and any other is
-        /// judged as ever. A read that failed is asked again a minute later, not at every request.
+        /// judged as ever. Only the veto loop looks on Base for it, once a pass; a signing request, however often it
+        /// comes, reads what the loop has found and makes this node read nothing.
         /// </summary>
         [Fact]
         public async Task WhenTheProposalsEventCannotBeRead_TheApprovalIsKept_AndTheSignedRemovalIsNotVetoed()
@@ -1369,14 +1372,16 @@ namespace VerifiedXCore.Tests
             Assert.Equal(Vetoed, await desk.Loop(desk.Removal(null, Epoch, _new1.Base, _seed2.Base)));
             Assert.Equal(1, desk.Records());
 
-            // The signed removal, its event unreadable: not vetoed, and asked of Base once though it is asked about twice.
+            // The signed removal, its event unreadable: not vetoed. Signing requests look for nothing on Base; the loop
+            // does, once each pass.
             var approved = desk.Removal(null, Epoch, desk.Targets);
             desk.PendingIs(approved);
             desk.EventReads = 0;
             Assert.True(await desk.RefusesToCancel(51));
             Assert.True(await desk.RefusesToCancel(51));
-            Assert.Equal(1, desk.EventReads);
+            Assert.Equal(0, desk.EventReads);
             Assert.Empty(await desk.Loop(approved));
+            Assert.Equal(2, desk.EventReads);                                    // the loop ran twice
             Assert.Equal(1, desk.Records());
 
             // Once the event is read, the record is tied to that removal and no further read is made for it.
@@ -1431,12 +1436,12 @@ namespace VerifiedXCore.Tests
             foreach (var block in new[] { 0, 1, 3, 4_998, 60_000, 99_999 })
             {
                 reads = 0;
-                var first = await BaseBridgeService.FirstBlockAtOrAfterAsync(latest, times[block], TimeOf);
+                var first = await BaseRemovalProposal.FirstBlockAtOrAfterAsync(latest, times[block], TimeOf);
                 Assert.Equal(block / 3 * 3, (int)first);                         // the first of the blocks at that second
                 Assert.InRange(reads, 1, 18);
             }
-            Assert.Equal(3, (int)await BaseBridgeService.FirstBlockAtOrAfterAsync(latest, times[0] + 1, TimeOf));   // between two seconds: the next block
-            Assert.Equal(times.Length, (int)await BaseBridgeService.FirstBlockAtOrAfterAsync(latest, times[^1] + 1, TimeOf));   // later than every block
+            Assert.Equal(3, (int)await BaseRemovalProposal.FirstBlockAtOrAfterAsync(latest, times[0] + 1, TimeOf));   // between two seconds: the next block
+            Assert.Equal(times.Length, (int)await BaseRemovalProposal.FirstBlockAtOrAfterAsync(latest, times[^1] + 1, TimeOf));   // later than every block
         }
 
         /// <summary>

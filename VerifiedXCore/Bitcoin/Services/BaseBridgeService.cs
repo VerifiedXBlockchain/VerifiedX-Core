@@ -276,10 +276,7 @@ namespace VerifiedXCore.Bitcoin.Services
                 return new SignerView(validators, version, Math.Max(2, required), nonce, casters, requiredCasters);
             });
 
-        /// <summary>
-        /// The contract's pending proposeRemoval: the validators and casters it names, when it can run (0: none), and the
-        /// VFX block height it was proposed with (pendingRemovalHeight; null when not read).
-        /// </summary>
+        /// <summary>The contract's pending proposeRemoval: the validators and casters it names, and when it can run (0: none).</summary>
         public sealed record PendingRemoval(IReadOnlyList<string> Validators, IReadOnlyList<string> Casters, BigInteger Eta, BigInteger? VfxBlockHeight = null);
 
         private const string PENDING_REMOVAL_ABI = @"[
@@ -304,95 +301,11 @@ namespace VerifiedXCore.Bitcoin.Services
                 if (eta == 0) return new PendingRemoval(Array.Empty<string>(), Array.Empty<string>(), 0);
                 var validators = await c.GetFunction("getPendingRemovals").CallAsync<List<string>>(at);
                 var casters = await c.GetFunction("getPendingCasterRemovals").CallAsync<List<string>>(at);
+                // The VFX block height it was proposed with: part of what tells this proposal from another (BaseRemovalOverride).
                 var height = await c.GetFunction("pendingRemovalHeight").CallAsync<BigInteger>(at);
                 return new PendingRemoval(validators, casters, eta, height);
             });
             return pending.Answered ? pending.Value : null;
-        }
-
-        /// <summary>vBTCb.sol RemovalProposed: what a proposeRemoval was made with, and the admin nonce it used.</summary>
-        [Event("RemovalProposed")]
-        public class RemovalProposedEventDTO : IEventDTO
-        {
-            [Parameter("address[]", "validators", 1, false)]
-            public List<string> Validators { get; set; } = new();
-
-            [Parameter("address[]", "casters", 2, false)]
-            public List<string> Casters { get; set; } = new();
-
-            [Parameter("uint256", "vfxBlockHeight", 3, false)]
-            public BigInteger VfxBlockHeight { get; set; }
-
-            [Parameter("uint256", "eta", 4, false)]
-            public BigInteger Eta { get; set; }
-
-            [Parameter("uint256", "adminNonce", 5, false)]
-            public BigInteger AdminNonce { get; set; }
-        }
-
-        private const string UPGRADE_DELAY_ABI = @"[
-            {""inputs"":[],""name"":""upgradeDelay"",""outputs"":[{""internalType"":""uint256"",""name"":"""",""type"":""uint256""}],""stateMutability"":""view"",""type"":""function""}
-        ]";
-
-        /// <summary>Blocks read for the proposal's event from the first one of its second on (blocks may share a second).</summary>
-        internal const int ProposalEventBlocks = 16;
-
-        /// <summary>Stands in for the Base RPC in tests: the nonce a pending removal was proposed under, or null when it cannot be read.</summary>
-        internal static Func<PendingRemoval, Task<BigInteger?>>? ReadRemovalProposalNonceForTests;
-
-        /// <summary>
-        /// The admin nonce the pending removal was proposed under, from its RemovalProposed event, by the first RPC that
-        /// has it; null when none could give it. The contract keeps what a pending removal names but not the nonce it
-        /// used, and that nonce is what tells one proposal from another with the same lists.
-        /// </summary>
-        public static async Task<BigInteger?> ReadRemovalProposalNonceAsync(PendingRemoval pending)
-        {
-            if (ReadRemovalProposalNonceForTests != null) return await ReadRemovalProposalNonceForTests(pending);
-            if (!IsBridgeConfigured || pending.Eta == 0) return null;
-            foreach (var url in BaseRpc.Providers())
-            {
-                try
-                {
-                    if (await BaseRpc.AuthorizingAtAsync(url, (web3, _) => RemovalProposalNonceAsync(web3, pending.Eta)) is { } nonce) return nonce;
-                }
-                catch { }
-            }
-            return null;
-        }
-
-        /// <summary>
-        /// One provider's answer. A removal's eta is its block's time plus upgradeDelay(), so the proposing block is the one
-        /// at eta - upgradeDelay(): found by its time, then its RemovalProposed with that eta is read. Null when there is
-        /// none there (as when the delay was changed after the proposal).
-        /// </summary>
-        private static async Task<BigInteger?> RemovalProposalNonceAsync(Web3 web3, BigInteger eta)
-        {
-            var delay = await web3.Eth.GetContract(UPGRADE_DELAY_ABI, ContractAddress).GetFunction("upgradeDelay").CallAsync<BigInteger>();
-            var latest = (await web3.Eth.Blocks.GetBlockNumber.SendRequestAsync()).Value;
-            var first = await FirstBlockAtOrAfterAsync(latest, eta - delay, async number =>
-                (await web3.Eth.Blocks.GetBlockWithTransactionsHashesByNumber.SendRequestAsync(new Nethereum.RPC.Eth.DTOs.BlockParameter(new HexBigInteger(number)))).Timestamp.Value);
-            if (first > latest) return null;
-            var proposed = web3.Eth.GetEvent<RemovalProposedEventDTO>(ContractAddress);
-            var logs = await proposed.GetAllChangesAsync(proposed.CreateFilterInput(
-                new Nethereum.RPC.Eth.DTOs.BlockParameter(new HexBigInteger(first)),
-                new Nethereum.RPC.Eth.DTOs.BlockParameter(new HexBigInteger(BigInteger.Min(latest, first + ProposalEventBlocks - 1)))));
-            return logs.FirstOrDefault(l => l.Event.Eta == eta)?.Event.AdminNonce;
-        }
-
-        /// <summary>
-        /// The lowest block number in 0..<paramref name="latest"/> whose time is not before <paramref name="time"/>
-        /// (latest + 1 when every block is earlier), asking for as few block times as a search by halves needs.
-        /// </summary>
-        internal static async Task<BigInteger> FirstBlockAtOrAfterAsync(BigInteger latest, BigInteger time, Func<BigInteger, Task<BigInteger>> timeOf)
-        {
-            BigInteger low = 0, high = latest + 1;
-            while (low < high)
-            {
-                var middle = (low + high) / 2;
-                if (await timeOf(middle) < time) low = middle + 1;
-                else high = middle;
-            }
-            return low;
         }
 
         public sealed class BurnEventInfo
