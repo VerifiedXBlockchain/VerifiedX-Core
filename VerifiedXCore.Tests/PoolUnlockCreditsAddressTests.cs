@@ -119,7 +119,6 @@ namespace VerifiedXCore.Tests
         [Fact]
         public void ADestinationIsResolvedToTheAddressItNames()
         {
-            DbContext.Initialize();
             Assert.Equal(Minter.Address, BridgeTxRules.ResolveVfxDestination(Minter.Address));
             Assert.Equal(Minter.Address, BridgeTxRules.ResolveVfxDestination(Name));
             Assert.Null(BridgeTxRules.ResolveVfxDestination("nobody.vfx"));

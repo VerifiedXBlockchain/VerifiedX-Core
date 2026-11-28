@@ -311,10 +311,7 @@ namespace VerifiedXCore.Privacy
                     }
                 };
 
-                if (scStateTreiRec.SCStateTreiTokenizationTXes?.Count() > 0)
-                    scStateTreiRec.SCStateTreiTokenizationTXes.AddRange(leg);
-                else
-                    scStateTreiRec.SCStateTreiTokenizationTXes = leg;
+                VerifiedXCore.Bitcoin.Attestation.VaultLedgerStore.Append(scStateTreiRec, leg);
 
                 SmartContractStateTrei.UpdateSmartContract(scStateTreiRec);
             }
@@ -342,10 +339,7 @@ namespace VerifiedXCore.Privacy
                     }
                 };
 
-                if (scStateTreiRec.SCStateTreiTokenizationTXes?.Count() > 0)
-                    scStateTreiRec.SCStateTreiTokenizationTXes.AddRange(leg);
-                else
-                    scStateTreiRec.SCStateTreiTokenizationTXes = leg;
+                VerifiedXCore.Bitcoin.Attestation.VaultLedgerStore.Append(scStateTreiRec, leg);
 
                 SmartContractStateTrei.UpdateSmartContract(scStateTreiRec);
             }

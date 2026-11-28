@@ -308,9 +308,9 @@ namespace VerifiedXCore.Bitcoin.Services
                 return await SCLogUtility.LogAndReturn($"Owner address account not found.", "TokenizationService.TransferOwnership()", false);
 
 
-            if(scState.SCStateTreiTokenizationTXes != null)
+            if(VerifiedXCore.Bitcoin.Attestation.VaultLedgerStore.HasLedger(scState))
             {
-                var balances = scState.SCStateTreiTokenizationTXes.Where(x => x.FromAddress == account.Address || x.ToAddress == account.Address).ToList();
+                var balances = VerifiedXCore.Bitcoin.Attestation.VaultLedgerStore.Rows(scState).Where(x => x.FromAddress == account.Address || x.ToAddress == account.Address).ToList();
                 if (balances.Any())
                 {
                     var balance = balances.Sum(x => x.Amount);
@@ -444,9 +444,9 @@ namespace VerifiedXCore.Bitcoin.Services
                 if (scState.OwnerAddress == account.Address)
                     isOwner = true;
 
-                if(scState.SCStateTreiTokenizationTXes != null)
+                if(VerifiedXCore.Bitcoin.Attestation.VaultLedgerStore.HasLedger(scState))
                 {
-                    var balances = scState.SCStateTreiTokenizationTXes.Where(x => x.FromAddress == account.Address || x.ToAddress == account.Address).ToList();
+                    var balances = VerifiedXCore.Bitcoin.Attestation.VaultLedgerStore.Rows(scState).Where(x => x.FromAddress == account.Address || x.ToAddress == account.Address).ToList();
                     if(balances.Any() || isOwner)
                     {
                         var balance = balances.Sum(x => x.Amount);
@@ -639,9 +639,9 @@ namespace VerifiedXCore.Bitcoin.Services
                     if (scState.OwnerAddress == input.FromAddress)
                         isOwner = true;
 
-                    if (scState.SCStateTreiTokenizationTXes != null)
+                    if (VerifiedXCore.Bitcoin.Attestation.VaultLedgerStore.HasLedger(scState))
                     {
-                        var balances = scState.SCStateTreiTokenizationTXes.Where(x => x.FromAddress == account.Address || x.ToAddress == account.Address).ToList();
+                        var balances = VerifiedXCore.Bitcoin.Attestation.VaultLedgerStore.Rows(scState).Where(x => x.FromAddress == account.Address || x.ToAddress == account.Address).ToList();
                         if (balances.Any() || isOwner)
                         {
                             var balance = balances.Sum(x => x.Amount);
@@ -777,7 +777,7 @@ namespace VerifiedXCore.Bitcoin.Services
 
                 var isOwner = scState.OwnerAddress == vfxAddress ? true : false;
 
-                var vBTCBalances = scState.SCStateTreiTokenizationTXes?.Where(x => x.ToAddress == vfxAddress || x.FromAddress == vfxAddress).ToList();
+                var vBTCBalances = VerifiedXCore.Bitcoin.Attestation.VaultLedgerStore.HasLedger(scState) ? VerifiedXCore.Bitcoin.Attestation.VaultLedgerStore.Rows(scState).Where(x => x.ToAddress == vfxAddress || x.FromAddress == vfxAddress).ToList() : null;
 
                 if (vBTCBalances == null && !isOwner)
                     return await SCLogUtility.LogAndReturn($"Balances were null.", "TokenizationService.WithdrawalCoin()", false);
