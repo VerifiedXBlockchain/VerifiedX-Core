@@ -1207,7 +1207,7 @@ namespace VerifiedXCore.Tests
             public void BaseIs(FakeRemovalChain chain)
             {
                 BaseRemovalProposal.AttemptForTests = null;
-                (BaseBridgeService.BaseRpcUrl, BaseBridgeService.BaseRpcUrl2, BaseBridgeService.BaseRpcUrl3) = (chain.Rpc.Url, "", "");
+                (BaseBridgeService.BaseRpcUrl, BaseBridgeService.BaseRpcUrl2, BaseBridgeService.BaseRpcUrl3) = (chain.Rpc.Url, chain.Twin?.Rpc.Url ?? "", "");
                 BaseRpc.ForgetChainChecksForTests();
             }
 
@@ -1454,7 +1454,7 @@ namespace VerifiedXCore.Tests
         public async Task TwoProposalsInOneBlock_TheOperatorSignedTheSecond_ItIsNotVetoed()
         {
             const long block = 2_000_000;
-            using var chain = new FakeRemovalChain(Proxy, head: block + 90_000);
+            using var chain = FakeRemovalChain.WithTwin(Proxy, head: block + 90_000);   // two providers of the chain: the nonce is known once two have the same event
             using var desk = new NamedRemovals(this);
             desk.BaseIs(chain);
             var eta = new System.Numerics.BigInteger(FakeRemovalChain.TimeOf(block) + 48 * 3600);
@@ -1482,7 +1482,7 @@ namespace VerifiedXCore.Tests
         public async Task TwoProposalsInOneBlock_TheOperatorSignedTheFirst_ItsApprovalIsNotGivenToTheSecond()
         {
             const long block = 2_000_000;
-            using var chain = new FakeRemovalChain(Proxy, head: block + 90_000);
+            using var chain = FakeRemovalChain.WithTwin(Proxy, head: block + 90_000);   // two providers of the chain: the nonce is known once two have the same event
             using var desk = new NamedRemovals(this);
             desk.BaseIs(chain);
             var eta = new System.Numerics.BigInteger(FakeRemovalChain.TimeOf(block) + 48 * 3600);

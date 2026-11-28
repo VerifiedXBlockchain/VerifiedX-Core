@@ -15,7 +15,9 @@ namespace VerifiedXCore.Tests
     /// A Base provider on loopback (<see cref="FakeBaseRpc"/>) that serves what the search for a removal's
     /// RemovalProposed event reads: a chain that makes a block every two seconds from 1,700,000,000 on, up to its head; a
     /// block by number or tag with its time; upgradeDelay() as <see cref="Delay"/>; and logs by range, refusing a range
-    /// wider than <see cref="RangeCap"/>. It keeps every range of logs it was asked for.
+    /// wider than <see cref="RangeCap"/>. It keeps every range of logs it was asked for. With a <see cref="Twin"/>, a
+    /// second provider serves the same chain (the same delay, cap and events) and keeps its own count of what it was
+    /// asked: the nonce is known only once two providers have the same sighting of the event.
     /// </summary>
     internal sealed class FakeRemovalChain : IDisposable
     {
@@ -23,7 +25,10 @@ namespace VerifiedXCore.Tests
         private static readonly string EventTopic = "0x" + Sha3Keccack.Current.CalculateHash("RemovalProposed(address[],address[],uint256,uint256,uint256)");
 
         private readonly string _contract;
+        private readonly FakeRemovalChain? _like;
         public readonly FakeBaseRpc Rpc = new();
+        /// <summary>A second provider of the same chain, when this one was made with one.</summary>
+        public FakeRemovalChain? Twin { get; private set; }
         public long Delay = 48 * 3600;
         public int? RangeCap;
         public readonly List<(long From, long To)> LogRanges = new();
@@ -31,9 +36,18 @@ namespace VerifiedXCore.Tests
 
         public static long TimeOf(long block) => Genesis + block * BlockSeconds;
 
-        public FakeRemovalChain(string contract, long head)
+        /// <summary>A provider with a twin that serves the same chain.</summary>
+        public static FakeRemovalChain WithTwin(string contract, long head)
+        {
+            var chain = new FakeRemovalChain(contract, head);
+            chain.Twin = new FakeRemovalChain(contract, head, like: chain);
+            return chain;
+        }
+
+        public FakeRemovalChain(string contract, long head, FakeRemovalChain? like = null)
         {
             _contract = contract;
+            _like = like;
             Rpc.Head = head;
             Rpc.On = (method, args) =>
             {
@@ -49,11 +63,11 @@ namespace VerifiedXCore.Tests
                             ["parentHash"] = FakeBaseRpc.BlockHash("block" + (number - 1)), ["timestamp"] = FakeBaseRpc.Hex(TimeOf(number)), ["transactions"] = new JArray(),
                         };
                     case "eth_call":
-                        return "0x" + new BigInteger(Delay).ToString("x").PadLeft(64, '0');          // upgradeDelay(): the only call the search makes
+                        return "0x" + new BigInteger((_like ?? this).Delay).ToString("x").PadLeft(64, '0');   // upgradeDelay(): the only call the search makes
                     case "eth_getLogs":
                         var filter = (JObject)args[0]!;
                         var (from, to) = (Convert.ToInt64(filter["fromBlock"]!.ToString(), 16), Convert.ToInt64(filter["toBlock"]!.ToString(), 16));
-                        if (RangeCap is { } cap && to - from + 1 > cap)
+                        if ((_like ?? this).RangeCap is { } cap && to - from + 1 > cap)
                         {
                             lock (Refused) Refused.Add((from, to));
                             throw new InvalidOperationException($"eth_getLogs is limited to a {cap} range");
@@ -66,11 +80,25 @@ namespace VerifiedXCore.Tests
             };
         }
 
-        public void Dispose() => Rpc.Dispose();
+        public void Dispose()
+        {
+            Rpc.Dispose();
+            Twin?.Dispose();
+        }
+
+        /// <summary>Forgets every proposal's event, on the twin too.</summary>
+        public void ClearProposals()
+        {
+            lock (Rpc.Logs) Rpc.Logs.Clear();
+            Twin?.ClearProposals();
+        }
 
         /// <summary>A proposal's event, as the contract emits it, in <paramref name="block"/> at <paramref name="logIndex"/>.</summary>
         public void Proposed(long block, BigInteger eta, int underNonce, IEnumerable<string> validators, long vfxBlockHeight, int logIndex = 0, IEnumerable<string>? casters = null)
         {
+            validators = validators.ToList();
+            casters = casters?.ToList();
+            Twin?.Proposed(block, eta, underNonce, validators, vfxBlockHeight, logIndex, casters);
             var data = new ABIEncode().GetABIEncoded(
                 new ABIValue("address[]", validators.ToList()),
                 new ABIValue("address[]", (casters ?? Array.Empty<string>()).ToList()),
@@ -138,13 +166,20 @@ namespace VerifiedXCore.Tests
 
         private static long TimeOf(long block) => FakeRemovalChain.TimeOf(block);
 
-        private FakeRemovalChain NewProvider(long head)
+        /// <summary>
+        /// A provider of the chain, and with it a twin that serves the same (the nonce is known once two providers have
+        /// the same sighting of the event); <paramref name="alone"/> for one provider by itself.
+        /// </summary>
+        private FakeRemovalChain NewProvider(long head, bool alone = false)
         {
-            var provider = new FakeRemovalChain(Contract, head);
+            var provider = alone ? new FakeRemovalChain(Contract, head) : FakeRemovalChain.WithTwin(Contract, head);
             _providers.Add(provider);
-            if (_providers.Count == 1) BaseBridgeService.BaseRpcUrl = provider.Rpc.Url;
-            else if (_providers.Count == 2) BaseBridgeService.BaseRpcUrl2 = provider.Rpc.Url;
-            else BaseBridgeService.BaseRpcUrl3 = provider.Rpc.Url;
+            foreach (var url in alone ? new[] { provider.Rpc.Url } : new[] { provider.Rpc.Url, provider.Twin!.Rpc.Url })
+            {
+                if (BaseBridgeService.BaseRpcUrl == "") BaseBridgeService.BaseRpcUrl = url;
+                else if (BaseBridgeService.BaseRpcUrl2 == "") BaseBridgeService.BaseRpcUrl2 = url;
+                else BaseBridgeService.BaseRpcUrl3 = url;
+            }
             return provider;
         }
 
@@ -192,7 +227,7 @@ namespace VerifiedXCore.Tests
 
             // The same again where the two are alike in every field: the later one in the block is the pending one.
             BaseRemovalProposal.ForgetForTests();
-            lock (provider.Rpc.Logs) provider.Rpc.Logs.Clear();
+            provider.ClearProposals();
             provider.Proposed(ProposedIn, eta, underNonce: 72, Named, Height, logIndex: 5);      // served out of order
             provider.Proposed(ProposedIn, eta, underNonce: 70, Named, Height, logIndex: 1);
             await BaseRemovalProposal.SearchAsync(pending);
@@ -200,7 +235,7 @@ namespace VerifiedXCore.Tests
 
             // And where the later one is in a later block of the same second's window: read above the likely place too.
             BaseRemovalProposal.ForgetForTests();
-            lock (provider.Rpc.Logs) provider.Rpc.Logs.Clear();
+            provider.ClearProposals();
             provider.Delay = 3 * Day;                                                            // the earlier was proposed under three days,
             var longer = Pending(3 * Day, Named);
             provider.Proposed(ProposedIn, longer.Eta, underNonce: 70, Named, Height);
@@ -273,22 +308,27 @@ namespace VerifiedXCore.Tests
         }
 
         [Fact]
-        public async Task AProviderThatIsDown_IsPassedOver_AndWithEveryProviderDownNothingIsKnownOrThrown()
+        public async Task AProviderThatIsDown_IsPassedOver_AndWithFewerThanTwoAnsweringNothingIsKnownOrThrown()
         {
-            var (first, second) = (NewProvider(head: ProposedIn + 90_000), NewProvider(head: ProposedIn + 90_000));
+            var (first, second, third) = (NewProvider(head: ProposedIn + 90_000, alone: true), NewProvider(head: ProposedIn + 90_000, alone: true), NewProvider(head: ProposedIn + 90_000, alone: true));
             var pending = Pending(Hours48);
-            first.Proposed(ProposedIn, pending.Eta, 7, Named, Height);
-            second.Proposed(ProposedIn, pending.Eta, 7, Named, Height);
+            foreach (var provider in new[] { first, second, third }) provider.Proposed(ProposedIn, pending.Eta, 7, Named, Height);
 
-            first.Rpc.Down = second.Rpc.Down = true;
+            first.Rpc.Down = second.Rpc.Down = third.Rpc.Down = true;
             await BaseRemovalProposal.SearchAsync(pending);
             Assert.Null(BaseRemovalProposal.ProposedUnder(pending));
 
-            second.Rpc.Down = false;                                                     // the first is still down
+            second.Rpc.Down = false;                                                     // one provider answers: its sighting alone is not the answer
+            await BaseRemovalProposal.SearchAsync(pending);
+            Assert.Null(BaseRemovalProposal.ProposedUnder(pending));
+            Assert.Equal(1, second.LogReads);
+
+            third.Rpc.Down = false;                                                      // a second one has the same event: known (the first is still down)
             await BaseRemovalProposal.SearchAsync(pending);
             Assert.Equal(new BigInteger(7), BaseRemovalProposal.ProposedUnder(pending));
             Assert.Equal(0, first.LogReads);
-            Assert.Equal(1, second.LogReads);
+            Assert.Equal(1, second.LogReads);                                            // the one that had answered was not asked again
+            Assert.Equal(1, third.LogReads);
         }
 
         [Fact]

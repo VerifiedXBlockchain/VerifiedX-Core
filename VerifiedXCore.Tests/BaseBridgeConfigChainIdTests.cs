@@ -22,6 +22,10 @@ namespace VerifiedXCore.Tests
         private readonly List<Bitcoin.ElectrumX.ClientSettings> _priorClientSettings = Globals.ClientSettings;
         private readonly StunServer[] _priorStun = Globals.STUNServers.ToArray();
         private readonly int _priorChainId = BaseBridgeService.BaseChainId;
+        private readonly string _priorRpc = BaseBridgeService.BaseRpcUrl;
+        private readonly string _priorRpc2 = BaseBridgeService.BaseRpcUrl2;
+        private readonly string _priorRpc3 = BaseBridgeService.BaseRpcUrl3;
+        private readonly bool[] _priorLeftOut = BaseBridgeService.ProvidersLeftOut;
 
         public BaseBridgeConfigChainIdTests()
         {
@@ -37,6 +41,11 @@ namespace VerifiedXCore.Tests
             Globals.ClientSettings = _priorClientSettings;
             Globals.STUNServers = new ConcurrentBag<StunServer>(_priorStun);
             BaseBridgeService.BaseChainId = _priorChainId;
+            // Loading the bridge's configuration fills the provider settings a configuration left out.
+            BaseBridgeService.BaseRpcUrl = _priorRpc;
+            BaseBridgeService.BaseRpcUrl2 = _priorRpc2;
+            BaseBridgeService.BaseRpcUrl3 = _priorRpc3;
+            BaseBridgeService.ProvidersLeftOut = _priorLeftOut;
         }
 
         [Fact]

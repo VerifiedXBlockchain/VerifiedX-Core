@@ -166,12 +166,13 @@ namespace VerifiedXCore.Bitcoin.Services
         private static async Task<byte[]?> ReadCodeAsync(string address)
         {
             if (ReadCodeForTests != null) return await ReadCodeForTests(address);
-            var code = await BaseRpc.AuthorizingFirstAsync(async (web3, at) =>
+            // The code as BaseRpc.RequiredAgreement providers give it alike: no single provider's word on what an upgrade runs.
+            var code = await BaseRpc.AuthorizingAgreedAsync(async (web3, at) =>
             {
                 var hex = await web3.Eth.GetCode.SendRequestAsync(address, at);
                 var body = (hex ?? "").StartsWith("0x", StringComparison.OrdinalIgnoreCase) ? hex![2..] : hex ?? "";
                 return Convert.FromHexString(body);
-            });
+            }, bytes => Convert.ToHexString(bytes));
             return code.Answered ? code.Value : null;
         }
 

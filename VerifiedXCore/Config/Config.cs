@@ -598,7 +598,12 @@ namespace VerifiedXCore.Config
 		Globals.MaxBlockSizeBytes = config.MaxBlockSizeBytes;
 	Globals.BlockValidationTimeoutMs = config.BlockValidationTimeoutMs;
 
-		// Base Bridge: apply config.txt (primary RPC + optional fallbacks + contract)
+		// Base Bridge: apply config.txt (three providers + contract). A provider setting that is left out is noted, and
+		// filled from the network's default providers when the bridge's configuration is loaded (BaseBridgeService.LoadConfig).
+		Bitcoin.Services.BaseBridgeService.ProvidersLeftOut = new[]
+		{
+			string.IsNullOrWhiteSpace(config.BaseBridgeRpcUrl), string.IsNullOrWhiteSpace(config.BaseBridgeRpcUrl2), string.IsNullOrWhiteSpace(config.BaseBridgeRpcUrl3),
+		};
 		if (!string.IsNullOrWhiteSpace(config.BaseBridgeRpcUrl))
 			Bitcoin.Services.BaseBridgeService.BaseRpcUrl = config.BaseBridgeRpcUrl.Trim();
 		if (!string.IsNullOrWhiteSpace(config.BaseBridgeRpcUrl2))
@@ -672,7 +677,10 @@ namespace VerifiedXCore.Config
                     File.AppendAllText(path + "config.txt", Environment.NewLine + "AutoDownloadNFTAsset=true");
                     File.AppendAllText(path + "config.txt", Environment.NewLine + "BitcoinAddressFormat=1");
                     // Base Bridge V2 defaults (mainnet — set BaseBridgeContract to your proxy)
-                    File.AppendAllText(path + "config.txt", Environment.NewLine + "BaseBridgeRpcUrl=https://mainnet.base.org");
+                    // Three providers of Base, run by different parties: what decides something of value needs two that agree.
+                    File.AppendAllText(path + "config.txt", Environment.NewLine + "BaseBridgeRpcUrl=" + Bitcoin.Services.BaseRpc.MainnetDefaultProviders[0]
+                        + Environment.NewLine + "BaseBridgeRpcUrl2=" + Bitcoin.Services.BaseRpc.MainnetDefaultProviders[1]
+                        + Environment.NewLine + "BaseBridgeRpcUrl3=" + Bitcoin.Services.BaseRpc.MainnetDefaultProviders[2]);
                     File.AppendAllText(path + "config.txt", Environment.NewLine + "BaseBridgeContract=0x09096c6eBf35F0aDAEeC02D06a0dE77E790F132D");
                     File.AppendAllText(path + "config.txt", Environment.NewLine + "BaseBridgeChainId=8453");
                 }
@@ -686,7 +694,9 @@ namespace VerifiedXCore.Config
                     File.AppendAllText(path + "config.txt", Environment.NewLine + "AutoDownloadNFTAsset=true");
                     File.AppendAllText(path + "config.txt", Environment.NewLine + "BitcoinAddressFormat=1");
                     // Base Bridge V2 defaults (devnet — Base Sepolia)
-                    File.AppendAllText(path + "config.txt", Environment.NewLine + "BaseBridgeRpcUrl=https://sepolia.base.org");
+                    File.AppendAllText(path + "config.txt", Environment.NewLine + "BaseBridgeRpcUrl=" + Bitcoin.Services.BaseRpc.TestnetDefaultProviders[0]
+                        + Environment.NewLine + "BaseBridgeRpcUrl2=" + Bitcoin.Services.BaseRpc.TestnetDefaultProviders[1]
+                        + Environment.NewLine + "BaseBridgeRpcUrl3=" + Bitcoin.Services.BaseRpc.TestnetDefaultProviders[2]);
                     File.AppendAllText(path + "config.txt", Environment.NewLine + "BaseBridgeContract=0x19e41519CE1Dbe9cED703E406B8a6C728D2B7a30");
                     File.AppendAllText(path + "config.txt", Environment.NewLine + "BaseBridgeChainId=84532");
                 }
@@ -699,7 +709,9 @@ namespace VerifiedXCore.Config
                     File.AppendAllText(path + "config.txt", Environment.NewLine + "AutoDownloadNFTAsset=true");
                     File.AppendAllText(path + "config.txt", Environment.NewLine + "BitcoinAddressFormat=1");
                     // Base Bridge V2 defaults (testnet — Base Sepolia)
-                    File.AppendAllText(path + "config.txt", Environment.NewLine + "BaseBridgeRpcUrl=https://sepolia.base.org");
+                    File.AppendAllText(path + "config.txt", Environment.NewLine + "BaseBridgeRpcUrl=" + Bitcoin.Services.BaseRpc.TestnetDefaultProviders[0]
+                        + Environment.NewLine + "BaseBridgeRpcUrl2=" + Bitcoin.Services.BaseRpc.TestnetDefaultProviders[1]
+                        + Environment.NewLine + "BaseBridgeRpcUrl3=" + Bitcoin.Services.BaseRpc.TestnetDefaultProviders[2]);
                     File.AppendAllText(path + "config.txt", Environment.NewLine + "BaseBridgeContract=0x3669EE313f9Aa14b9eBb787DfdB0E97Ca67A0510");
                     File.AppendAllText(path + "config.txt", Environment.NewLine + "BaseBridgeChainId=84532");
                 }

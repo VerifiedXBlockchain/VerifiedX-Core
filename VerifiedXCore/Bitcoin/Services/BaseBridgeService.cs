@@ -24,6 +24,13 @@ namespace VerifiedXCore.Bitcoin.Services
         public static string BaseRpcUrl2 { get; set; } = "";
         public static string BaseRpcUrl3 { get; set; } = "";
 
+        /// <summary>
+        /// Which of the three provider settings config.txt left out (Config.ProcessConfig). <see cref="LoadConfig"/> fills
+        /// those from the network's default providers; a setting the operator wrote is not touched. All false until a
+        /// configuration has been read.
+        /// </summary>
+        internal static bool[] ProvidersLeftOut { get; set; } = new bool[3];
+
         private static string _contractAddress = "";
         /// <summary>VBTCb proxy contract on Base (multi-sig mint). Set via BaseBridgeContract in config.txt.</summary>
         public static string ContractAddress
@@ -159,13 +166,22 @@ namespace VerifiedXCore.Bitcoin.Services
         public static void LoadConfig()
         {
             Globals.VBTCbContractAddress = ContractAddress.Trim();
+            // A provider setting the configuration left out takes one of the network's default providers, so a node
+            // whose config.txt names one provider (or none) still has three to ask. Nothing is written to config.txt.
+            var providers = BaseRpc.WithDefaults(new[]
+            {
+                ProvidersLeftOut[0] ? null : BaseRpcUrl, ProvidersLeftOut[1] ? null : BaseRpcUrl2, ProvidersLeftOut[2] ? null : BaseRpcUrl3,
+            });
+            if (ProvidersLeftOut[0]) BaseRpcUrl = providers[0];
+            if (ProvidersLeftOut[1]) BaseRpcUrl2 = providers[1];
+            if (ProvidersLeftOut[2]) BaseRpcUrl3 = providers[2];
             // The network decides which Base chain its bridge is on; a configured id that differs was refused
             // (Config.ProcessConfig, BaseRpc.AcceptsConfiguredChainId).
             BaseChainId = (int)Globals.BaseEvmChainId;
 
             if (IsBridgeConfigured)
             {
-                LogUtility.Log($"[BaseBridge] Bridge configured. RPC: {BaseRpcUrl}, Contract: {ContractAddress}, ChainId: {BaseChainId}, Network: {BaseNetworkDisplayName}",
+                LogUtility.Log($"[BaseBridge] Bridge configured. Providers: {string.Join(", ", BaseRpc.Providers().Select(BaseRpc.NameOf))}, Contract: {ContractAddress}, ChainId: {BaseChainId}, Network: {BaseNetworkDisplayName}",
                     "BaseBridgeService.LoadConfig");
             }
             else if (CanReadEth)
@@ -220,7 +236,6 @@ namespace VerifiedXCore.Bitcoin.Services
         /// <summary>Stands in for the Base RPC in tests.</summary>
         internal static Func<Task<SignerView?>>? ReadSignerViewForTests;
 
-        /// <summary>The contract's <see cref="SignerView"/> from the first RPC that answers; null when none does.</summary>
         /// <summary>
         /// Whether a failed contract call is the contract reverting (which is how a contract without the function
         /// answers) and not the provider failing to answer: a revert the client decoded, or an RPC error that says the
@@ -232,28 +247,31 @@ namespace VerifiedXCore.Bitcoin.Services
             || (ex is Nethereum.JsonRpc.Client.RpcResponseException rpc
                 && ((rpc.RpcError?.Message ?? rpc.Message ?? "").IndexOf("revert", StringComparison.OrdinalIgnoreCase) >= 0 || rpc.RpcError?.Code == 3));
 
+        /// <summary>
+        /// The contract's <see cref="SignerView"/> as BaseRpc.RequiredAgreement providers give it alike, each at its finalized
+        /// block; null while fewer do. No single provider's word decides who the contract's signers are.
+        /// </summary>
         public static async Task<SignerView?> ReadSignerViewAsync()
         {
             if (ReadSignerViewForTests != null) return await ReadSignerViewForTests();
             if (!IsBridgeConfigured) return null;
-            return await ReadSignerViewFromAsync(RpcUrlCandidates(), ReadSignerViewAtAsync);
+            return await ReadSignerViewFromAsync(BaseRpc.DistinctProviders(), ReadSignerViewAtAsync);
         }
 
-        /// <summary>The signer view from the first provider that gives one: a provider whose read fails is passed over. Null when none gives one.</summary>
+        /// <summary>
+        /// The signer view that BaseRpc.RequiredAgreement of the providers give alike. A provider whose read fails gives
+        /// none and is passed over; one provider's view alone is not taken. Null while fewer agree.
+        /// </summary>
         internal static async Task<SignerView?> ReadSignerViewFromAsync(IEnumerable<string> providers, Func<string, Task<SignerView>> read)
         {
-            foreach (var url in providers)
-            {
-                try { return await read(url); }
-                catch { }
-            }
-            return null;
+            var view = await BaseRpc.AgreedAmongAsync(providers, read, SameView);
+            return view.Answered ? view.Value : null;
         }
 
         /// <summary>
         /// The contract's message version as one provider reports it: 3 when the call reverts, which is how a contract
         /// without the function (V3) answers. Any other failure of the call is the provider's and is thrown, so that
-        /// provider's read fails and the next is asked: it is not taken for a V3 contract.
+        /// provider's read fails and gives no view: it is not taken for a V3 contract.
         /// </summary>
         internal static async Task<int> ReadMessageVersionAsync(Func<Task<BigInteger>> call)
         {
@@ -261,7 +279,7 @@ namespace VerifiedXCore.Bitcoin.Services
             catch (Exception ex) when (SaysTheContractReverted(ex)) { return 3; }
         }
 
-        /// <summary>One provider's signer view: an authorizing read, through the layer (the provider must be on this network's Base chain).</summary>
+        /// <summary>One provider's signer view: an authorizing read, through the layer (the provider must be on this network's Base chain), at that provider's finalized block.</summary>
         private static Task<SignerView> ReadSignerViewAtAsync(string url) =>
             BaseRpc.AuthorizingAtAsync(url, async (web3, at) =>
             {
@@ -276,6 +294,11 @@ namespace VerifiedXCore.Bitcoin.Services
                 return new SignerView(validators, version, Math.Max(2, required), nonce, casters, requiredCasters);
             });
 
+        /// <summary>What makes two providers' signer views the same one: every member in the contract's order, and every number.</summary>
+        private static string SameView(SignerView v) =>
+            string.Join(",", v.Validators.Select(a => (a ?? "").ToLowerInvariant())) + "|" + v.MessageVersion + "|" + v.RequiredMintSignatures + "|" + v.AdminNonce
+            + "|" + (v.Casters == null ? "-" : string.Join(",", v.Casters.Select(a => (a ?? "").ToLowerInvariant()))) + "|" + v.RequiredCasterSignatures;
+
         /// <summary>The contract's pending proposeRemoval: the validators and casters it names, and when it can run (0: none).</summary>
         public sealed record PendingRemoval(IReadOnlyList<string> Validators, IReadOnlyList<string> Casters, BigInteger Eta, BigInteger? VfxBlockHeight = null);
 
@@ -289,12 +312,15 @@ namespace VerifiedXCore.Bitcoin.Services
         /// <summary>Stands in for the Base RPC in tests.</summary>
         internal static Func<Task<PendingRemoval?>>? ReadPendingRemovalForTests;
 
-        /// <summary>The V4 contract's pending removal from the first RPC that answers; null when none does.</summary>
+        /// <summary>
+        /// The V4 contract's pending removal as BaseRpc.RequiredAgreement providers give it alike; null while fewer do. No
+        /// single provider can hide a pending removal or make one up.
+        /// </summary>
         public static async Task<PendingRemoval?> ReadPendingRemovalAsync()
         {
             if (ReadPendingRemovalForTests != null) return await ReadPendingRemovalForTests();
             if (!IsBridgeConfigured) return null;
-            var pending = await BaseRpc.AuthorizingFirstAsync(async (web3, at) =>
+            var pending = await BaseRpc.AuthorizingAgreedAsync(async (web3, at) =>
             {
                 var c = web3.Eth.GetContract(PENDING_REMOVAL_ABI, ContractAddress);
                 var eta = await c.GetFunction("pendingRemovalEta").CallAsync<BigInteger>(at);
@@ -304,7 +330,7 @@ namespace VerifiedXCore.Bitcoin.Services
                 // The VFX block height it was proposed with: part of what tells this proposal from another (BaseRemovalOverride).
                 var height = await c.GetFunction("pendingRemovalHeight").CallAsync<BigInteger>(at);
                 return new PendingRemoval(validators, casters, eta, height);
-            });
+            }, p => p.Eta + "|" + p.VfxBlockHeight + "|" + string.Join(",", p.Validators.Select(a => (a ?? "").ToLowerInvariant())) + "|" + string.Join(",", p.Casters.Select(a => (a ?? "").ToLowerInvariant())));
             return pending.Answered ? pending.Value : null;
         }
 
@@ -383,19 +409,50 @@ namespace VerifiedXCore.Bitcoin.Services
             if (!IsBridgeConfigured) return (false, "Bridge not configured");
             if (string.IsNullOrWhiteSpace(txHash)) return (false, "Empty tx hash");
             var h = NormalizeTxHash(txHash);
-            var verdict = await BaseRpc.AuthorizingAskAsync<(bool Ok, string Reason)>(async (web3, _) =>
+            var verdict = await BaseRpc.AuthorizingReceiptAsync<(bool Ok, string Reason)>(h, r =>
             {
-                var r = await web3.Eth.Transactions.GetTransactionReceipt.SendRequestAsync(h);
-                if (r == null) return BaseAnswer<(bool Ok, string Reason)>.No("receipt not found");
                 if (r.Status?.Value != 1) return BaseAnswer<(bool Ok, string Reason)>.Yes((false, "Base transaction did not succeed"));
                 // Key on the EMITTING address, not receipt.to: a burn made through a smart-contract
                 // wallet (e.g. a Safe) has a different `to` but its logs still come from the bridge.
                 if (!ReceiptHasLogFromContract(r))
                     return BaseAnswer<(bool Ok, string Reason)>.Yes((false, "Base transaction emitted no event from the bridge contract"));
                 return BaseAnswer<(bool Ok, string Reason)>.Yes((true, ""));
-            });
-            return verdict.Answered ? verdict.Value : (false, $"Could not read Base receipt: {verdict.Reason}");
+            }, v => v.Ok + "|" + v.Reason);
+            return verdict.Answered ? verdict.Value : (false, $"{NotYetOnBase}: {verdict.Reason}");
         }
+
+        /// <summary>What Base says of a burn (<see cref="ReadBurnAsync"/>).</summary>
+        public enum BurnVerdict
+        {
+            /// <summary>A final receipt holds the burn: <see cref="BurnRead.Info"/> is what was burned.</summary>
+            Burned,
+            /// <summary>A final receipt answers that the transaction is not this burn.</summary>
+            NotABurn,
+            /// <summary>
+            /// No answer yet: no provider was reached, none has the transaction, or its block is not final on Base. Not
+            /// a verdict on the burn; it is asked again later.
+            /// </summary>
+            NotYet,
+        }
+
+        /// <summary>A burn as read on Base: the verdict, the burn when there is one, and the reason when there is none.</summary>
+        public readonly record struct BurnRead(BurnVerdict Verdict, BurnEventInfo? Info, string Reason)
+        {
+            public bool Ok => Verdict == BurnVerdict.Burned;
+            public bool NotYet => Verdict == BurnVerdict.NotYet;
+        }
+
+        /// <summary>
+        /// How every reason begins when Base has given no final answer about a transaction (<see cref="BurnVerdict.NotYet"/>,
+        /// and the same for <see cref="HasSuccessfulReceiptToContractAsync"/>). A transaction refused for it carries the
+        /// words in its refusal, which is how the outcome reaches a caller that has only the refusal's text
+        /// (<see cref="IsNotYet"/>).
+        /// </summary>
+        public const string NotYetOnBase = "Could not read Base receipt";
+
+        /// <summary>Whether a refusal says Base has given no final answer yet, as distinct from Base answering no.</summary>
+        public static bool IsNotYet(string? reason) =>
+            reason != null && reason.IndexOf(NotYetOnBase, StringComparison.OrdinalIgnoreCase) >= 0;
 
         /// <summary>
         /// Reads the burn event from a Base receipt: the tx must have succeeded, been sent to the
@@ -408,15 +465,34 @@ namespace VerifiedXCore.Bitcoin.Services
 
         public static async Task<(bool Ok, BurnEventInfo? Info, string Reason)> TryGetBurnEventAsync(string txHash, bool vfxExit)
         {
-            if (BurnEventsForTests != null) return BurnEventsForTests(txHash, vfxExit);
-            if (!IsBridgeConfigured) return (false, null, "Bridge not configured");
-            if (string.IsNullOrWhiteSpace(txHash)) return (false, null, "Empty tx hash");
+            var read = await ReadBurnAsync(txHash, vfxExit);
+            return (read.Ok, read.Info, read.Reason);
+        }
+
+        /// <summary>What the test seam's answer reads as: its texts for "not yet" are the ones the look-up gave before it had a verdict of its own.</summary>
+        private static BurnRead FromSeam((bool Ok, BurnEventInfo? Info, string Reason) answer) =>
+            new(answer.Ok ? BurnVerdict.Burned
+                : string.Equals(answer.Reason, PositionBeforeRules, StringComparison.Ordinal)
+                  || (answer.Reason ?? "").StartsWith("Could not read", StringComparison.OrdinalIgnoreCase)
+                  || (answer.Reason ?? "").IndexOf(BaseRpc.ReceiptNotFound, StringComparison.OrdinalIgnoreCase) >= 0 ? BurnVerdict.NotYet
+                : BurnVerdict.NotABurn, answer.Info, answer.Reason ?? "");
+
+        /// <summary>
+        /// The burn a burn id names, as Base holds it for good: read only from a receipt in a block that is final on Base
+        /// and still on its chain, and only as BaseRpc.RequiredAgreement providers give it alike, the same burn in the same
+        /// block (<see cref="BaseRpc.AuthorizingReceiptAsync"/>). <see cref="BurnVerdict.NotYet"/> until then (one
+        /// provider's receipt is no answer, whether it holds a burn or says there is none), and while the positioned id
+        /// it is asked by is not yet in force (<see cref="PositionBeforeRules"/>).
+        /// </summary>
+        public static async Task<BurnRead> ReadBurnAsync(string txHash, bool vfxExit)
+        {
+            if (BurnEventsForTests != null) return FromSeam(BurnEventsForTests(txHash, vfxExit));
+            if (!IsBridgeConfigured) return new BurnRead(BurnVerdict.NotABurn, null, "Bridge not configured");
+            if (string.IsNullOrWhiteSpace(txHash)) return new BurnRead(BurnVerdict.NotABurn, null, "Empty tx hash");
             var h = NormalizeTxHash(txHash);
-            var verdict = await BaseRpc.AuthorizingAskAsync<(bool Ok, BurnEventInfo? Info, string Reason)>(async (web3, _) =>
+            var verdict = await BaseRpc.AuthorizingReceiptAsync<BurnRead>(h, r =>
             {
-                var r = await web3.Eth.Transactions.GetTransactionReceipt.SendRequestAsync(h);
-                if (r == null) return BaseAnswer<(bool Ok, BurnEventInfo? Info, string Reason)>.No("receipt not found");
-                if (r.Status?.Value != 1) return BaseAnswer<(bool Ok, BurnEventInfo? Info, string Reason)>.Yes((false, null, "Base transaction did not succeed"));
+                if (r.Status?.Value != 1) return BaseAnswer<BurnRead>.Yes(new BurnRead(BurnVerdict.NotABurn, null, "Base transaction did not succeed"));
                 // No receipt.to check: the event decoders below filter on the emitting log address,
                 // which is what proves the burn came from the bridge contract (smart-contract
                 // wallets call it indirectly).
@@ -426,7 +502,7 @@ namespace VerifiedXCore.Bitcoin.Services
                 foreach (var ev in r.DecodeAllEvents<BaseBridgeExitWatchService.VfxExitBurnedEventDTO>())
                 {
                     if (!string.Equals(ev.Log.Address, ContractAddress, StringComparison.OrdinalIgnoreCase)) continue;
-                    if (!BaseRpc.IsExpectedChain(ev.Event.ChainId)) return BaseAnswer<(bool Ok, BurnEventInfo? Info, string Reason)>.No(BurnOnAnotherChain);
+                    if (!BaseRpc.IsExpectedChain(ev.Event.ChainId)) return BaseAnswer<BurnRead>.No(BurnOnAnotherChain);
                     var amt = ev.Event.Amount;
                     burns.Add((ev.Log.LogIndex?.Value ?? BigInteger.Zero, true, amt <= 0 || amt > long.MaxValue ? null
                         : new BurnEventInfo { AmountSats = (long)amt, Destination = ev.Event.VfxDestinationAddress?.Trim() ?? "", Burner = ev.Event.Burner ?? "" }));
@@ -434,15 +510,17 @@ namespace VerifiedXCore.Bitcoin.Services
                 foreach (var ev in r.DecodeAllEvents<BaseBridgeExitWatchService.BTCExitBurnedEventDTO>())
                 {
                     if (!string.Equals(ev.Log.Address, ContractAddress, StringComparison.OrdinalIgnoreCase)) continue;
-                    if (!BaseRpc.IsExpectedChain(ev.Event.ChainId)) return BaseAnswer<(bool Ok, BurnEventInfo? Info, string Reason)>.No(BurnOnAnotherChain);
+                    if (!BaseRpc.IsExpectedChain(ev.Event.ChainId)) return BaseAnswer<BurnRead>.No(BurnOnAnotherChain);
                     var amt = ev.Event.Amount;
                     burns.Add((ev.Log.LogIndex?.Value ?? BigInteger.Zero, false, amt <= 0 || amt > long.MaxValue ? null
                         : new BurnEventInfo { AmountSats = (long)amt, Destination = ev.Event.BtcDestination?.Trim() ?? "", Burner = ev.Event.Burner ?? "" }));
                 }
-                return BaseAnswer<(bool Ok, BurnEventInfo? Info, string Reason)>.Yes(
-                    BurnAt(burns.OrderBy(b => b.LogIndex).Select(b => (b.Vfx, b.Info)).ToList(), SplitBurnId(txHash).Position, vfxExit));
-            });
-            return verdict.Answered ? verdict.Value : (false, null, $"Could not read Base receipt: {verdict.Reason}");
+                var (ok, info, reason) = BurnAt(burns.OrderBy(b => b.LogIndex).Select(b => (b.Vfx, b.Info)).ToList(), SplitBurnId(txHash).Position, vfxExit);
+                // A positioned id met before its rules is asked again once they are reached: not a verdict on the burn.
+                var notYet = !ok && string.Equals(reason, PositionBeforeRules, StringComparison.Ordinal);
+                return BaseAnswer<BurnRead>.Yes(new BurnRead(ok ? BurnVerdict.Burned : notYet ? BurnVerdict.NotYet : BurnVerdict.NotABurn, info, reason));
+            }, b => b.Verdict + "|" + b.Info?.AmountSats + "|" + b.Info?.Destination + "|" + b.Info?.Burner?.ToLowerInvariant() + "|" + b.Reason);
+            return verdict.Answered ? verdict.Value : new BurnRead(BurnVerdict.NotYet, null, $"{NotYetOnBase}: {verdict.Reason}");
         }
 
         /// <summary>
@@ -497,11 +575,15 @@ namespace VerifiedXCore.Bitcoin.Services
             return false;
         }
 
-        /// <summary>Best-effort: confirms a Base tx receipt exists and succeeded (legacy, pre-gate).</summary>
+        /// <summary>
+        /// Best-effort: confirms a Base tx receipt exists and succeeded (legacy, pre-gate). The rule it serves is also
+        /// judged in blocks below Globals.BridgeBurnBindingHeight, so it reads as it always did: the newest block, no
+        /// finality.
+        /// </summary>
         public static async Task<bool> HasSuccessfulReceiptAsync(string txHash)
         {
             if (string.IsNullOrWhiteSpace(txHash)) return false;
-            var succeeded = await BaseRpc.AuthorizingAskAsync<bool>(async (web3, _) =>
+            var succeeded = await BaseRpc.AuthorizingNewestAskAsync<bool>(async web3 =>
             {
                 var r = await web3.Eth.Transactions.GetTransactionReceipt.SendRequestAsync(txHash);
                 return r != null && r.Status?.Value == 1 ? BaseAnswer<bool>.Yes(true) : BaseAnswer<bool>.No("no successful receipt");

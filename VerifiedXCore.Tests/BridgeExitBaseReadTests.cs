@@ -92,6 +92,14 @@ namespace VerifiedXCore.Tests
             return p;
         }
 
+        /// <summary><paramref name="count"/> providers that serve the same chain, configured as the node's.</summary>
+        private FakeBaseRpc[] Providers(int count)
+        {
+            var all = Enumerable.Range(0, count).Select(_ => Provider()).ToArray();
+            Configure(all);
+            return all;
+        }
+
         private static void Configure(params FakeBaseRpc[] providers)
         {
             BaseBridgeService.BaseRpcUrl = providers.Length > 0 ? providers[0].Url : "";
@@ -195,40 +203,39 @@ namespace VerifiedXCore.Tests
         {
             await Start();
             var now = TimeUtil.GetTime();
-            var provider = Provider();
-            Configure(provider);
+            var all = Providers(2);
             var poolBurn = NewBurn();
             var exitBurn = NewBurn();
-            provider.AddBurn(poolBurn, Contract, vfxExit: true, 400_000, Minter.Address);
-            provider.AddBurn(exitBurn, Contract, vfxExit: false, 400_000, BtcDest);
+            all.AddBurn(poolBurn, Contract, vfxExit: true, 400_000, Minter.Address);
+            all.AddBurn(exitBurn, Contract, vfxExit: false, 400_000, BtcDest);
             var unlock = Unlock(poolBurn, 0.004M, Lock(0.004M), now);
             var exit = Exit(exitBurn, 0.004M, Lock(0.004M), now);
 
             Accepted(await TransactionValidatorService.VerifyTX(unlock));
             Accepted(await TransactionValidatorService.VerifyTX(exit));
-            Assert.Equal(2, provider.CallsTo("eth_getTransactionReceipt"));
+            Assert.All(all, p => Assert.Equal(2, p.CallsTo("eth_getTransactionReceipt")));
 
             // As a block's transactions: accepted, and nothing is asked of the provider (not even its chain id).
-            provider.ForgetCalls();
+            foreach (var p in all) p.ForgetCalls();
             BaseRpc.ForgetChainChecksForTests();
             Accepted(await InBlock(unlock, Tip + 1, now));
             Accepted(await InBlock(exit, Tip + 1, now));
-            Assert.Equal(0, provider.TotalCalls);
+            Assert.All(all, p => Assert.Equal(0, p.TotalCalls));
 
             // The provider no longer has the burns, then does not answer at all: a block's verdict is the same and
             // still asks nothing, while admission, which reads Base, refuses.
-            provider.Receipts.Clear();
+            foreach (var p in all) p.Receipts.Clear();
             Accepted(await InBlock(unlock, Tip + 1, now));
             Accepted(await InBlock(exit, Tip + 1, now));
-            Assert.Equal(0, provider.TotalCalls);
+            Assert.All(all, p => Assert.Equal(0, p.TotalCalls));
             Refused(await TransactionValidatorService.VerifyTX(unlock), "could not be verified on Base");
             Refused(await TransactionValidatorService.VerifyTX(exit), "could not be verified");
-            provider.Down = true;
-            provider.ForgetCalls();
+            foreach (var p in all) p.Down = true;
+            foreach (var p in all) p.ForgetCalls();
             BaseRpc.ForgetChainChecksForTests();
             Accepted(await InBlock(unlock, Tip + 1, now));
             Accepted(await InBlock(exit, Tip + 1, now));
-            Assert.Equal(0, provider.TotalCalls);
+            Assert.All(all, p => Assert.Equal(0, p.TotalCalls));
         }
 
         /// <summary>
@@ -242,7 +249,8 @@ namespace VerifiedXCore.Tests
             var now = TimeUtil.GetTime();
             var elsewhere = Provider(OtherChain);
             var onBase = Provider();
-            Configure(elsewhere, onBase);
+            var alsoOnBase = Provider();
+            Configure(elsewhere, onBase, alsoOnBase);
             var burn = NewBurn();
             elsewhere.AddBurn(burn, Contract, vfxExit: true, 400_000, Minter.Address, chainId: Globals.BaseEvmChainId);
             var unlock = Unlock(burn, 0.004M, Lock(0.004M), now);
@@ -253,8 +261,8 @@ namespace VerifiedXCore.Tests
             Assert.Equal(0, elsewhere.CallsTo("eth_getTransactionReceipt"));
             Assert.True(onBase.CallsTo("eth_getTransactionReceipt") >= 2);
 
-            // Once a provider on Base has the burn, the same exit is admitted on both paths.
-            onBase.AddBurn(burn, Contract, vfxExit: true, 400_000, Minter.Address);
+            // Once the providers on Base have the burn, the same exit is admitted on both paths.
+            new[] { onBase, alsoOnBase }.AddBurn(burn, Contract, vfxExit: true, 400_000, Minter.Address);
             Accepted(await TransactionValidatorService.VerifyTX(unlock));
             Assert.Equal("Success", (await Raw(unlock))["Result"]?.ToString());
             Assert.Equal(0, elsewhere.CallsTo("eth_getTransactionReceipt"));
@@ -266,20 +274,158 @@ namespace VerifiedXCore.Tests
         {
             await Start();
             var now = TimeUtil.GetTime();
-            var provider = Provider();
-            Configure(provider);
+            var all = Providers(2);
             var burn = NewBurn();
-            provider.AddBurn(burn, Contract, vfxExit: false, 400_000, BtcDest, chainId: OtherChain);
+            all.AddBurn(burn, Contract, vfxExit: false, 400_000, BtcDest, chainId: OtherChain);
             var exit = Exit(burn, 0.004M, Lock(0.004M), now);
 
             Refused(await TransactionValidatorService.VerifyTX(exit), BaseBridgeService.BurnOnAnotherChain);
             Assert.Equal("Fail", (await Raw(exit))["Result"]?.ToString());
             Assert.Empty(TransactionData.GetPool().FindAll());
 
-            provider.Receipts.Clear();
-            provider.AddBurn(burn, Contract, vfxExit: false, 400_000, BtcDest);
+            foreach (var p in all) p.Receipts.Clear();
+            all.AddBurn(burn, Contract, vfxExit: false, 400_000, BtcDest);
             Accepted(await TransactionValidatorService.VerifyTX(exit));
             Assert.Equal("Success", (await Raw(exit))["Result"]?.ToString());
+        }
+
+        /// <summary>
+        /// A burn in a block that is not final on Base yet admits no exit, on the handler's own send, on VerifyTX and on
+        /// the raw route. It is "not yet", not "no": the handler's burn goes back to be planned again, and once the
+        /// block is final the same exit is sent. A block's verdict does not depend on it.
+        /// </summary>
+        [Fact]
+        public async Task AnExitWhoseBurnIsNotFinalOnBaseYet_IsNotSent_AndItsBurnIsPlannedAgain()
+        {
+            await Start();
+            AccountData.GetAccounts().InsertSafe(new Account { Address = Handler.Address, PublicKey = Handler.Pub, PrivateKey = "0" + Handler.Key.secret.ToString("x") });
+            var now = TimeUtil.GetTime();
+            var all = Providers(2);
+            all.Finalize(890);
+            var burn = NewBurn();
+            all.AddBurn(burn, Contract, vfxExit: false, 400_000, BtcDest, blockNumber: 900);
+            var lockId = Lock(0.004M);
+            var votes = Votes(burn, "BTC_EXIT", 400_000, BtcDest, now);
+            var allocations = new List<PoolUnlockAllocation> { new() { LockId = lockId, SmartContractUID = Vault, UnlockAmount = 0.004M } };
+
+            var (sent, why) = await VBTCService.CreateBridgeExitToBTCTx(Handler.Address, 0.004M, BtcDest, burn, allocations, null, votes);
+            Assert.False(sent);
+            Assert.Contains(BaseRpc.ReceiptNotFinal, why);
+            Assert.True(BaseBridgeService.IsNotYet(why), why);
+            Assert.Empty(TransactionData.GetPool().FindAll());
+
+            // What the caster makes of an exit not sent for that reason: its burn is planned again, not given up.
+            var record = new BurnExitConsensusService.ProcessedBurnRecord
+            {
+                BaseBurnTxHash = burn, ExitType = BurnExitType.BtcExit, Status = BurnExitConsensusService.BurnExitStatus.ConsensusReached,
+                Amount = 0.004M, BtcDestination = BtcDest, DetectedAtBlock = Tip, FieldsFromBase = true,
+            };
+            BurnExitConsensusService.NoteExitNotSent(record, why);
+            Assert.Equal(BurnExitConsensusService.BurnExitStatus.Pending, record.Status);
+            Assert.True(record.NextAttemptAt > TimeUtil.GetTime());
+
+            var exit = Exit(burn, 0.004M, lockId, now);
+            Refused(await TransactionValidatorService.VerifyTX(exit), BaseRpc.ReceiptNotFinal);
+            Assert.Equal("Fail", (await Raw(exit))["Result"]?.ToString());
+            Assert.Empty(TransactionData.GetPool().FindAll());
+            Accepted(await InBlock(exit, Tip + 1, now));
+
+            // Base finalizes the burn's block: the handler's exit is sent.
+            all.Finalize(900);
+            (sent, why) = await VBTCService.CreateBridgeExitToBTCTx(Handler.Address, 0.004M, BtcDest, burn, allocations, null, votes);
+            Assert.True(sent, why);
+            Assert.Single(TransactionData.GetPool().FindAll());
+        }
+
+        /// <summary>
+        /// Every provider serves this network's Base chain; one of them serves a burn, log and receipt in a final block,
+        /// that the other two do not have. An exit for it is not admitted and nothing is paid for it: not on the
+        /// handler's own send, not on VerifyTX, not on the raw route, and block building does not take it from the pool.
+        /// It is "not yet": once two providers serve the burn alike, the same exit is admitted.
+        /// </summary>
+        [Fact]
+        public async Task AnExitForABurnOnlyOneProviderServes_IsNotAdmitted_AndIsNotPaid()
+        {
+            await Start();
+            AccountData.GetAccounts().InsertSafe(new Account { Address = Handler.Address, PublicKey = Handler.Pub, PrivateKey = "0" + Handler.Key.secret.ToString("x") });
+            var now = TimeUtil.GetTime();
+            var all = Providers(3);
+            var poolBurn = NewBurn();
+            var exitBurn = NewBurn();
+            all[0].AddBurn(poolBurn, Contract, vfxExit: true, 400_000, Minter.Address);
+            all[0].AddBurn(exitBurn, Contract, vfxExit: false, 400_000, BtcDest);
+            var poolLock = Lock(0.004M);
+            var exitLock = Lock(0.004M);
+            var unlock = Unlock(poolBurn, 0.004M, poolLock, now);
+            var exit = Exit(exitBurn, 0.004M, exitLock, now);
+            var allocations = new List<PoolUnlockAllocation> { new() { LockId = exitLock, SmartContractUID = Vault, UnlockAmount = 0.004M } };
+
+            Refused(await TransactionValidatorService.VerifyTX(unlock), BaseRpc.NoAgreement);
+            Refused(await TransactionValidatorService.VerifyTX(exit), BaseRpc.NoAgreement);
+            Assert.Equal("Fail", (await Raw(unlock))["Result"]?.ToString());
+            Assert.Equal("Fail", (await Raw(exit))["Result"]?.ToString());
+            var (sent, why) = await VBTCService.CreateBridgeExitToBTCTx(Handler.Address, 0.004M, BtcDest, exitBurn, allocations, null, Votes(exitBurn, "BTC_EXIT", 400_000, BtcDest, now));
+            Assert.False(sent);
+            Assert.True(BaseBridgeService.IsNotYet(why), why);
+            Assert.Empty(TransactionData.GetPool().FindAll());
+
+            // As a peer's delivery left them in the pool (admitted elsewhere): block building proposes neither.
+            unlock.TransactionRating = TransactionRating.A;
+            exit.TransactionRating = TransactionRating.A;
+            TransactionData.GetPool().InsertSafe(unlock);
+            TransactionData.GetPool().InsertSafe(exit);
+            Assert.Empty(await TransactionData.ProcessTxPool());
+            Assert.Equal(0M, VBTCBridgeLockState.GetByLockId(poolLock)!.UnlockedAmount);
+            Assert.Null(VBTCBridgeBtcExitState.GetByBurnHash(exitBurn));
+
+            // A second provider serves the same burns: now they are burns, and the exits are taken.
+            all[1].AddBurn(poolBurn, Contract, vfxExit: true, 400_000, Minter.Address);
+            all[1].AddBurn(exitBurn, Contract, vfxExit: false, 400_000, BtcDest);
+            Accepted(await TransactionValidatorService.VerifyTX(unlock));
+            Accepted(await TransactionValidatorService.VerifyTX(exit));
+            Assert.Equal(2, (await TransactionData.ProcessTxPool()).Count);
+        }
+
+        /// <summary>
+        /// Block building asks Base about a pooled exit's burn again. While there is no final answer at that moment (this
+        /// node's provider is behind, or does not answer) the exit stays in the pool for the next block; it was deleted,
+        /// and its burn waited for the handler to make it again. An answer that the transaction is not the burn still
+        /// removes it.
+        /// </summary>
+        [Fact]
+        public async Task BlockBuilding_KeepsAnExitWhileBaseHasNoFinalAnswer_AndDropsOneThatIsNotABurn()
+        {
+            await Start();
+            var now = TimeUtil.GetTime();
+            var all = Providers(2);
+            var burn = NewBurn();
+            all.AddBurn(burn, Contract, vfxExit: true, 400_000, Minter.Address, blockNumber: 900);
+            var log = FakeBaseRpc.BurnLog(burn, Contract, vfxExit: true, 400_000, Minter.Address, Globals.BaseEvmChainId, blockNumber: 900);
+            var unlock = Unlock(burn, 0.004M, Lock(0.004M), now);
+            Accepted(await TransactionValidatorService.VerifyTX(unlock));
+            unlock.TransactionRating = TransactionRating.A; // set on receipt; block building skips unrated transactions
+            TransactionData.GetPool().InsertSafe(unlock);
+
+            // The provider is behind: for it the burn's block is not final.
+            all.Finalize(890);
+            Assert.Empty(await TransactionData.ProcessTxPool());
+            Assert.Single(TransactionData.GetPool().FindAll());
+
+            // The provider does not answer.
+            all.Finalize(null);
+            foreach (var p in all) p.Down = true;
+            BaseRpc.ForgetChainChecksForTests();
+            Assert.Empty(await TransactionData.ProcessTxPool());
+            Assert.Single(TransactionData.GetPool().FindAll());
+
+            // It answers again and the block is final: the exit is proposed.
+            foreach (var p in all) p.Down = false;
+            Assert.Equal(unlock.Hash, Assert.Single(await TransactionData.ProcessTxPool()).Hash);
+
+            // A final receipt that is not the burn (the transaction failed on Base) is an answer: the exit is removed.
+            foreach (var p in all) p.Receipts[burn] = FakeBaseRpc.Receipt(burn, succeeded: false, log);
+            Assert.Empty(await TransactionData.ProcessTxPool());
+            Assert.Empty(TransactionData.GetPool().FindAll());
         }
     }
 }
