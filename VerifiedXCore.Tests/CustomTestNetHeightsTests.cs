@@ -124,7 +124,7 @@ namespace VerifiedXCore.Tests
             Assert.True(Globals.CustomTestNetInputRulesHeight > Globals.CustomTestNetRulesHeight, "rules added while Marigold runs start after its tip, not at 401");
             Assert.True(Globals.CustomTestNetLateRulesHeight > Globals.CustomTestNetInputRulesHeight, "rules added after Marigold passed 8,500 start after its tip then");
             // The Base casters' catch-up rule is judged at epoch boundaries: its own height, on one, past the late rules.
-            Assert.Equal(43_200L, Globals.BaseCasterCatchUpHeight);
+            Assert.Equal(36_000L, Globals.BaseCasterCatchUpHeight);
             Assert.Equal(0, Globals.BaseCasterCatchUpHeight % Bitcoin.Services.BaseSignerSetPolicy.EpochBlocks);
             Assert.True(Globals.BaseCasterCatchUpHeight > Globals.CustomTestNetLateRulesHeight);
             Assert.Equal(Globals.CustomTestNetMembershipChainHeight, Globals.MembershipChainHeight);
