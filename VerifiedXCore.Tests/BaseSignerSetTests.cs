@@ -938,6 +938,83 @@ namespace VerifiedXCore.Tests
         }
 
         /// <summary>
+        /// The day's committees are the ones that governed its blocks, by the rule a certificate is judged by
+        /// (CasterMembershipStore.GetForHeight): an election takes effect at once over a change still waiting to start, and
+        /// that change never governs a block. Here a demotion of c[3] was signed for a dozen blocks ahead, and an election
+        /// keeping c[3] took effect first; c[3] and c[4] were in every committee that governed the day, and both are seated.
+        /// </summary>
+        [Fact]
+        public async Task FromTheCatchUpHeight_AChangeAnElectionOvertook_IsNotPartOfTheDay()
+        {
+            const long boundary = 4 * BaseSignerSetPolicy.EpochBlocks;
+            var c = Enumerable.Range(0, 5).Select(_ => NewKey()).ToArray();
+            foreach (var k in c)
+                AccountData.GetAccounts().InsertSafe(new Account { Address = k.Address, PublicKey = k.Pub, PrivateKey = "0" + k.Key.secret.ToString("x") });
+            CasterMembershipRecord Record(long seq, long from, string change, params int[] members) => new()
+            {
+                RecordSeq = seq, EffectiveFromHeight = from, ChangeType = change,
+                Casters = members.Select(i => new CasterInfo { Address = c[i].Address, PeerIP = $"10.0.7.{i + 1}", PublicKey = c[i].Pub }).ToList(),
+            };
+            const long stall = boundary - 500;
+            var records = new[]
+            {
+                Record(1, 0, "Promotion", 0, 1, 2, 3, 4),
+                Record(2, stall + 12, "Demotion", 0, 1, 2, 4),                                   // signed for 12 blocks ahead
+                Record(3, stall + 1, VerifiedXCore.Services.VreeElection.EmergencyElectionChangeType, 0, 1, 2, 3, 4),   // in force at once
+            };
+            var col = DbContext.DB_Config!.GetCollection<CasterMembershipRecord>("rsrv_caster_membership");
+            foreach (var r in records) col.Upsert(r.RecordSeq, r);
+            VerifiedXCore.Services.CasterMembershipStore.InvalidateCache();
+            // The store's own rule: the demotion governs no height of the day.
+            Assert.DoesNotContain(Enumerable.Range(0, (int)BaseSignerSetPolicy.CasterStableBlocks + 1),
+                d => VerifiedXCore.Services.CasterMembershipStore.GetForHeight(boundary - d)!.RecordSeq == 2);
+            BlockchainData.GetBlocks().InsertSafe(new Block { Height = boundary, Hash = $"e{boundary}-{Guid.NewGuid():N}", Transactions = new List<Transaction>() });
+
+            var validators = new[] { _me, _seed2, _seed3 };
+            BlockchainData.GetBlocks().InsertSafe(new Block
+            {
+                Height = boundary - 100, Hash = $"re{boundary}-{Guid.NewGuid():N}",
+                Transactions = validators.Select((v, i) => new Transaction
+                {
+                    TransactionType = TransactionType.VBTC_V2_VALIDATOR_REGISTER, FromAddress = v.Address, ToAddress = v.Address, Hash = $"re{i}",
+                    Data = JsonConvert.SerializeObject(new { ValidatorAddress = v.Address, IPAddress = $"10.0.0.{i + 1}", FrostPublicKey = v.Pub, IsS3C = false }),
+                }).ToList(),
+            });
+            var at = validators.Select((v, i) => (v, ip: $"10.0.0.{i + 1}")).Concat(c.Select((k, i) => (v: k, ip: $"10.0.7.{i + 1}"))).ToDictionary(x => x.ip, x => x.v);
+            var priorFactory = Globals.HttpClientFactory;
+            var priorGate = Globals.BaseCasterCatchUpHeight;
+            Globals.HttpClientFactory = new ValidatorNetwork(at);
+            var sent = new List<(string Function, object[] Args)>();
+            BaseValidatorSyncService.SubmitForTests = (f, a) => { sent.Add((f, a)); return Task.FromResult<string?>("0xtx"); };
+            Globals.LastBlock = new Block { Height = boundary + BaseSignerSetPolicy.SettleBlocks + 8 * BaseValidatorSyncService.SubmitTurnBlocks, Timestamp = TimeUtil.GetTime() };
+            Globals.BaseCasterCatchUpHeight = boundary;
+            try
+            {
+                Contract(9, validators, c.Take(3).ToArray());
+                var seed = VrfSeed.SeedMaterialAt(boundary)!;
+                var newcomers = new[] { c[3].Base, c[4].Base }.OrderBy(a => BaseSignerSetPolicy.RankOf(seed, a), StringComparer.Ordinal).ToArray();
+                var digest = VbtcbTypedData.UpdateCastersDigest(newcomers, Array.Empty<string>(), boundary, 9, 8453, Proxy);
+
+                Globals.ValidatorAddress = c[0].Address;
+                SignedBy(c[0], await AskCasters(newcomers, Array.Empty<string>(), boundary, 9), digest);
+                Globals.ValidatorAddress = _me.Address;
+                await BaseValidatorSyncService.SyncOnceAsync();
+                var (fn, args) = Assert.Single(sent);
+                Assert.Equal("updateCasters", fn);
+                Assert.Equal(newcomers, (List<string>)args[0]);
+                Assert.Empty((List<string>)args[1]);
+            }
+            finally
+            {
+                foreach (var r in records) col.Delete(r.RecordSeq);
+                VerifiedXCore.Services.CasterMembershipStore.InvalidateCache();
+                BaseValidatorSyncService.SubmitForTests = null;
+                Globals.HttpClientFactory = priorFactory;
+                Globals.BaseCasterCatchUpHeight = priorGate;
+            }
+        }
+
+        /// <summary>
         /// Fewer than a third of the validators leave in one epoch through the loop as it runs, not only in one batch: once
         /// a removal went through, the loop computes the next batch against the smaller set but nobody signs it until the
         /// next boundary.

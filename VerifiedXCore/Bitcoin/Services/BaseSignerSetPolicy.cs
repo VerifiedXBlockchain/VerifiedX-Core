@@ -155,7 +155,7 @@ namespace VerifiedXCore.Bitcoin.Services
         public const int CasterStableBlocks = (int)EpochBlocks;
 
         /// <summary>The most caster records one window is read from; a day with more is churn, and changes nothing on Base.</summary>
-        public const int MaxWindowRecords = 1_024;
+        public const int MaxWindowRecords = 256;
 
         /// <summary>
         /// From <see cref="Globals.BaseCasterCatchUpHeight"/>: the contract's casters follow the committee within about a day,
@@ -205,10 +205,12 @@ namespace VerifiedXCore.Bitcoin.Services
 
         /// <summary>
         /// The Base addresses of every committee that governed a height in [<paramref name="epochHeight"/> -
-        /// <see cref="CasterStableBlocks"/>, <paramref name="epochHeight"/>], in record order (effective heights advance with
-        /// the seq, so each record from the one governing the window's first block to the one governing the boundary governs
-        /// part of it). Null when a record of the window is missing from this node (the record era starts inside it, or
-        /// the store was reset) or the window holds more than <see cref="MaxWindowRecords"/>.
+        /// <see cref="CasterStableBlocks"/>, <paramref name="epochHeight"/>], in record order, each decided by
+        /// CasterMembershipStore.GetForHeight, the rule a block's certificate is judged by. A record that never governed a
+        /// height of the window is not among them: an election takes effect over a change still waiting to start, and that
+        /// change never governs a block. Null when a record between the ones governing the window's first block and the
+        /// boundary is missing from this node (the record era starts inside the window, or the store was reset), or there are
+        /// more than <see cref="MaxWindowRecords"/> of them.
         /// </summary>
         public static List<List<string>>? CasterWindow(long epochHeight)
         {
@@ -218,14 +220,24 @@ namespace VerifiedXCore.Bitcoin.Services
             var last = VerifiedXCore.Services.CasterMembershipStore.GetForHeight(epochHeight);
             if (first == null || last == null || last.RecordSeq < first.RecordSeq || last.RecordSeq - first.RecordSeq >= MaxWindowRecords) return null;
 
-            var committees = new List<List<string>>();
-            for (var seq = first.RecordSeq; seq <= last.RecordSeq; seq++)
+            // Every record a height of the window can resolve to lies between those two seqs, and the record in force
+            // changes only at one of their effective heights: resolving the first block and each of those heights finds
+            // every committee in force, and only those.
+            var effective = new List<long> { from };
+            for (var seq = first.RecordSeq + 1; seq <= last.RecordSeq; seq++)
             {
-                var record = seq == first.RecordSeq ? first : seq == last.RecordSeq ? last : VerifiedXCore.Services.CasterMembershipStore.GetBySeq(seq);
+                var record = seq == last.RecordSeq ? last : VerifiedXCore.Services.CasterMembershipStore.GetBySeq(seq);
                 if (record == null) return null;
-                committees.Add(record.Casters.Select(c => BaseAddressOf(c.PublicKey)).Where(a => a.Length > 0).ToList());
+                if (record.EffectiveFromHeight > from && record.EffectiveFromHeight <= epochHeight) effective.Add(record.EffectiveFromHeight);
             }
-            return committees;
+            var governing = new SortedDictionary<long, VerifiedXCore.Models.CasterMembershipRecord>();
+            foreach (var height in effective.Distinct())
+            {
+                var record = VerifiedXCore.Services.CasterMembershipStore.GetForHeight(height);
+                if (record == null) return null;
+                governing[record.RecordSeq] = record;
+            }
+            return governing.Values.Select(r => r.Casters.Select(c => BaseAddressOf(c.PublicKey)).Where(a => a.Length > 0).ToList()).ToList();
         }
 
         // ── A proposed removal ──────────────────────────────────────────────────────────────────────────────
