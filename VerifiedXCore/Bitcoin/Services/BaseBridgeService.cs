@@ -290,13 +290,17 @@ namespace VerifiedXCore.Bitcoin.Services
             return new SignerView(validators, version, Math.Max(2, required), nonce, casters, requiredCasters);
         }
 
-        /// <summary>The contract's pending proposeRemoval: the validators and casters it names, and when it can run (0: none).</summary>
-        public sealed record PendingRemoval(IReadOnlyList<string> Validators, IReadOnlyList<string> Casters, BigInteger Eta);
+        /// <summary>
+        /// The contract's pending proposeRemoval: the validators and casters it names, when it can run (0: none), and the
+        /// VFX block height it was proposed with (pendingRemovalHeight; null when not read).
+        /// </summary>
+        public sealed record PendingRemoval(IReadOnlyList<string> Validators, IReadOnlyList<string> Casters, BigInteger Eta, BigInteger? VfxBlockHeight = null);
 
         private const string PENDING_REMOVAL_ABI = @"[
             {""inputs"":[],""name"":""getPendingRemovals"",""outputs"":[{""internalType"":""address[]"",""name"":"""",""type"":""address[]""}],""stateMutability"":""view"",""type"":""function""},
             {""inputs"":[],""name"":""getPendingCasterRemovals"",""outputs"":[{""internalType"":""address[]"",""name"":"""",""type"":""address[]""}],""stateMutability"":""view"",""type"":""function""},
-            {""inputs"":[],""name"":""pendingRemovalEta"",""outputs"":[{""internalType"":""uint256"",""name"":"""",""type"":""uint256""}],""stateMutability"":""view"",""type"":""function""}
+            {""inputs"":[],""name"":""pendingRemovalEta"",""outputs"":[{""internalType"":""uint256"",""name"":"""",""type"":""uint256""}],""stateMutability"":""view"",""type"":""function""},
+            {""inputs"":[],""name"":""pendingRemovalHeight"",""outputs"":[{""internalType"":""uint256"",""name"":"""",""type"":""uint256""}],""stateMutability"":""view"",""type"":""function""}
         ]";
 
         /// <summary>Stands in for the Base RPC in tests.</summary>
@@ -316,7 +320,8 @@ namespace VerifiedXCore.Bitcoin.Services
                     if (eta == 0) return new PendingRemoval(Array.Empty<string>(), Array.Empty<string>(), 0);
                     var validators = await c.GetFunction("getPendingRemovals").CallAsync<List<string>>();
                     var casters = await c.GetFunction("getPendingCasterRemovals").CallAsync<List<string>>();
-                    return new PendingRemoval(validators, casters, eta);
+                    var height = await c.GetFunction("pendingRemovalHeight").CallAsync<BigInteger>();
+                    return new PendingRemoval(validators, casters, eta, height);
                 }
                 catch { }
             }

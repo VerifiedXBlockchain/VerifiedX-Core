@@ -122,7 +122,14 @@ namespace VerifiedXCore.Bitcoin.Services
                     if (req.VfxBlockHeight is not long height || height < 0) return Fail("VfxBlockHeight required");
                     digest = VbtcbTypedData.ProposeRemovalDigest(targets, casterTargets, height, view.AdminNonce, chainId, contract);
                     if (notSigning.Length > 0)
-                        beforeSigning = () => VerifiedXCore.Bitcoin.Models.BaseRemovalOverride.Save(contract, targets, casterTargets, notSigning);
+                    {
+                        // Recorded under the digest signed and the nonce it is good at, with the removal pending now (if
+                        // any): that one is not the proposal this signature makes.
+                        var pendingNow = await BaseBridgeService.ReadPendingRemovalAsync();
+                        if (pendingNow == null) return Fail("Could not read the Base contract's pending removal");
+                        var (signedDigest, signedAt) = (digest, view.AdminNonce);
+                        beforeSigning = () => VerifiedXCore.Bitcoin.Models.BaseRemovalOverride.Save(contract, signedDigest, signedAt, notSigning, pendingNow.Eta);
+                    }
                     break;
                 default:
                     digest = VbtcbTypedData.CancelPendingDigest(view.AdminNonce, chainId, contract);
