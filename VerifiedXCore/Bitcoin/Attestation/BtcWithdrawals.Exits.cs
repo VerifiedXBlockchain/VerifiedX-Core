@@ -311,9 +311,10 @@ namespace VerifiedXCore.Bitcoin.Attestation
                 // raise would build): fixed on many small coins it could be raised fewer times or never, and nothing else
                 // moves a pinned part. Not pinned, it waits, and the exit fails by rule and its locks come back. A part fixed
                 // again while its exit is paying is pinned as it can be: it never expires, and pays once fees fall.
-                // Nor below its share of the holder's least payout (Globals.ExitMinPayoutHeight): the exit then fails by rule
-                // and may be refunded.
-                if (tx != null && !committed && part.MinPayoutShareSats > 0 && tx.DestinationSats < part.MinPayoutShareSats)
+                // Nor below its share of the holder's least payout (Globals.ExitMinPayoutHeight), first pinned or fixed again
+                // while its exit is paying: the exit then fails by rule and may be refunded, or the part waits and, from
+                // Globals.ExitPartRefundHeight, is refunded.
+                if (tx != null && part.MinPayoutShareSats > 0 && tx.DestinationSats < part.MinPayoutShareSats)
                 {
                     reason = $"its transaction would pay {tx.DestinationSats} sats, below the {part.MinPayoutShareSats} sats of the holder's minimum payout that fall to this part";
                     tx = null;

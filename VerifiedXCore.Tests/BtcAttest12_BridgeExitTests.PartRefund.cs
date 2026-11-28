@@ -23,10 +23,14 @@ namespace VerifiedXCore.Tests
         private readonly long _priorPartRefund = Globals.ExitPartRefundHeight;
 
         /// <summary>The exit a caster sends from the height: it names the Base address that burned.</summary>
-        private VfxTx ExitWithBurner(string burn, params (string LockId, string Vault, decimal Amount)[] allocations)
+        private VfxTx ExitWithBurner(string burn, params (string LockId, string Vault, decimal Amount)[] allocations) =>
+            ExitWithBurner(burn, 0, allocations);
+
+        private VfxTx ExitWithBurner(string burn, long minPayoutSats, params (string LockId, string Vault, decimal Amount)[] allocations)
         {
             var data = JObject.Parse(Exit(burn, BtcDest, allocations).Data);
             data["BaseBurner"] = Burner;
+            if (minPayoutSats > 0) data["MinPayoutSats"] = minPayoutSats;
             return SignedBy(Caster, Caster.Address, TransactionType.VBTC_V2_BRIDGE_EXIT_TO_BTC, data, free: true);
         }
 
@@ -37,7 +41,9 @@ namespace VerifiedXCore.Tests
         /// </summary>
         private NBitcoin.Script _paidVault = NBitcoin.Script.Empty;
 
-        private async Task<(string Burn, string Vault, string LockId, long VoidedAt)> ASplitExitWhoseSecondVaultCannotPay(bool withBurner = true)
+        private NBitcoin.Script _unpaidVault = NBitcoin.Script.Empty;
+
+        private async Task<(string Burn, string Vault, string LockId, long VoidedAt)> ASplitExitWhoseSecondVaultCannotPay(bool withBurner = true, long minPayoutSats = 0)
         {
             BtcAttestRules.ExitReopenBurialBlocksOverride = 1;
             BtcAttestRules.ExitPartRefundBlocksOverride = 1;
@@ -45,13 +51,14 @@ namespace VerifiedXCore.Tests
             var vault = await CreateVault(H1 + 1);
             var other = await CreateVault(H1 + 2);
             _paidVault = vault.Script;
+            _unpaidVault = other.Script;
             await Deposit(vault.Script, 1_000_000);
             var otherDeposit = await Deposit(other.Script, 1_000_000);
             var lockId = await Lock(vault.Uid, 0.004M);
             var otherLock = await Lock(other.Uid, 0.004M);
             var burn = NewBurn();
             var allocations = new[] { (lockId, vault.Uid, 0.004M), (otherLock, other.Uid, 0.004M) };
-            await Mine(withBurner ? ExitWithBurner(burn, allocations) : Exit(burn, BtcDest, allocations));
+            await Mine(withBurner ? ExitWithBurner(burn, minPayoutSats, allocations) : Exit(burn, BtcDest, allocations));
             await SignAndConfirm(Part(burn, vault.Uid).Pins[0]);
             var voidedAt = _btc.Mine(Pay(new[] { new OutPoint(otherDeposit, 0) }, (Elsewhere(), 999_000)));
             await Report(voidedAt);
@@ -108,6 +115,37 @@ namespace VerifiedXCore.Tests
                 Assert.Single(VBTCBridgeRefundState.GetCollection().FindAll());
             }
             finally { ResetPartRefundGlobals(); }
+        }
+
+        /// <summary>
+        /// A part fixed again while its exit is paying still pays at least its share of the holder's minimum: on two coins
+        /// its larger fee would pay below it, so it is not pinned, and it is refunded after the wait.
+        /// </summary>
+        [Fact]
+        public async Task APartFixedAgainWhileItsExitIsPaying_IsNotPinnedBelowItsShareOfTheMinimum()
+        {
+            var priorMin = Globals.ExitMinPayoutHeight;
+            try
+            {
+                Globals.ExitPartRefundHeight = H1 + 1;
+                Globals.ExitMinPayoutHeight = H1 + 1;
+                // Each part's share is 398,460: what one coin pays at 10 sat/vB (400,000 less a 1,540-sat fee).
+                var (burn, vault, _, _) = await ASplitExitWhoseSecondVaultCannotPay(minPayoutSats: 796_920);
+                Assert.Equal(398_460, Part(burn, vault).MinPayoutShareSats);
+                await Deposit(_unpaidVault, 300_000);
+                await Deposit(_unpaidVault, 300_000);                                       // payable only on both coins
+                await PastTheBurialAndTheWait();
+                var part = Part(burn, vault);
+                Assert.Single(part.Pins);                                                    // only the voided one: never fixed on the two coins
+                Assert.Equal(VaultWithdrawalState.Void, part.State);
+                Assert.True(part.ExitRefundedAtVfxHeight > 0);
+                Assert.Equal(400_000, VBTCBridgeRefundState.Get(VBTCBridgeRefundState.PartRefundId(burn, vault))!.AmountSats);
+            }
+            finally
+            {
+                Globals.ExitMinPayoutHeight = priorMin;
+                ResetPartRefundGlobals();
+            }
         }
 
         [Fact]
