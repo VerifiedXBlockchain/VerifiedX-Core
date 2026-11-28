@@ -453,12 +453,32 @@ namespace VerifiedXCore.Bitcoin.Services
             return found.Values.ToList();
         }
 
-        /// <summary>Whether these signers meet both of the contract's thresholds: its validators', and its casters' (none on V3).</summary>
+        /// <summary>
+        /// Whether these signers meet both of the contract's thresholds: its validators', and its casters' (none on V3). A
+        /// V4 or later contract with fewer than 3 casters (a V3 proxy upgraded in place) approves nothing but adding them
+        /// (EnoughForCasterChange), so nothing is enough for it here.
+        /// </summary>
         internal static bool Enough(BaseBridgeService.SignerView view, int requiredValidators, IEnumerable<string> signedBaseAddresses)
         {
+            if (CastersNotSetUp(view)) return false;
             var signed = signedBaseAddresses.ToHashSet(StringComparer.OrdinalIgnoreCase);
             return view.Validators.Count(signed.Contains) >= requiredValidators && view.CasterList.Count(signed.Contains) >= view.RequiredCasterSignatures;
         }
+
+        /// <summary>
+        /// Whether these signers approve an updateCasters: as Enough, except that while the contract has fewer than 3 casters
+        /// it takes 2/3 of its validators alone (the caster bootstrap, which only adds).
+        /// </summary>
+        internal static bool EnoughForCasterChange(BaseBridgeService.SignerView view, IEnumerable<string> signedBaseAddresses)
+        {
+            if (!CastersNotSetUp(view)) return Enough(view, view.RequiredMintSignatures, signedBaseAddresses);
+            var signed = signedBaseAddresses.ToHashSet(StringComparer.OrdinalIgnoreCase);
+            return view.Validators.Count(signed.Contains) >= view.RequiredMintSignatures;
+        }
+
+        /// <summary>A V4 or later contract (typed messages) holding fewer than 3 casters.</summary>
+        private static bool CastersNotSetUp(BaseBridgeService.SignerView view) =>
+            view.MessageVersion == VbtcbTypedData.MessageVersion && view.CasterList.Count < BaseSignerSetPolicy.MinCasters;
 
         /// <summary>
         /// Submit mintWithProof on Base using the user's own derived ETH key.

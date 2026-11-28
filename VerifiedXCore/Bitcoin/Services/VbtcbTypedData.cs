@@ -5,8 +5,9 @@ using Nethereum.Util;
 namespace VerifiedXCore.Bitcoin.Services
 {
     /// <summary>
-    /// The EIP-712 messages the vBTCb V4 contract (deploy/contracts/vBTCb.sol) checks: domain ("vBTCb", "4", chainId,
-    /// contract) and one type hash per action, so a signature over one action can never be read as another.
+    /// The EIP-712 messages the vBTCb contract (deploy/contracts/vBTCb.sol, V4 and V5) checks: domain ("vBTCb", "4", chainId,
+    /// contract) and one type hash per action, so a signature over one action can never be read as another. V5 adds
+    /// CancelPendingKinds and Refund and keeps the rest.
     /// </summary>
     public static class VbtcbTypedData
     {
@@ -36,6 +37,12 @@ namespace VerifiedXCore.Bitcoin.Services
         private static readonly byte[] CancelPendingTypeHash = Keccak("CancelPending(uint256 adminNonce)");
         private static readonly byte[] AddValidatorsTypeHash = Keccak("AddValidators(address[] validators,uint256 vfxBlockHeight,uint256 adminNonce)");
         private static readonly byte[] RemoveValidatorsTypeHash = Keccak("RemoveValidators(address[] validators,uint256 vfxBlockHeight,uint256 adminNonce)");
+        private static readonly byte[] CancelPendingKindsTypeHash = Keccak("CancelPendingKinds(uint256 kinds,uint256 adminNonce)");
+        private static readonly byte[] RefundTypeHash = Keccak("Refund(address to,uint256 amount,string burnId)");
+        private static readonly byte[] ReplaceCastersTypeHash = Keccak("ReplaceCasters(address[] remove,address[] add,uint256 vfxBlockHeight,uint256 adminNonce)");
+
+        /// <summary>The V5 contract's cancelPendingKinds bits: PENDING_UPGRADE, PENDING_UPGRADE_DELAY, PENDING_REMOVAL.</summary>
+        public const int PendingUpgrade = 1, PendingUpgradeDelay = 2, PendingRemoval = 4;
 
         public static byte[] AddValidatorsDigest(IEnumerable<string> validators, long vfxBlockHeight, BigInteger adminNonce, long chainId, string contractAddress) =>
             Digest(chainId, contractAddress, Keccak(Concat(AddValidatorsTypeHash, AddressList(validators), Uint(vfxBlockHeight), Uint(adminNonce))));
@@ -57,6 +64,24 @@ namespace VerifiedXCore.Bitcoin.Services
 
         public static byte[] CancelPendingDigest(BigInteger adminNonce, long chainId, string contractAddress) =>
             Digest(chainId, contractAddress, Keccak(Concat(CancelPendingTypeHash, Uint(adminNonce))));
+
+        /// <summary>V5's cancelPendingKinds: drops only the pending kinds named (PendingUpgrade | PendingUpgradeDelay | PendingRemoval).</summary>
+        public static byte[] CancelPendingKindsDigest(int kinds, BigInteger adminNonce, long chainId, string contractAddress) =>
+            Digest(chainId, contractAddress, Keccak(Concat(CancelPendingKindsTypeHash, Uint(kinds), Uint(adminNonce))));
+
+        /// <summary>
+        /// V5's refundBurn: mints `amountSats` back to `to` for one burn, named as Core names it (BaseBridgeService.BurnId:
+        /// the Base transaction hash, with ":n" for the n-th burn of a transaction that holds several).
+        /// </summary>
+        public static byte[] RefundDigest(string to, long amountSats, string burnId, long chainId, string contractAddress) =>
+            Digest(chainId, contractAddress, Keccak(Concat(RefundTypeHash, Address(to), Uint(amountSats), Keccak(burnId ?? ""))));
+
+        /// <summary>
+        /// V5's proposeCasterReplacement: 2/3 of the validators (and each added caster, for its own seat) replace casters that
+        /// went dark. Note the field order: remove, then add (UpdateCasters is add, then remove).
+        /// </summary>
+        public static byte[] ReplaceCastersDigest(IEnumerable<string> remove, IEnumerable<string> add, long vfxBlockHeight, BigInteger adminNonce, long chainId, string contractAddress) =>
+            Digest(chainId, contractAddress, Keccak(Concat(ReplaceCastersTypeHash, AddressList(remove), AddressList(add), Uint(vfxBlockHeight), Uint(adminNonce))));
 
         /// <summary>An address[] field: keccak256 of the 32-byte words in order (the contract's keccak256(abi.encodePacked(list))).</summary>
         internal static byte[] AddressList(IEnumerable<string> addresses) => Keccak(Concat(addresses.Select(Address).ToArray()));
