@@ -24,7 +24,7 @@ namespace VerifiedXCore.Bitcoin.Services
         // row is passed over and logged for an operator's rescan.
         private static int _span = MaxBlockSpan;
         private static int _singleBlockFailures;
-        private const int SingleBlockFailuresBeforeSkip = 20;
+        internal const int SingleBlockFailuresBeforeSkip = 20;
 
         // The widest span read without error and the narrowest one refused above it (a provider's range cap: 200 blocks
         // on sepolia.base.org). The span settles between them: doubled into the cap and cut to a quarter on every refusal,
@@ -375,6 +375,9 @@ namespace VerifiedXCore.Bitcoin.Services
 
             var processed = 0;
             var scanFailed = false;
+            // Whether the range could not be read because of the provider (BaseProviderException), not because of the
+            // range: such a read says nothing about the block, so it never counts toward passing a block over.
+            var providerAtFault = false;
 
             // Both kinds of burn are read before either is handled: a burn's id counts every bridge burn of its transaction
             // (BaseBridgeService.BurnId). A range one kind of which could not be read is read again, both kinds.
@@ -406,11 +409,12 @@ namespace VerifiedXCore.Bitcoin.Services
                 // and the range is read again like one that could not be read.
                 if (vfxExitLogs.Any(e => e.Event != null && !BaseRpc.IsExpectedChain(e.Event.ChainId))
                     || btcLogs.Any(e => e.Event != null && !BaseRpc.IsExpectedChain(e.Event.ChainId)))
-                    throw new InvalidOperationException(BaseBridgeService.BurnOnAnotherChain);
+                    throw new BaseProviderException(BaseBridgeService.BurnOnAnotherChain);
             }
             catch (Exception readEx)
             {
                 scanFailed = true;
+                providerAtFault = readEx is BaseProviderException;
                 vfxExitLogs.Clear();
                 btcLogs.Clear();
                 LogUtility.Log($"[BaseBridgeExit] Burn log query error: {readEx.Message}",
@@ -533,6 +537,12 @@ namespace VerifiedXCore.Bitcoin.Services
                     _span = SpanAfterFailure(_span);
                     return (processed, state.LastScannedBlock, $"Base log query failed; the range is read again next poll, {_span} block(s) at a time");
                 }
+                // A block is passed over for failures of its own (a block the provider cannot serve while it serves the
+                // next). A provider that is not on Base, or whose logs are not Base's, has not read the block at all:
+                // however often that repeats, the block waits, and is read once a provider that is right answers. Passed
+                // over, every burn in the block was lost with it, and setting the provider right did not bring them back.
+                if (providerAtFault)
+                    return (processed, state.LastScannedBlock, "The Base provider's answer is not Base's; the block is read again, not passed over");
                 if (++_singleBlockFailures < SingleBlockFailuresBeforeSkip)
                     return (processed, state.LastScannedBlock, "Base log query failed for one block; read again next poll");
                 // Passed over only when the provider reads the next block: during an outage nothing is skipped, the

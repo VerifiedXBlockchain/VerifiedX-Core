@@ -172,8 +172,13 @@ namespace VerifiedXCore.Tests
             Assert.Equal(2, provider.CallsTo("eth_blockNumber"));
         }
 
+        /// <summary>
+        /// A block holding a burn log that names another chain was not read from Base: it waits, however many polls find
+        /// it so, and is never passed over the way a block the provider cannot serve is. A burn of Base's own in the same
+        /// block is taken once the provider is set right.
+        /// </summary>
         [Fact]
-        public async Task TheBurnWatch_DoesNotPassARangeWhoseBurnLogNamesAnotherChain()
+        public async Task TheBurnWatch_NeverPassesABlockWhoseBurnLogNamesAnotherChain_HoweverOftenItIsRead()
         {
             var provider = Provider();
             provider.Head = 5_000;
@@ -181,19 +186,29 @@ namespace VerifiedXCore.Tests
             var state = BridgeExitSyncState.GetOrCreate();
             state.LastScannedBlock = 4_990;
             BridgeExitSyncState.Save(state);
-            provider.AddBurn("0x" + new string('b', 64), Contract, vfxExit: false, 400_000, "bc1qdestination", chainId: OtherChain, blockNumber: 4_995);
+            // Block 4,995 holds a burn of Base's and a burn log that names another chain.
+            var real = "0x" + Guid.NewGuid().ToString("N") + Guid.NewGuid().ToString("N");
+            var foreign = "0x" + Guid.NewGuid().ToString("N") + Guid.NewGuid().ToString("N");
+            provider.AddBurn(real, Contract, vfxExit: true, 300_000, "xDestination", blockNumber: 4_995);
+            provider.AddBurn(foreign, Contract, vfxExit: false, 400_000, "bc1qdestination", chainId: OtherChain, blockNumber: 4_995);
 
-            await BaseBridgeExitWatchService.ReadUntilCaughtUpAsync();
+            // Polled far past the count at which a block that cannot be read is passed over (the range narrows to the
+            // block first, and the provider reads the block after it without trouble).
+            var taken = 0;
+            for (var i = 0; i < 4 * BaseBridgeExitWatchService.SingleBlockFailuresBeforeSkip; i++)
+                taken += (await BaseBridgeExitWatchService.PollOnce()).Processed;
 
-            Assert.True(provider.CallsTo("eth_getLogs") > 0);
-            Assert.Equal(4_990, BridgeExitSyncState.GetOrCreate().LastScannedBlock);
+            Assert.Equal(1, BaseBridgeExitWatchService.CurrentSpan);                          // narrowed to the one block
+            Assert.Equal(4_994, BridgeExitSyncState.GetOrCreate().LastScannedBlock);          // which waits; the blocks before it were read
+            Assert.Equal(0, taken);
+            Assert.True(provider.CallsTo("eth_getLogs") > 2 * BaseBridgeExitWatchService.SingleBlockFailuresBeforeSkip);
 
-            // The same burn naming Base's own chain is read and the range passed.
-            lock (provider.Logs) provider.Logs.Clear();
-            provider.AddBurn("0x" + new string('b', 64), Contract, vfxExit: false, 400_000, "bc1qdestination", blockNumber: 4_995);
+            // The provider is set right: the block is read, and the burn that waited in it is taken.
+            lock (provider.Logs) provider.Logs.RemoveAll(l => l["transactionHash"]!.ToString() == foreign);
             for (var i = 0; i < 12 && BridgeExitSyncState.GetOrCreate().LastScannedBlock < 5_000; i++)
-                await BaseBridgeExitWatchService.ReadUntilCaughtUpAsync();
+                taken += (await BaseBridgeExitWatchService.PollOnce()).Processed;
             Assert.Equal(5_000, BridgeExitSyncState.GetOrCreate().LastScannedBlock);
+            Assert.Equal(1, taken);
         }
 
         // ── A burn's receipt ─────────────────────────────────────────────────────────────

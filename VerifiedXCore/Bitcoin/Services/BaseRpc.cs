@@ -39,6 +39,17 @@ namespace VerifiedXCore.Bitcoin.Services
     }
 
     /// <summary>
+    /// A read of Base that failed because of the provider, not because of what was asked of it: the provider is not on
+    /// this network's Base chain or did not say which chain it is on, or what it served is not Base's. Asking the same
+    /// again of a provider that is right would answer; nothing about the block or the transaction asked for is learnt
+    /// from it.
+    /// </summary>
+    public sealed class BaseProviderException : InvalidOperationException
+    {
+        public BaseProviderException(string message) : base(message) { }
+    }
+
+    /// <summary>
     /// Every read of Base and every transaction sent to it goes through here: this is the one place a client for a Base
     /// provider is made. A read is one of two kinds, and the caller says which by the method it calls.
     ///
@@ -204,7 +215,7 @@ namespace VerifiedXCore.Bitcoin.Services
         {
             var url = BaseBridgeService.BaseRpcUrl;
             var (check, reason) = await CheckChainAsync(url);
-            if (check != BaseProviderCheck.OnBase) throw new InvalidOperationException($"Base cannot be sent to: {reason}");
+            if (check != BaseProviderCheck.OnBase) throw new BaseProviderException($"Base cannot be sent to: {reason}");
             return Client(account, url);
         }
 
@@ -232,7 +243,7 @@ namespace VerifiedXCore.Bitcoin.Services
         {
             var url = BaseBridgeService.BaseRpcUrl;
             var (check, reason) = await CheckChainAsync(url);
-            if (check != BaseProviderCheck.OnBase) throw new InvalidOperationException($"Base cannot be read: {reason}");
+            if (check != BaseProviderCheck.OnBase) throw new BaseProviderException($"Base cannot be read: {reason}");
             return await read(Client(url), BlockParameter.CreateLatest());
         }
     }
