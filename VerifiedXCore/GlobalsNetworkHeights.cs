@@ -149,10 +149,10 @@ namespace VerifiedXCore
         public const long BaseCasterCatchUpTestnetHeight = long.MaxValue;
 
         /// <summary>
-        /// <see cref="BaseCasterCatchUpHeight"/> on a custom testnet: an epoch boundary (6 x 7,200) ahead of Marigold's tip when
+        /// <see cref="BaseCasterCatchUpHeight"/> on a custom testnet: an epoch boundary (5 x 7,200) ahead of Marigold's tip when
         /// it was set, so every signer runs the rule before the first boundary it governs.
         /// </summary>
-        public const long CustomTestNetBaseCasterCatchUpHeight = 43_200;
+        public const long CustomTestNetBaseCasterCatchUpHeight = 36_000;
 
         /// <summary>
         /// The membership chain on the live testnet (MembershipChain): not set yet. Set at release, at the tip plus room to
