@@ -223,6 +223,7 @@ namespace VerifiedXCore.Tests
             "VBTCService.cs: 0M, legacy: 0.00M",
             "VBTCService.cs: 0M, legacy: 0.00M",
             "VBTCService.cs: 0M, legacy: 0.00M",
+            "VBTCService.cs: 0M, legacy: 0.00M", // the bridge burn refund (Globals.BridgeBurnRefundHeight), fee-free as the other bridge transactions
             "WalletService.cs: Amount, legacy: Amount",
             "WalletService.cs: Amount, legacy: Amount + 0.0M",
             "WalletService.cs: NewFee, legacy: NewFee",

@@ -3465,7 +3465,9 @@ namespace VerifiedXCore.Bitcoin.Services
             string baseBurnTxHash,
             List<PoolUnlockAllocation> allocations,
             List<BtcExitWithdrawalRecord>? btcWithdrawals = null,
-            IReadOnlyList<CasterConsensusVote>? casterConsensusVotes = null)
+            IReadOnlyList<CasterConsensusVote>? casterConsensusVotes = null,
+            long minPayoutSats = 0,
+            string baseBurner = "")
         {
             try
             {
@@ -3475,7 +3477,7 @@ namespace VerifiedXCore.Bitcoin.Services
 
                 var totalAmountSats = (long)(totalAmount * 100_000_000M);
                 var firstAlloc = allocations?.FirstOrDefault();
-                var txData = JsonConvert.SerializeObject(new
+                var dataObject = new
                 {
                     Function = "VBTCBridgeExitToBTC()",
                     // Backward-compatible fields required by TransactionValidatorService
@@ -3491,7 +3493,17 @@ namespace VerifiedXCore.Bitcoin.Services
                     Allocations = allocations,
                     BtcWithdrawals = btcWithdrawals,
                     CasterConsensusVotes = casterConsensusVotes
-                });
+                };
+                var txData = JsonConvert.SerializeObject(dataObject);
+                // The holder's least payout (Globals.ExitMinPayoutHeight) and the Base address that burned
+                // (Globals.ExitPartRefundHeight), as the votes are bound to them.
+                if (minPayoutSats > 0 || !string.IsNullOrWhiteSpace(baseBurner))
+                {
+                    var withMore = JObject.FromObject(dataObject);
+                    if (minPayoutSats > 0) withMore["MinPayoutSats"] = minPayoutSats;
+                    if (!string.IsNullOrWhiteSpace(baseBurner)) withMore["BaseBurner"] = baseBurner.Trim().ToLowerInvariant();
+                    txData = withMore.ToString(Formatting.None);
+                }
 
                 var tx = new Transaction
                 {
@@ -3511,6 +3523,68 @@ namespace VerifiedXCore.Bitcoin.Services
                 if (privateKey == null)
                     return (false, "Private key was null");
                 tx.Signature = VerifiedXCore.Services.SignatureService.CreateSignature(tx.Hash, privateKey, publicKey);
+                if (tx.Signature == "ERROR")
+                    return (false, "TX Signature Failed");
+
+                var result = await TransactionValidatorService.VerifyTX(tx);
+                if (!result.Item1)
+                    return (false, $"TX Verify Failed: {result.Item2}");
+
+                if (await TransactionData.SubmitOwnTransaction(tx, ownerAddress, tx.Fee + tx.Amount) is { } notSent)
+                    return (false, notSent);
+                return (true, tx.Hash);
+            }
+            catch (Exception ex)
+            {
+                return (false, $"Error: {ApiErrorText.For(ex)}");
+            }
+        }
+
+        /// <summary>
+        /// Broadcast <see cref="TransactionType.VBTC_V2_BRIDGE_BURN_REFUND"/> after the casters agreed that a Base burn VFX
+        /// cannot pay is refunded (Globals.BridgeBurnRefundHeight): a self-transaction of the handler caster, fee 0, amount 0.
+        /// </summary>
+        public static async Task<(bool Success, string TxHashOrError)> CreateBridgeBurnRefundTx(
+            string ownerAddress,
+            string baseBurnTxHash,
+            string baseBurner,
+            long amountSats,
+            string reason,
+            IReadOnlyList<CasterConsensusVote>? casterConsensusVotes)
+        {
+            try
+            {
+                var account = AccountData.GetSingleAccount(ownerAddress);
+                if (account == null)
+                    return (false, $"Account not found: {ownerAddress}");
+
+                var txData = JsonConvert.SerializeObject(new
+                {
+                    Function = "VBTCBridgeBurnRefund()",
+                    BaseBurnTxHash = baseBurnTxHash,
+                    BaseBurner = (baseBurner ?? "").Trim().ToLowerInvariant(),
+                    AmountSats = amountSats,
+                    Reason = reason,
+                    CasterConsensusVotes = casterConsensusVotes
+                });
+
+                var tx = new Transaction
+                {
+                    Timestamp = TimeUtil.GetTime(),
+                    FromAddress = ownerAddress,
+                    ToAddress = ownerAddress,
+                    Amount = 0.0M,
+                    Fee = 0.0M,
+                    Nonce = AccountStateTrei.GetNextNonce(ownerAddress),
+                    TransactionType = TransactionType.VBTC_V2_BRIDGE_BURN_REFUND,
+                    Data = txData
+                };
+                tx.Fee = VerifiedXCore.Services.LedgerIntegrityRules.SpellForNextBlock(0M, legacy: 0.00M);
+                tx.Build();
+                var privateKey = account.GetPrivKey;
+                if (privateKey == null)
+                    return (false, "Private key was null");
+                tx.Signature = VerifiedXCore.Services.SignatureService.CreateSignature(tx.Hash, privateKey, account.PublicKey);
                 if (tx.Signature == "ERROR")
                     return (false, "TX Signature Failed");
 

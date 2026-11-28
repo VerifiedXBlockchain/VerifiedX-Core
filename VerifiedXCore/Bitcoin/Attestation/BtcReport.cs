@@ -66,6 +66,14 @@ namespace VerifiedXCore.Bitcoin.Attestation
         public static int ExitReopenBurialBlocks => ExitReopenBurialBlocksOverride ?? QuietBlocks;
         /// <summary>Tests only.</summary>
         internal static int? ExitReopenBurialBlocksOverride;
+        /// <summary>
+        /// Bitcoin blocks (about a day) a voided exit part may still wait, after its voiding spend is buried
+        /// (<see cref="ExitReopenBurialBlocks"/>), for its vault to pay it before it is refunded by rule
+        /// (Globals.ExitPartRefundHeight). Counted in Bitcoin blocks, as the burial is, so no state but the part's is read.
+        /// </summary>
+        public static int ExitPartRefundBlocks => ExitPartRefundBlocksOverride ?? QuietBlocks;
+        /// <summary>Tests only.</summary>
+        internal static int? ExitPartRefundBlocksOverride;
         /// <summary>Tests only: a shorter wait, so that a run of a few hundred blocks reaches it.</summary>
         internal static int? StuckPinBlocksOverride;
         /// <summary>How often the withdrawals still waiting for coins are tried against coins that have become takeable, in VFX blocks.</summary>

@@ -59,6 +59,8 @@ namespace VerifiedXCore.Bitcoin.Services
             public string VfxDestinationAddress { get; set; } = "";
             public decimal Amount { get; set; }
             public string BurnerAddress { get; set; } = "";
+            /// <summary>The least payout the holder named on Base (Globals.ExitMinPayoutHeight), as read from the burn; 0 when none.</summary>
+            public long MinPayoutSats { get; set; }
             public long DetectedAtBlock { get; set; }
             public DateTime DetectedAt { get; set; } = DateTime.UtcNow;
             public string HandlerCasterAddress { get; set; } = "";
@@ -212,7 +214,8 @@ namespace VerifiedXCore.Bitcoin.Services
                         if (tx.TransactionType == TransactionType.VBTC_V2_BRIDGE_UNLOCK ||
                             tx.TransactionType == TransactionType.VBTC_V2_BRIDGE_POOL_UNLOCK ||
                             tx.TransactionType == TransactionType.VBTC_V2_BRIDGE_EXIT_TO_BTC ||
-                            tx.TransactionType == TransactionType.VBTC_V2_BRIDGE_EXIT_TO_BTC_COMPLETE)
+                            tx.TransactionType == TransactionType.VBTC_V2_BRIDGE_EXIT_TO_BTC_COMPLETE ||
+                            tx.TransactionType == TransactionType.VBTC_V2_BRIDGE_BURN_REFUND)
                         {
                             try
                             {
@@ -280,6 +283,8 @@ namespace VerifiedXCore.Bitcoin.Services
                     Status = BurnExitStatus.VfxTxCreated,
                     CompletionVfxTxHash = exit.IsFailedRecord ? "" : exit.ExitTxHash,
                     AllocationsJson = exit.AllocationsJson ?? "",
+                    MinPayoutSats = exit.MinPayoutSats,
+                    BurnerAddress = exit.BaseBurner ?? "",
                     DetectedAtBlock = currentHeight,
                 };
                 reloaded++;
@@ -318,7 +323,8 @@ namespace VerifiedXCore.Bitcoin.Services
             var now = TimeUtil.GetTime();
             if (!Globals.IsBlockCaster) return;
             // A Bitcoin exit too small to be paid fails after its round anyway: it is given up before it takes a slot.
-            foreach (var unpayable in DueForARound(_processedBurns.Values, now).Where(IsUnpayableBtcExit))
+            // From Globals.BridgeBurnRefundHeight it goes to a refund round instead (RefundReasonFor).
+            foreach (var unpayable in DueForARound(_processedBurns.Values, now).Where(r => IsUnpayableBtcExit(r) && RefundReasonFor(r, VBTCService.NextBlockHeight) == null))
             {
                 unpayable.Status = BurnExitStatus.Failed;
                 LogUtility.Log($"[BurnExitConsensus] {unpayable.BaseBurnTxHash}: a Bitcoin exit of {unpayable.Amount} BTC is below the {BtcWithdrawalsMinExitPartSats} sats a vault's part of an exit must be; not put to a round.", "BurnExitConsensusService");
@@ -514,6 +520,40 @@ namespace VerifiedXCore.Bitcoin.Services
             r.ExitType == BurnExitType.BtcExit && r.FieldsFromBase && (long)(r.Amount * 100_000_000M) < BtcWithdrawalsMinExitPartSats;
 
         /// <summary>
+        /// Why a burn's round agrees on a refund instead of an exit, judged for the block at <paramref name="nextHeight"/>,
+        /// or null: from Globals.BridgeBurnRefundHeight a Bitcoin exit below the smallest part a vault pays
+        /// (BridgeBurnRefundRules.ReasonRefusal accepts the same reasons).
+        /// </summary>
+        internal static string? RefundReasonFor(ProcessedBurnRecord r, long nextHeight)
+        {
+            if (r.ExitType != BurnExitType.BtcExit || nextHeight < Globals.BridgeBurnRefundHeight) return null;
+            if ((long)(r.Amount * 100_000_000M) < BtcWithdrawalsMinExitPartSats) return VBTCBridgeRefundState.BelowSmallestExitReason;
+            // From Globals.ExitMinPayoutHeight an exit that carried the holder's minimum and was failed by rule is refunded,
+            // not made again: it could not be paid at that minimum.
+            if (nextHeight >= Globals.ExitMinPayoutHeight && BridgeBurnRefundRules.FailedMinPayoutExit(r.BaseBurnTxHash) != null)
+                return VBTCBridgeRefundState.MinPayoutExitFailedReason;
+            return null;
+        }
+
+        /// <summary>The vote type of the burn's round: a refund's, or its exit type's.</summary>
+        internal static string RoundBurnType(ProcessedBurnRecord r, long nextHeight) =>
+            RefundReasonFor(r, nextHeight) != null ? BridgeCasterConsensus.RefundBurnType : BurnTypeString(r.ExitType);
+
+        /// <summary>
+        /// What a caster signs to vote in the burn's round, as the record holds the burn: the refund vote (burn, amount,
+        /// burner) when the round agrees on a refund, otherwise the bound exit vote (burn, type, amount, destination).
+        /// </summary>
+        internal static string RoundVoteMessage(ProcessedBurnRecord r, long timestamp, long nextHeight)
+        {
+            var amountSats = (long)(r.Amount * 100_000_000M);
+            if (RefundReasonFor(r, nextHeight) != null)
+                return BridgeCasterConsensus.BuildRefundVoteMessage(r.BaseBurnTxHash, amountSats, r.BurnerAddress, timestamp);
+            if (r.ExitType == BurnExitType.BtcExit)
+                return BridgeCasterConsensus.BuildExitVoteMessage(r.BaseBurnTxHash, amountSats, r.BtcDestination, r.MinPayoutSats, nextHeight, timestamp, r.BurnerAddress);
+            return BridgeCasterConsensus.BuildBoundVoteMessage(r.BaseBurnTxHash, BurnTypeString(r.ExitType), amountSats, r.VfxDestinationAddress, timestamp);
+        }
+
+        /// <summary>
         /// The burns a sweep takes, in the order their rounds start: burns this node saw itself or found on Base before
         /// alerts it cannot verify; then each burner's first burns before anyone's later ones, so one burner's flood does
         /// not hold back a holder's single exit; then first come (the block this node first saw the burn at, then its hash),
@@ -550,9 +590,9 @@ namespace VerifiedXCore.Bitcoin.Services
         /// agreed to and that caster's signature over it (from Globals.BridgeVotesBoundToAttemptHeight a vote counts only
         /// for the caster it names, BridgeCasterConsensus.VerifyBoundVotes).
         /// </summary>
-        internal static List<CasterConsensusVote> VotesOf(IEnumerable<BurnExitConfirmation> confirmations, BurnExitType exitType)
+        internal static List<CasterConsensusVote> VotesOf(IEnumerable<BurnExitConfirmation> confirmations, BurnExitType exitType, string? roundBurnType = null)
         {
-            var burnType = BurnTypeString(exitType);
+            var burnType = roundBurnType ?? BurnTypeString(exitType);
             return confirmations.Select(c => new CasterConsensusVote
             {
                 CasterAddress = c.ConfirmingCasterAddress,
@@ -775,6 +815,7 @@ namespace VerifiedXCore.Bitcoin.Services
             record.FoundOnBase = true;
             // The event matched the record or corrected it (it was read for this exit type): the record's fields are Base's now.
             if (evidence != null && !string.IsNullOrEmpty(evidence.Burner)) record.BurnerAddress = evidence.Burner;
+            if (evidence != null) record.MinPayoutSats = evidence.MinPayoutSats; // the holder's least payout, as Base holds it
             record.FieldsFromBase = true;
 
             // Step 1: Generate deterministic proposal hash and sign the proposal
@@ -827,13 +868,10 @@ namespace VerifiedXCore.Bitcoin.Services
 
 
             // Step 5: Broadcast confirmation (sign the vote so TryVerifyVotes can validate it)
-            var burnType = BurnTypeString(record.ExitType);
             var timestamp = TimeUtil.GetTime();
-            // Bound vote: commits to the burned amount and payout destination so the consensus
-            // validator can refuse an unlock that pays a different amount/address than was burned.
-            var voteAmountSats = (long)(record.Amount * 100_000_000M);
-            var voteDestination = record.ExitType == BurnExitType.VfxPoolUnlock ? record.VfxDestinationAddress : record.BtcDestination;
-            var voteSig = SignVoteMessage(baseBurnTxHash, burnType, voteAmountSats, voteDestination, timestamp);
+            // Bound vote: commits to the burned amount and payout destination (a refund's: amount and burner) so the
+            // consensus validator can refuse a transaction that pays a different amount/address than was burned.
+            var voteSig = SignMessageWithValidatorKey(RoundVoteMessage(record, timestamp, VBTCService.NextBlockHeight));
             var confirmation = new BurnExitConfirmation
             {
                 BaseBurnTxHash = baseBurnTxHash,
@@ -862,7 +900,7 @@ namespace VerifiedXCore.Bitcoin.Services
             record.FailedRounds = 0;
 
             record.Status = BurnExitStatus.ConsensusReached;
-            record.ConsensusVotes = VotesOf(confirmations, record.ExitType);
+            record.ConsensusVotes = VotesOf(confirmations, record.ExitType, RoundBurnType(record, VBTCService.NextBlockHeight));
 
             LogUtility.Log($"[BurnExitConsensus] Consensus reached for {baseBurnTxHash}. Handler: {winner.ProposerCasterAddress}, Votes: {confirmations.Count}", "BurnExitConsensusService");
 
@@ -941,7 +979,7 @@ namespace VerifiedXCore.Bitcoin.Services
             var destination = record.ExitType == BurnExitType.VfxPoolUnlock ? record.VfxDestinationAddress : record.BtcDestination;
             return ConfirmationsOfThisRound(held, winner, roundStartedAt)
                 .Where(c => BridgeCasterConsensus.VerifyConfirmation(c.ConfirmingCasterAddress, record.BaseBurnTxHash, burnType, amountSats, destination,
-                    c.Timestamp, c.Signature, committee).Ok)
+                    c.Timestamp, c.Signature, committee, RoundVoteMessage(record, c.Timestamp, VBTCService.NextBlockHeight)).Ok)
                 .ToList();
         }
 
@@ -988,10 +1026,17 @@ namespace VerifiedXCore.Bitcoin.Services
                 return;
             }
             var localDest = localRecord.ExitType == BurnExitType.VfxPoolUnlock ? localRecord.VfxDestinationAddress : localRecord.BtcDestination;
+            // The round's vote message can read the exit table: built only for a committee caster's confirmation.
+            var committee = ExitCommittee();
+            if (string.IsNullOrWhiteSpace(confirmation.ConfirmingCasterAddress) || !committee.Contains(confirmation.ConfirmingCasterAddress))
+            {
+                LogUtility.Log($"[BurnExitConsensus] REJECTED confirmation for {confirmation.BaseBurnTxHash} from {confirmation.ConfirmingCasterAddress}: confirming caster is not a committee member", "BurnExitConsensusService");
+                return;
+            }
             var (confOk, confReason) = BridgeCasterConsensus.VerifyConfirmation(
                 confirmation.ConfirmingCasterAddress, confirmation.BaseBurnTxHash, BurnTypeString(localRecord.ExitType),
                 (long)(localRecord.Amount * 100_000_000M), localDest, confirmation.Timestamp, confirmation.Signature,
-                ExitCommittee());
+                committee, RoundVoteMessage(localRecord, confirmation.Timestamp, VBTCService.NextBlockHeight));
             if (!confOk)
             {
                 LogUtility.Log($"[BurnExitConsensus] REJECTED confirmation for {confirmation.BaseBurnTxHash} from {confirmation.ConfirmingCasterAddress}: {confReason}", "BurnExitConsensusService");
@@ -1028,7 +1073,9 @@ namespace VerifiedXCore.Bitcoin.Services
             {
                 LogUtility.Log($"[BurnExitConsensus] Executing exit type={record.ExitType} for burn={record.BaseBurnTxHash}, amount={record.Amount}", "BurnExitConsensusService");
 
-                if (record.ExitType == BurnExitType.VfxPoolUnlock)
+                if (RefundReasonFor(record, VBTCService.NextBlockHeight) is { } refundReason)
+                    await ExecuteBurnRefund(record, refundReason);
+                else if (record.ExitType == BurnExitType.VfxPoolUnlock)
                     await ExecuteVfxPoolUnlock(record);
                 else if (record.ExitType == BurnExitType.BtcExit)
                     await ExecuteBtcExit(record);
@@ -1038,6 +1085,34 @@ namespace VerifiedXCore.Bitcoin.Services
                 record.Status = BurnExitStatus.Failed;
                 ErrorLogUtility.LogError($"[BurnExitConsensus] ExecuteExitTransaction error: {ex.Message}", "BurnExitConsensusService");
             }
+        }
+
+        /// <summary>
+        /// A refund round reached the threshold and this caster is its handler: it sends the VBTC_V2_BRIDGE_BURN_REFUND that
+        /// records the burn for the validators to sign (Globals.BridgeBurnRefundHeight). Once that is applied the burn is
+        /// consumed, and its record here is complete.
+        /// </summary>
+        private static async Task ExecuteBurnRefund(ProcessedBurnRecord record, string reason)
+        {
+            if (string.IsNullOrWhiteSpace(Globals.ValidatorAddress))
+            {
+                record.Status = BurnExitStatus.Failed;
+                return;
+            }
+            var result = await VBTCService.CreateBridgeBurnRefundTx(Globals.ValidatorAddress, record.BaseBurnTxHash, record.BurnerAddress,
+                (long)(record.Amount * 100_000_000M), reason, record.ConsensusVotes);
+            if (!result.Success)
+            {
+                if (NotSentIsRetried(record, result.TxHashOrError, "Refund"))
+                    return;
+                record.Status = BurnExitStatus.Failed;
+                ErrorLogUtility.LogError($"[BurnExitConsensus] Refund for burn {record.BaseBurnTxHash} not sent: {result.TxHashOrError}", "BurnExitConsensusService.ExecuteBurnRefund()");
+                return;
+            }
+            record.CompletionVfxTxHash = result.TxHashOrError;
+            record.CompletionBroadcastAtBlock = Globals.LastBlock?.Height ?? 0;
+            record.Status = BurnExitStatus.Complete;
+            LogUtility.Log($"[BurnExitConsensus] Refund for burn {record.BaseBurnTxHash} sent ({reason}): {result.TxHashOrError}", "BurnExitConsensusService.ExecuteBurnRefund()");
         }
 
         /// <summary>
@@ -1254,7 +1329,9 @@ namespace VerifiedXCore.Bitcoin.Services
                     record.BaseBurnTxHash,
                     allSuccessfulAllocations,
                     null, // No BTC withdrawals yet — reservation only
-                    record.ConsensusVotes);
+                    record.ConsensusVotes,
+                    minPayoutSats: VBTCService.NextBlockHeight >= Globals.ExitMinPayoutHeight ? record.MinPayoutSats : 0,
+                    baseBurner: VBTCService.NextBlockHeight >= Globals.ExitPartRefundHeight ? record.BurnerAddress : "");
 
                 if (!exitResult.Success)
                 {
@@ -1678,7 +1755,10 @@ namespace VerifiedXCore.Bitcoin.Services
         /// </summary>
         internal static bool? UnlockToRemake(ProcessedBurnRecord r, long currentBlock, Func<string, bool>? burnUsed = null, Func<string, bool>? stillPooled = null)
         {
-            if (r.ExitType != BurnExitType.VfxPoolUnlock || r.Status != BurnExitStatus.Complete || r.CompletionBroadcastAtBlock <= 0)
+            if (r.Status != BurnExitStatus.Complete || r.CompletionBroadcastAtBlock <= 0)
+                return null;
+            // A refund (Globals.BridgeBurnRefundHeight) is sent and followed the same way: made again if never mined.
+            if (r.ExitType != BurnExitType.VfxPoolUnlock && RefundReasonFor(r, currentBlock + 1) == null)
                 return null;
             var age = currentBlock - r.CompletionBroadcastAtBlock;
             if (age <= STUCK_EXIT_BLOCK_THRESHOLD && !(stillPooled != null && age >= DroppedUnlockBlocks && !stillPooled(r.CompletionVfxTxHash)))
@@ -2042,22 +2122,6 @@ namespace VerifiedXCore.Bitcoin.Services
                 var privKey = account.GetPrivKey;
                 if (privKey == null) return "";
                 var sig = VerifiedXCore.Services.SignatureService.CreateSignature(message, privKey, account.PublicKey);
-                return sig == "ERROR" ? "" : sig;
-            }
-            catch { return ""; }
-        }
-
-        private static string SignVoteMessage(string baseBurnTxHash, string burnType, long amountSats, string destination, long timestamp)
-        {
-            try
-            {
-                var account = Data.AccountData.GetSingleAccount(Globals.ValidatorAddress);
-                if (account == null) return "";
-                var privKey = account.GetPrivKey;
-                var pubKey = account.PublicKey;
-                if (privKey == null) return "";
-                var msg = BridgeCasterConsensus.BuildBoundVoteMessage(baseBurnTxHash, burnType, amountSats, destination, timestamp);
-                var sig = VerifiedXCore.Services.SignatureService.CreateSignature(msg, privKey, pubKey);
                 return sig == "ERROR" ? "" : sig;
             }
             catch { return ""; }

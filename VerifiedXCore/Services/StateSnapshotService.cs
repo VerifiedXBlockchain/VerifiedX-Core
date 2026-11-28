@@ -76,6 +76,7 @@ namespace VerifiedXCore.Services
             new SnapColl { Tag = "bridgelocks", SourceDb = () => DbContext.DB_VBTCWithdrawalRequests, SourceColl = VBTCBridgeLockState.CollectionName },
             new SnapColl { Tag = "bridgeexits", SourceDb = () => DbContext.DB_VBTCWithdrawalRequests, SourceColl = VBTCBridgeBtcExitState.CollectionName },
             new SnapColl { Tag = "bridgeburns", SourceDb = () => DbContext.DB_VBTCWithdrawalRequests, SourceColl = VBTCBridgeConsumedBurn.CollectionName },
+            new SnapColl { Tag = "bridgerefunds", SourceDb = () => DbContext.DB_VBTCWithdrawalRequests, SourceColl = VBTCBridgeRefundState.CollectionName },
             new SnapColl { Tag = "vbtcv2c", SourceDb = () => DbContext.DB_vBTC, SourceColl = DbContext.RSRV_VBTC_V2_CONTRACTS },
             new SnapColl { Tag = "vbtcv2x", SourceDb = () => DbContext.DB_vBTC, SourceColl = DbContext.RSRV_VBTC_V2_CANCELLATIONS },
             // Bitcoin facts in consensus. These grow with the number of vaults and deposits, so they are copied by
