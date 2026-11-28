@@ -46,6 +46,7 @@ the casters cannot without the validators.
 | Propose a new upgrade delay | `ProposeUpgradeDelay(delay, adminNonce)` | both |
 | Cancel what is pending | `CancelPending(adminNonce)` | either group's blocking minority: `validatorCount - requiredMintSignatures + 1` validators, or `requiredCasterVetoSignatures()` casters |
 | Cancel some kinds of what is pending (V5) | `CancelPendingKinds(kinds, adminNonce)`, `kinds` = bits `PENDING_UPGRADE` 1, `PENDING_UPGRADE_DELAY` 2, `PENDING_REMOVAL` 4 | either group's blocking minority |
+| Replace casters that went dark (V5) | `ReplaceCasters(remove[], add[], vfxBlockHeight, adminNonce)`; waits `upgradeDelay()` as a pending removal | 2/3 of the validators, and each new caster signs the same message itself |
 | Refund a burn VFX cannot pay (V5) | `Refund(to, amount, burnId)`, `burnId` = the burn's Base transaction hash; once per burn | both |
 
 - No group short of 2/3 can change the validators at once, so none can remove the others and become 2/3 of what is left.
@@ -68,6 +69,13 @@ the casters cannot without the validators.
 - V5: each seat records the `adminNonce` it was given at (`validatorSince`, `casterSince`), and a pending removal records
   the nonce it was proposed at (`pendingRemovalNonce`). `executeRemoval` leaves out a member seated after the proposal,
   so a member removed and admitted again is not removed by the older proposal.
+- V5: if so many casters go dark that `updateCasters` can no longer be approved, `proposeCasterReplacement` lets 2/3 of
+  the validators name the casters to remove and those to seat (each newcomer signing its own seat). It is a pending
+  removal: it waits `upgradeDelay()`, `executeRemoval()` carries it out, and either group's blocking minority cancels it,
+  so casters that are still live can always stop their own replacement. This is how Base follows a caster committee
+  that VFX re-elected after an outage. A newcomer seated meanwhile is kept as it is; the list stays between 3 and 10.
+- V5: a removal proposed before V5 is never executed (V4 kept no seat nonces, so V5 cannot tell a member admitted again
+  under V4); a new proposal may replace it at once.
 - V5: `burnForBTCExit` takes at least `MIN_BTC_EXIT_SATS` (25,186 sats, the smallest part a VFX vault pays in an exit
   to Bitcoin). `burnForBTCExitWithMinPayout(amount, btcDestination, minPayoutSats)` also emits `BTCExitMinPayout`, the
   least the holder accepts after Bitcoin fees, right after `BTCExitBurned`.
@@ -145,8 +153,7 @@ can no longer drop below 3.
 
 - **Base Sepolia (V4)**: `proposeUpgrade` (both groups), wait 48 hours, `executeUpgrade`. No call data is passed.
   Don't propose a removal while it waits: a node's automatic veto uses `cancelPending`, which also drops the upgrade.
-  Run or cancel any removal still pending before `executeUpgrade`: V4 kept no seat nonces, so a member removed and
-  admitted again under V4 is still removed by a V4 proposal that runs after the upgrade.
+  A removal still pending at the upgrade is not executed on V5; propose it again afterwards.
 - **Base mainnet (V3)**: straight to V5 with `upgradeWithValidatorApproval`, then the caster bootstrap above.
 - Core's `CONTRACT_ABI` (`VerifiedXCore/Bitcoin/Services/BaseBridgeService.cs`) is this build's ABI; a test checks it.
 

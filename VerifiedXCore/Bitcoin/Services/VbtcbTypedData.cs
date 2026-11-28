@@ -39,6 +39,7 @@ namespace VerifiedXCore.Bitcoin.Services
         private static readonly byte[] RemoveValidatorsTypeHash = Keccak("RemoveValidators(address[] validators,uint256 vfxBlockHeight,uint256 adminNonce)");
         private static readonly byte[] CancelPendingKindsTypeHash = Keccak("CancelPendingKinds(uint256 kinds,uint256 adminNonce)");
         private static readonly byte[] RefundTypeHash = Keccak("Refund(address to,uint256 amount,string burnId)");
+        private static readonly byte[] ReplaceCastersTypeHash = Keccak("ReplaceCasters(address[] remove,address[] add,uint256 vfxBlockHeight,uint256 adminNonce)");
 
         /// <summary>The V5 contract's cancelPendingKinds bits: PENDING_UPGRADE, PENDING_UPGRADE_DELAY, PENDING_REMOVAL.</summary>
         public const int PendingUpgrade = 1, PendingUpgradeDelay = 2, PendingRemoval = 4;
@@ -74,6 +75,13 @@ namespace VerifiedXCore.Bitcoin.Services
         /// </summary>
         public static byte[] RefundDigest(string to, long amountSats, string burnId, long chainId, string contractAddress) =>
             Digest(chainId, contractAddress, Keccak(Concat(RefundTypeHash, Address(to), Uint(amountSats), Keccak(burnId ?? ""))));
+
+        /// <summary>
+        /// V5's proposeCasterReplacement: 2/3 of the validators (and each added caster, for its own seat) replace casters that
+        /// went dark. Note the field order: remove, then add (UpdateCasters is add, then remove).
+        /// </summary>
+        public static byte[] ReplaceCastersDigest(IEnumerable<string> remove, IEnumerable<string> add, long vfxBlockHeight, BigInteger adminNonce, long chainId, string contractAddress) =>
+            Digest(chainId, contractAddress, Keccak(Concat(ReplaceCastersTypeHash, AddressList(remove), AddressList(add), Uint(vfxBlockHeight), Uint(adminNonce))));
 
         /// <summary>An address[] field: keccak256 of the 32-byte words in order (the contract's keccak256(abi.encodePacked(list))).</summary>
         internal static byte[] AddressList(IEnumerable<string> addresses) => Keccak(Concat(addresses.Select(Address).ToArray()));

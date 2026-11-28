@@ -87,6 +87,9 @@ namespace VerifiedXCore.Tests
                 VbtcbTypedData.RefundDigest("0x1111111111111111111111111111111111111111", 25_000, burnTx, 8453, Proxy));
             Assert.Equal(Hex("0x2394f227f1fd726c7517059368f7e11870232fb79c997f018802550a0ddcc915"),
                 VbtcbTypedData.RefundDigest("0x1111111111111111111111111111111111111111", 25_000, burnTx + ":1", 8453, Proxy));
+            Assert.Equal(Hex("0x1fe6b0c827c2c9af0a59be5da77bbef45804114810b01aab97e4cab1f7e2d7f7"),
+                VbtcbTypedData.ReplaceCastersDigest(new[] { "0x1111111111111111111111111111111111111111", "0x2222222222222222222222222222222222222222" },
+                    new[] { "0x3333333333333333333333333333333333333333" }, 12345, 7, 8453, Proxy));
         }
 
         [Fact]
@@ -108,7 +111,7 @@ namespace VerifiedXCore.Tests
             var functions = abi.Functions.Select(f => f.Name).ToHashSet();
             foreach (var name in new[] { "mintWithProof", "isLockIdUsed", "requiredMintSignatures", "balanceOf", "burnForVfxExit", "burnForBTCExit",
                          "MESSAGE_VERSION", "getValidators", "getCasters", "requiredCasterSignatures", "updateCasters", "cancelPending", "proposeRemoval",
-                         "cancelPendingKinds", "refundBurn", "burnForBTCExitWithMinPayout", "MIN_BTC_EXIT_SATS" })
+                         "cancelPendingKinds", "refundBurn", "burnForBTCExitWithMinPayout", "MIN_BTC_EXIT_SATS", "proposeCasterReplacement", "executeRemoval" })
                 Assert.Contains(name, functions);
             Assert.DoesNotContain("upgradeWithValidatorApproval", functions);
             Assert.Equal(4, abi.Functions.Single(f => f.Name == "addValidatorBatch").InputParameters.Length);
