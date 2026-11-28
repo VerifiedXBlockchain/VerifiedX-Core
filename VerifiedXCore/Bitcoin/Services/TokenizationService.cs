@@ -310,10 +310,9 @@ namespace VerifiedXCore.Bitcoin.Services
 
             if(VerifiedXCore.Bitcoin.Attestation.VaultLedgerStore.HasLedger(scState))
             {
-                var balances = VerifiedXCore.Bitcoin.Attestation.VaultLedgerStore.Rows(scState).Where(x => x.FromAddress == account.Address || x.ToAddress == account.Address).ToList();
-                if (balances.Any())
+                if (VerifiedXCore.Bitcoin.Attestation.VaultLedgerStore.Names(scState, account.Address))
                 {
-                    var balance = balances.Sum(x => x.Amount);
+                    var balance = VerifiedXCore.Bitcoin.Attestation.VaultLedgerStore.Balance(scState, account.Address);
                     var finalBalance = btcTkn.Balance + balance;
                     if(finalBalance <= 0)
                         return await SCLogUtility.LogAndReturn($"Cannot transfer a token with zero balance.", "TokenizationService.TransferOwnership()", false);
@@ -446,10 +445,9 @@ namespace VerifiedXCore.Bitcoin.Services
 
                 if(VerifiedXCore.Bitcoin.Attestation.VaultLedgerStore.HasLedger(scState))
                 {
-                    var balances = VerifiedXCore.Bitcoin.Attestation.VaultLedgerStore.Rows(scState).Where(x => x.FromAddress == account.Address || x.ToAddress == account.Address).ToList();
-                    if(balances.Any() || isOwner)
+                    if(VerifiedXCore.Bitcoin.Attestation.VaultLedgerStore.Names(scState, account.Address) || isOwner)
                     {
-                        var balance = balances.Sum(x => x.Amount);
+                        var balance = VerifiedXCore.Bitcoin.Attestation.VaultLedgerStore.Balance(scState, account.Address);
                         bool good = false;
                         if(isOwner)
                         {
@@ -641,10 +639,9 @@ namespace VerifiedXCore.Bitcoin.Services
 
                     if (VerifiedXCore.Bitcoin.Attestation.VaultLedgerStore.HasLedger(scState))
                     {
-                        var balances = VerifiedXCore.Bitcoin.Attestation.VaultLedgerStore.Rows(scState).Where(x => x.FromAddress == account.Address || x.ToAddress == account.Address).ToList();
-                        if (balances.Any() || isOwner)
+                        if (VerifiedXCore.Bitcoin.Attestation.VaultLedgerStore.Names(scState, account.Address) || isOwner)
                         {
-                            var balance = balances.Sum(x => x.Amount);
+                            var balance = VerifiedXCore.Bitcoin.Attestation.VaultLedgerStore.Balance(scState, account.Address);
                             bool good = false;
                             if (isOwner)
                             {
