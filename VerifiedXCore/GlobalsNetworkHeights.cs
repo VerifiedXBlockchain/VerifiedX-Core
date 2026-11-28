@@ -104,6 +104,9 @@ namespace VerifiedXCore
             Globals.BitcoinAttestationHeight = Globals.IsTestNet ? Globals.BitcoinAttestationTestnetHeight : Globals.BitcoinAttestationHeight;
             Globals.VreeActivationHeight = Globals.IsTestNet ? Globals.VreeActivationTestnetHeight : Globals.VreeActivationHeight;
             Globals.BaseBridgeV4Height = Globals.IsTestNet ? Globals.BaseBridgeV4TestnetHeight : Globals.BaseBridgeV4Height;
+            // The membership chain: its height and the record it starts from go together (Globals.MembershipAnchorRecordHash).
+            Globals.MembershipChainHeight = Globals.IsTestNet ? Globals.MembershipChainTestnetHeight : Globals.MembershipChainHeight;
+            Globals.MembershipAnchorRecordHash = Globals.IsTestNet ? Globals.MembershipAnchorRecordHashTestnet : Globals.MembershipAnchorRecordHash;
             if (Globals.IsTestNet) Globals.ShieldedSupplyCorrections.Clear(); // the testnet pool was never forged against
             if (Globals.IsCustomTestNet) ApplyCustomTestNetHeights();
         }
@@ -133,6 +136,26 @@ namespace VerifiedXCore
         /// upgrade every Marigold node first.
         /// </summary>
         public const long CustomTestNetLateRulesHeight = 30_000;
+
+        /// <summary>
+        /// The membership chain on the live testnet (MembershipChain): not set yet. Set at release, at the tip plus room to
+        /// upgrade every node, with <see cref="MembershipAnchorRecordHashTestnet"/> pinned the same day.
+        /// </summary>
+        public const long MembershipChainTestnetHeight = long.MaxValue;
+
+        /// <summary>The record the live testnet's membership chain starts from (see Globals.MembershipAnchorRecordHash). Empty: not started.</summary>
+        public const string MembershipAnchorRecordHashTestnet = "";
+
+        /// <summary>
+        /// The membership chain on Marigold. Added after Marigold passed <see cref="CustomTestNetLateRulesHeight"/>'s
+        /// planning tip, so a later block again. PLACEHOLDER: to be set to Marigold's tip plus about 3,000 before this
+        /// reaches devnet, with <see cref="CustomTestNetMembershipAnchorRecordHash"/> pinned the same day; until the anchor
+        /// is set the chain's rules do not start here at any height.
+        /// </summary>
+        public const long CustomTestNetMembershipChainHeight = 60_000;
+
+        /// <summary>The record Marigold's membership chain starts from. Empty: not started (pinned with the height).</summary>
+        public const string CustomTestNetMembershipAnchorRecordHash = "";
 
         /// <summary>
         /// The custom testnet's heights, over the testnet ones. Config.ProcessConfig selects a custom testnet after
@@ -199,6 +222,8 @@ namespace VerifiedXCore
             Globals.BridgeVotesBoundToAttemptHeight = CustomTestNetLateRulesHeight;
             Globals.BridgeAllocationsSignableHeight = CustomTestNetLateRulesHeight;
             Globals.BridgeLockPartMinimumHeight = CustomTestNetLateRulesHeight;
+            Globals.MembershipChainHeight = CustomTestNetMembershipChainHeight;
+            Globals.MembershipAnchorRecordHash = CustomTestNetMembershipAnchorRecordHash;
         }
     }
 }

@@ -119,6 +119,9 @@ namespace VerifiedXCore.Tests
             Assert.Equal(Globals.CustomTestNetLateRulesHeight, Globals.BridgeLockPartMinimumHeight);
             Assert.True(Globals.CustomTestNetInputRulesHeight > Globals.CustomTestNetRulesHeight, "rules added while Marigold runs start after its tip, not at 401");
             Assert.True(Globals.CustomTestNetLateRulesHeight > Globals.CustomTestNetInputRulesHeight, "rules added after Marigold passed 8,500 start after its tip then");
+            Assert.Equal(Globals.CustomTestNetMembershipChainHeight, Globals.MembershipChainHeight);
+            Assert.Equal(Globals.CustomTestNetMembershipAnchorRecordHash, Globals.MembershipAnchorRecordHash);
+            Assert.True(Globals.CustomTestNetMembershipChainHeight > Globals.CustomTestNetLateRulesHeight, "the membership chain was added after the late rules' tip");
         }
 
         [Fact]
@@ -136,8 +139,12 @@ namespace VerifiedXCore.Tests
             Assert.Equal(long.MaxValue, Globals.BridgeVotesBoundToAttemptHeight);
             Assert.Equal(long.MaxValue, Globals.BridgeAllocationsSignableHeight);
             Assert.Equal(long.MaxValue, Globals.BridgeLockPartMinimumHeight);
+            Assert.Equal(long.MaxValue, Globals.MembershipChainHeight);
+            Assert.Equal("", Globals.MembershipAnchorRecordHash);
 
             StartTestnetNode(new Config.Config { TestNet = true });
+            Assert.Equal(long.MaxValue, Globals.MembershipChainHeight); // not in that release
+            Assert.Equal("", Globals.MembershipAnchorRecordHash);
             Assert.Equal(230_750L, Globals.ReleaseRulesTestnetHeight);
             Assert.Equal(Globals.ReleaseRulesTestnetHeight, Globals.RawDataVerbatimHeight);
             Assert.Equal(Globals.ReleaseRulesTestnetHeight, Globals.ContractBodyKeySpellingHeight);
