@@ -24,7 +24,7 @@ namespace VerifiedXCore.Bitcoin.Services
         // row is passed over and logged for an operator's rescan.
         private static int _span = MaxBlockSpan;
         private static int _singleBlockFailures;
-        private const int SingleBlockFailuresBeforeSkip = 20;
+        internal const int SingleBlockFailuresBeforeSkip = 20;
 
         // The widest span read without error and the narrowest one refused above it (a provider's range cap: 200 blocks
         // on sepolia.base.org). The span settles between them: doubled into the cap and cut to a quarter on every refusal,
@@ -171,16 +171,69 @@ namespace VerifiedXCore.Bitcoin.Services
             return Math.Max(1, span / 4);
         }
 
+        private static readonly object CursorLock = new();
+        /// <summary>The rescans asked for, each with its number in order and the cursor it set; the last few are kept.</summary>
+        private static readonly List<(long Number, long Cursor)> Rescans = new();
+        private static long _rescanNumber;
+        /// <summary>Which rescans each poll's state was read after: the number of the last one before the read.</summary>
+        private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<BridgeExitSyncState, object> ReadAfter = new();
+
+        /// <summary>The scan state as a poll starts from it. A rescan asked for before this is in it already.</summary>
+        internal static BridgeExitSyncState ReadCursorForPoll()
+        {
+            lock (CursorLock)
+            {
+                var state = BridgeExitSyncState.GetOrCreate();
+                ReadAfter.AddOrUpdate(state, _rescanNumber);
+                return state;
+            }
+        }
+
+        /// <summary>
+        /// Saves the scan state a poll holds. A rescan asked for after that poll read the state is kept: the cursor
+        /// saved is no later than the one the rescan asked for, so the next poll reads from there. Each poll is judged
+        /// by its own read, so another poll starting in between does not make it forget the rescan.
+        /// </summary>
+        internal static void SaveCursorFromPoll(BridgeExitSyncState state)
+        {
+            lock (CursorLock)
+            {
+                var readAfter = ReadAfter.TryGetValue(state, out var number) ? (long)number : _rescanNumber;
+                foreach (var rescan in Rescans)
+                    if (rescan.Number > readAfter)
+                        state.LastScannedBlock = Math.Min(state.LastScannedBlock, rescan.Cursor);
+                BridgeExitSyncState.Save(state);
+            }
+        }
+
+        /// <summary>Tests only: forgets the rescans asked for.</summary>
+        internal static void ForgetRescansForTests() { lock (CursorLock) Rescans.Clear(); }
+
         /// <summary>Reset the scan cursor to rescan from a specific block. Next poll will start from fromBlock.</summary>
         public static (bool Success, string Message) RescanFromBlock(long fromBlock)
         {
             if (fromBlock < 0)
                 return (false, "Block number must be >= 0");
 
-            var state = BridgeExitSyncState.GetOrCreate();
-            var previousBlock = state.LastScannedBlock;
-            state.LastScannedBlock = Math.Max(0, fromBlock - 1);
-            BridgeExitSyncState.Save(state);
+            long previousBlock;
+            BridgeExitSyncState state;
+            lock (CursorLock)
+            {
+                state = BridgeExitSyncState.GetOrCreate();
+                previousBlock = state.LastScannedBlock;
+                state.LastScannedBlock = Math.Max(0, fromBlock - 1);
+                BridgeExitSyncState.Save(state);
+                // A poll already under way read the cursor before this and saves where it got to when it ends: it is told.
+                Rescans.Add((++_rescanNumber, state.LastScannedBlock));
+                // The list stays short without forgetting what an unfinished poll still needs: the two oldest become
+                // one, under the later number and the earlier cursor, so any poll that predates either is still held
+                // to the earliest block asked for.
+                if (Rescans.Count > 64)
+                {
+                    Rescans[1] = (Rescans[1].Number, Math.Min(Rescans[0].Cursor, Rescans[1].Cursor));
+                    Rescans.RemoveAt(0);
+                }
+            }
 
             var msg = $"Reset exit scan cursor from {previousBlock} to {state.LastScannedBlock} (will rescan from block {fromBlock})";
             LogUtility.Log($"[BaseBridgeExit] {msg}", "BaseBridgeExitWatchService.RescanFromBlock");
@@ -195,7 +248,7 @@ namespace VerifiedXCore.Bitcoin.Services
             return await PollOnceInternal();
         }
 
-        private static async Task<bool> CanReadLogs(Web3 web3, string? contract, long block, long latest)
+        private static async Task<bool> CanReadLogs(string? contract, long block, long latest)
         {
             if (block > latest || string.IsNullOrEmpty(contract)) return false;
             try
@@ -206,7 +259,7 @@ namespace VerifiedXCore.Bitcoin.Services
                     ToBlock = new BlockParameter(new HexBigInteger(block)),
                     Address = new[] { contract },
                 };
-                await web3.Eth.Filters.GetLogs.SendRequestAsync(probe);
+                await BaseRpc.AuthorizingPrimaryAsync((web3, _) => web3.Eth.Filters.GetLogs.SendRequestAsync(probe));
                 return true;
             }
             catch { return false; }
@@ -236,7 +289,7 @@ namespace VerifiedXCore.Bitcoin.Services
             LogUtility.Log($"[BaseBridgeExit] Now handling burns: reading Base again from block {back + 1} (cursor was {state.LastScannedBlock}).",
                 "BaseBridgeExitWatchService.PollOnceInternal");
             state.LastScannedBlock = back;
-            BridgeExitSyncState.Save(state);
+            SaveCursorFromPoll(state);
         }
 
         /// <summary>Records a burn this node handed to the casters' consensus, read in Base block <paramref name="baseBlock"/>.</summary>
@@ -284,7 +337,7 @@ namespace VerifiedXCore.Bitcoin.Services
             LogUtility.Log($"[BaseBridgeExit] The path-audit rules have begun: reading Base again from block {back + 1} (cursor was {state.LastScannedBlock}).",
                 "BaseBridgeExitWatchService.PollOnceInternal");
             state.LastScannedBlock = back;
-            BridgeExitSyncState.Save(state);
+            SaveCursorFromPoll(state);
         }
 
         /// <summary>Test seam: forget the start and handling history.</summary>
@@ -321,19 +374,19 @@ namespace VerifiedXCore.Bitcoin.Services
 
         private static async Task<(int Processed, long ScannedToBlock, string Message)> PollOnceInternal()
         {
-            var web3 = new Web3(BaseBridgeService.BaseRpcUrl);
-            var latestHex = await web3.Eth.Blocks.GetBlockNumber.SendRequestAsync();
+            // The burns read here start an exit: authorizing reads, of the first configured provider.
+            var latestHex = await BaseRpc.AuthorizingPrimaryAsync((web3, _) => web3.Eth.Blocks.GetBlockNumber.SendRequestAsync());
             var latest = (long)latestHex.Value;
             _behind = false;
 
-            var state = BridgeExitSyncState.GetOrCreate();
+            var state = ReadCursorForPoll();
 
             if (state.LastScannedBlock == 0)
             {
                 if (_startBlockOverride.HasValue)
                 {
                     state.LastScannedBlock = Math.Max(0, _startBlockOverride.Value - 1);
-                    BridgeExitSyncState.Save(state);
+                    SaveCursorFromPoll(state);
                     LogUtility.Log(
                         $"[BaseBridgeExit] BASE_BRIDGE_EXIT_FROM_BLOCK={_startBlockOverride}; scanning from block {state.LastScannedBlock + 1}",
                         "BaseBridgeExitWatchService.PollOnceInternal");
@@ -341,7 +394,7 @@ namespace VerifiedXCore.Bitcoin.Services
                 else
                 {
                     state.LastScannedBlock = Math.Max(0, latest - 1);
-                    BridgeExitSyncState.Save(state);
+                    SaveCursorFromPoll(state);
                     LogUtility.Log($"[BaseBridgeExit] Initialized scan cursor at block {state.LastScannedBlock} (only new burns after this are processed).",
                         "BaseBridgeExitWatchService.PollOnceInternal");
                     _started = true;
@@ -375,6 +428,9 @@ namespace VerifiedXCore.Bitcoin.Services
 
             var processed = 0;
             var scanFailed = false;
+            // Whether the range could not be read because of the provider (BaseProviderException), not because of the
+            // range: such a read says nothing about the block, so it never counts toward passing a block over.
+            var providerAtFault = false;
 
             // Both kinds of burn are read before either is handled: a burn's id counts every bridge burn of its transaction
             // (BaseBridgeService.BurnId). A range one kind of which could not be read is read again, both kinds.
@@ -387,19 +443,31 @@ namespace VerifiedXCore.Bitcoin.Services
             {
                 if (!string.IsNullOrEmpty(v3Contract))
                 {
-                    var vfxExitHandler = web3.Eth.GetEvent<VfxExitBurnedEventDTO>(v3Contract);
-                    vfxExitLogs = await vfxExitHandler.GetAllChangesAsync(vfxExitHandler.CreateFilterInput(
+                    vfxExitLogs = await BaseRpc.AuthorizingPrimaryAsync((web3, _) =>
+                    {
+                        var vfxExitHandler = web3.Eth.GetEvent<VfxExitBurnedEventDTO>(v3Contract);
+                        return vfxExitHandler.GetAllChangesAsync(vfxExitHandler.CreateFilterInput(
+                            new BlockParameter(new HexBigInteger(from)),
+                            new BlockParameter(new HexBigInteger(to))));
+                    });
+                }
+                btcLogs = await BaseRpc.AuthorizingPrimaryAsync((web3, _) =>
+                {
+                    var btcEventHandler = web3.Eth.GetEvent<BTCExitBurnedEventDTO>(btcExitContract);
+                    return btcEventHandler.GetAllChangesAsync(btcEventHandler.CreateFilterInput(
                         new BlockParameter(new HexBigInteger(from)),
                         new BlockParameter(new HexBigInteger(to))));
-                }
-                var btcEventHandler = web3.Eth.GetEvent<BTCExitBurnedEventDTO>(btcExitContract);
-                btcLogs = await btcEventHandler.GetAllChangesAsync(btcEventHandler.CreateFilterInput(
-                    new BlockParameter(new HexBigInteger(from)),
-                    new BlockParameter(new HexBigInteger(to))));
+                });
+                // The contract writes its own chain's id into every burn: a log that names another chain is not Base's,
+                // and the range is read again like one that could not be read.
+                if (vfxExitLogs.Any(e => e.Event != null && !BaseRpc.IsExpectedChain(e.Event.ChainId))
+                    || btcLogs.Any(e => e.Event != null && !BaseRpc.IsExpectedChain(e.Event.ChainId)))
+                    throw new BaseProviderException(BaseBridgeService.BurnOnAnotherChain);
             }
             catch (Exception readEx)
             {
                 scanFailed = true;
+                providerAtFault = readEx is BaseProviderException;
                 vfxExitLogs.Clear();
                 btcLogs.Clear();
                 LogUtility.Log($"[BaseBridgeExit] Burn log query error: {readEx.Message}",
@@ -522,11 +590,17 @@ namespace VerifiedXCore.Bitcoin.Services
                     _span = SpanAfterFailure(_span);
                     return (processed, state.LastScannedBlock, $"Base log query failed; the range is read again next poll, {_span} block(s) at a time");
                 }
+                // A block is passed over for failures of its own (a block the provider cannot serve while it serves the
+                // next). A provider that is not on Base, or whose logs are not Base's, has not read the block at all:
+                // however often that repeats, the block waits, and is read once a provider that is right answers. Passed
+                // over, every burn in the block was lost with it, and setting the provider right did not bring them back.
+                if (providerAtFault)
+                    return (processed, state.LastScannedBlock, "The Base provider's answer is not Base's; the block is read again, not passed over");
                 if (++_singleBlockFailures < SingleBlockFailuresBeforeSkip)
                     return (processed, state.LastScannedBlock, "Base log query failed for one block; read again next poll");
                 // Passed over only when the provider reads the next block: during an outage nothing is skipped, the
                 // watcher waits (round 22).
-                if (!await CanReadLogs(web3, contract, from + 1, latest))
+                if (!await CanReadLogs(contract, from + 1, latest))
                 {
                     _singleBlockFailures = SingleBlockFailuresBeforeSkip - 1;
                     return (processed, state.LastScannedBlock, "Base log queries are failing; waiting for the provider");
@@ -541,7 +615,7 @@ namespace VerifiedXCore.Bitcoin.Services
             _singleBlockFailures = 0;
 
             state.LastScannedBlock = to;
-            BridgeExitSyncState.Save(state);
+            SaveCursorFromPoll(state);
             _behind = to < latest;
 
             return (processed, to, processed > 0 ? $"Processed {processed} exit burn(s)" : "OK");

@@ -504,9 +504,10 @@ namespace VerifiedXCore.Tests
             Assert.False(ok);
             Assert.Contains("led by the withdrawal owner", why);
 
-            // Its owner is its only leader: not counted in the requester-led share of signing room (round 25), as a
-            // requester of a watched vault is (round 24).
-            Assert.False(FrostSigningAuthorization.LedByRequester(Minter.Address, legacy.Uid));
+            // Its owner is its only leader, and holds no share of its key: its place in the signing room is its vault's,
+            // as a requester's on a watched vault is, and no other vault's (rounds 24 and 25).
+            Assert.True(FrostSigningAuthorization.LedByRequester(Minter.Address, legacy.Uid));
+            Assert.False(FrostSigningAuthorization.LedByRequester(Signers[0].Address, legacy.Uid));
             var watched = await CreateVault(Tip + 1, keyHolders: Signers);
             Assert.True(FrostSigningAuthorization.LedByRequester(Minter.Address, watched.Uid));
             Assert.False(FrostSigningAuthorization.LedByRequester(Signers[0].Address, watched.Uid));

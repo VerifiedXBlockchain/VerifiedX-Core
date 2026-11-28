@@ -15,11 +15,19 @@ namespace VerifiedXCore.Tests
     /// </summary>
     public class PathAudit2_SigningSessionTests
     {
-        private static SigningSession Session(string leader, string txid, int input, long startedSecondsAgo = 0, string? hash = null) => new()
+        private static SigningSession Session(string leader, string txid, int input, long startedSecondsAgo = 0, string? hash = null, string? requesterOfVault = null) => new()
         {
             SessionId = Guid.NewGuid().ToString("N"), LeaderAddress = leader, BtcTxId = txid, InputIndex = input, MessageHash = hash ?? txid + ":" + input,
             StartTimestamp = TimeUtil.GetTime() - startedSecondsAgo, SignerAddresses = new List<string>(),
+            LedByRequester = requesterOfVault != null, VaultUID = requesterOfVault,
         };
+
+        private static SigningSession Finished(SigningSession s)
+        {
+            s.NonceSecret = "secret";
+            Assert.True(s.TryConsumeNonceSecret(out _));
+            return s;
+        }
 
         /// <summary>
         /// Finished sessions make way for a new start when the validator's total is reached: one leader starting and
@@ -68,7 +76,7 @@ namespace VerifiedXCore.Tests
             // Everybody else still has room.
             Assert.Null(FrostSessionStorage.SigningStartRefusal(open, "leaderB", "another"));
 
-            // The same thing to sign: a leader may retry it once while its first session is open, no more...
+            // The same thing to sign: a leader has one session open for it, no more...
             open.Clear();
             for (var i = 0; i < FrostSessionStorage.MAX_SIGNING_SESSIONS_PER_LEADER_AND_HASH; i++)
                 open.Add(Session("requester", "pinned", 2, hash: "sighash"));
@@ -82,24 +90,29 @@ namespace VerifiedXCore.Tests
 
         /// <summary>
         /// Counted per leader only, nine requester addresses with pinned withdrawals filled every validator's room and
-        /// every payout stalled (fifth review, round 24). Requester-led ceremonies share a part of the room; the rest is
-        /// kept for the key's holders.
+        /// every payout stalled (fifth review, round 24). A requester-led ceremony's place is its vault's: a vault's
+        /// requesters, however many, hold that vault's places, and neither another vault's nor the key holders'.
         /// </summary>
         [Fact]
-        public void RequesterLedCeremonies_ShareAPartOfTheRoom_TheRestIsKeptForTheKeysHolders()
+        public void RequesterLedCeremonies_HoldTheirOwnVaultsPlaces_AndNoOthers()
         {
             var open = new List<SigningSession>();
-            for (var r = 0; open.Count < FrostSessionStorage.MAX_REQUESTER_LED_SIGNING_SESSIONS; r++)
-                for (var i = 0; i < FrostSessionStorage.MAX_SIGNING_SESSIONS_PER_LEADER && open.Count < FrostSessionStorage.MAX_REQUESTER_LED_SIGNING_SESSIONS; i++)
-                {
-                    Assert.Null(FrostSessionStorage.SigningStartRefusal(open, "requester" + r, "h" + r + ":" + i, ledByRequester: true));
-                    var s = Session("requester" + r, "tx" + r + i, 0, hash: "h" + r + ":" + i);
-                    s.LedByRequester = true;
-                    open.Add(s);
-                }
-            Assert.Contains("requester-led", FrostSessionStorage.SigningStartRefusal(open, "fresh-requester", "x", ledByRequester: true));
-            Assert.Null(FrostSessionStorage.SigningStartRefusal(open, "signer1", "x"));
-            Assert.True(FrostSessionStorage.MAX_SIGNING_SESSIONS - FrostSessionStorage.MAX_REQUESTER_LED_SIGNING_SESSIONS >= 300);
+            for (var r = 0; r < FrostSessionStorage.MAX_REQUESTER_LED_SIGNING_SESSIONS_PER_VAULT; r++)
+            {
+                Assert.Null(FrostSessionStorage.SigningStartRefusal(open, "requester" + r, "h" + r, ledByRequester: true, vaultUid: "vault1"));
+                open.Add(Session("requester" + r, "tx" + r, 0, hash: "h" + r, requesterOfVault: "vault1"));
+            }
+            Assert.Contains("for this vault", FrostSessionStorage.SigningStartRefusal(open, "fresh-requester", "x", ledByRequester: true, vaultUid: "vault1"));
+            Assert.Null(FrostSessionStorage.SigningStartRefusal(open, "fresh-requester", "x", ledByRequester: true, vaultUid: "vault2"));
+            Assert.Null(FrostSessionStorage.SigningStartRefusal(open, "signer1", "x", vaultUid: "vault1"));
+
+            // All of them together are bounded too (what they may hold in memory): that refuses requesters, never a holder.
+            for (var v = 2; open.Count < FrostSessionStorage.MAX_REQUESTER_LED_SIGNING_SESSIONS; v++)
+                for (var r = 0; r < FrostSessionStorage.MAX_REQUESTER_LED_SIGNING_SESSIONS_PER_VAULT; r++)
+                    open.Add(Session($"requester{v}-{r}", $"tx{v}-{r}", 0, requesterOfVault: "vault" + v));
+            Assert.Contains("requester-led", FrostSessionStorage.SigningStartRefusal(open, "fresh-requester", "x", ledByRequester: true, vaultUid: "a-new-vault"));
+            Assert.Null(FrostSessionStorage.SigningStartRefusal(open, "signer1", "x", vaultUid: "a-new-vault"));
+            Assert.Null(FrostSessionStorage.SigningStartRefusal(open, null, null));
         }
 
         /// <summary>A session whose share was given holds no place: a leader that just signed a 50-input transaction was refused for the next (round 25).</summary>
@@ -119,33 +132,60 @@ namespace VerifiedXCore.Tests
             Assert.Contains("Maximum concurrent", FrostSessionStorage.SigningStartRefusal(many, "new", "new"));
         }
 
+        /// <summary>
+        /// The room of the keys' holders and of casters has a limit too: never less than MAX_SIGNING_SESSIONS, and
+        /// every validator's own limit as the validator set grows. Before the leader is known a start is refused only
+        /// when there is no place in any room.
+        /// </summary>
         [Fact]
-        public void TheValidatorAsAWholeHasALimitToo()
+        public void TheRoomOfTheKeysHoldersHasALimitToo_AndFollowsTheValidatorSet()
         {
             var open = Enumerable.Range(0, FrostSessionStorage.MAX_SIGNING_SESSIONS).Select(i => Session("leader" + i, "tx" + i, 0)).ToList();
-            Assert.Contains("Maximum concurrent signing sessions", FrostSessionStorage.SigningStartRefusal(open, "new", "new"));
-            Assert.Contains("Maximum concurrent signing sessions", FrostSessionStorage.SigningStartRefusal(open, null, null));
+            Assert.Contains("Maximum concurrent signing sessions", FrostSessionStorage.SigningStartRefusal(open, "new", "new", validators: 0));
+            Assert.Contains("Maximum concurrent signing sessions", FrostSessionStorage.SigningStartRefusal(open, "new", "new", validators: FrostSessionStorage.MAX_SIGNING_SESSIONS / FrostSessionStorage.MAX_SIGNING_SESSIONS_PER_LEADER));
+            Assert.Null(FrostSessionStorage.SigningStartRefusal(open, "new", "new", validators: FrostSessionStorage.MAX_SIGNING_SESSIONS / FrostSessionStorage.MAX_SIGNING_SESSIONS_PER_LEADER + 1));
+            Assert.Equal(FrostSessionStorage.PlannedMaxValidators * FrostSessionStorage.MAX_SIGNING_SESSIONS_PER_LEADER, FrostSessionStorage.SigningRoomForValidators(FrostSessionStorage.PlannedMaxValidators));
+            // A requester still has its vault's place, and nobody is refused before its leader is known.
+            Assert.Null(FrostSessionStorage.SigningStartRefusal(open, "requester", "new", ledByRequester: true, vaultUid: "vault", validators: 0));
+            Assert.Null(FrostSessionStorage.SigningStartRefusal(open, null, null, validators: 0));
+            for (var v = 0; open.Count < FrostSessionStorage.MAX_SIGNING_SESSIONS + FrostSessionStorage.MAX_REQUESTER_LED_SIGNING_SESSIONS; v++)
+                open.Add(Session("requester" + v, "rtx" + v, 0, requesterOfVault: "vault" + v));
+            Assert.Contains("Maximum concurrent signing sessions", FrostSessionStorage.SigningStartRefusal(open, null, null, validators: 0));
             open.RemoveAt(0);
-            Assert.Null(FrostSessionStorage.SigningStartRefusal(open, "new", "new"));
+            Assert.Null(FrostSessionStorage.SigningStartRefusal(open, "new", "new", validators: 0));
+        }
+
+        /// <summary>A session whose Round 2 has not come holds its place for two minutes, whoever counts.</summary>
+        [Fact]
+        public void ASessionWithoutItsRound2_HoldsNoPlaceAfterTwoMinutes()
+        {
+            var open = Enumerable.Range(0, FrostSessionStorage.MAX_SIGNING_SESSIONS_PER_LEADER)
+                .Select(i => Session("leaderA", "tx" + i, 0, startedSecondsAgo: FrostSessionStorage.SIGNING_UNPROGRESSED_SECONDS - 10)).ToList();
+            Assert.Contains("This leader already has", FrostSessionStorage.SigningStartRefusal(open, "leaderA", "next"));
+            foreach (var s in open) s.StartTimestamp -= 20;
+            Assert.Null(FrostSessionStorage.SigningStartRefusal(open, "leaderA", "next"));
         }
 
         [Fact]
-        public void ASigningSession_IsDroppedTenMinutesAfterItStarted()
+        public void ASigningSession_IsDroppedTenMinutesAfterItStarted_AndAfterTwoWithoutItsRound2()
         {
-            var fresh = Session("leaderA", "txFresh", 0, startedSecondsAgo: FrostSessionStorage.SIGNING_SESSION_SECONDS - 30);
-            var old = Session("leaderA", "txOld", 0, startedSecondsAgo: FrostSessionStorage.SIGNING_SESSION_SECONDS + 30);
+            var fresh = Finished(Session("leaderA", "txFresh", 0, startedSecondsAgo: FrostSessionStorage.SIGNING_SESSION_SECONDS - 30));
+            var old = Finished(Session("leaderA", "txOld", 0, startedSecondsAgo: FrostSessionStorage.SIGNING_SESSION_SECONDS + 30));
+            var open = Session("leaderA", "txOpen", 0, startedSecondsAgo: FrostSessionStorage.SIGNING_UNPROGRESSED_SECONDS - 30);
+            var idle = Session("leaderA", "txIdle", 0, startedSecondsAgo: FrostSessionStorage.SIGNING_UNPROGRESSED_SECONDS + 30);
+            var all = new[] { fresh, old, open, idle };
             try
             {
-                Assert.True(FrostSessionStorage.SigningSessions.TryAdd(fresh.SessionId, fresh));
-                Assert.True(FrostSessionStorage.SigningSessions.TryAdd(old.SessionId, old));
+                foreach (var s in all) Assert.True(FrostSessionStorage.SigningSessions.TryAdd(s.SessionId, s));
                 FrostSessionStorage.CleanupOldSessions();
                 Assert.True(FrostSessionStorage.SigningSessions.ContainsKey(fresh.SessionId));
                 Assert.False(FrostSessionStorage.SigningSessions.ContainsKey(old.SessionId));
+                Assert.True(FrostSessionStorage.SigningSessions.ContainsKey(open.SessionId));
+                Assert.False(FrostSessionStorage.SigningSessions.ContainsKey(idle.SessionId));
             }
             finally
             {
-                FrostSessionStorage.SigningSessions.TryRemove(fresh.SessionId, out _);
-                FrostSessionStorage.SigningSessions.TryRemove(old.SessionId, out _);
+                foreach (var s in all) FrostSessionStorage.SigningSessions.TryRemove(s.SessionId, out _);
             }
         }
     }

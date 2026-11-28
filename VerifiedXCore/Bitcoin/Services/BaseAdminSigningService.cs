@@ -166,17 +166,13 @@ namespace VerifiedXCore.Bitcoin.Services
         private static async Task<byte[]?> ReadCodeAsync(string address)
         {
             if (ReadCodeForTests != null) return await ReadCodeForTests(address);
-            foreach (var url in BaseBridgeService.RpcUrlCandidates())
+            var code = await BaseRpc.AuthorizingFirstAsync(async (web3, at) =>
             {
-                try
-                {
-                    var hex = await new Web3(url).Eth.GetCode.SendRequestAsync(address);
-                    var body = (hex ?? "").StartsWith("0x", StringComparison.OrdinalIgnoreCase) ? hex![2..] : hex ?? "";
-                    return Convert.FromHexString(body);
-                }
-                catch { }
-            }
-            return null;
+                var hex = await web3.Eth.GetCode.SendRequestAsync(address, at);
+                var body = (hex ?? "").StartsWith("0x", StringComparison.OrdinalIgnoreCase) ? hex![2..] : hex ?? "";
+                return Convert.FromHexString(body);
+            });
+            return code.Answered ? code.Value : null;
         }
 
         private static bool IsAddress(string? a)

@@ -145,37 +145,132 @@ namespace VerifiedXCore.Bitcoin.Services
             }
             LogUtility.Log($"[UserBridgeMint] VFX lock confirmed for {lockId} at block {record.VfxLockBlockHeight}", "UserBridgeMintService");
 
-            // Step 2: Collect validator attestation signatures
-            // Use BaseBridgeService.BaseChainId consistently (same source used for mint submission)
-            var requiredSigs = await BaseBridgeService.GetRequiredMintSignaturesFromChainAsync();
-            var contractAddress = BaseBridgeService.ContractAddress;
-            var chainId = (long)BaseBridgeService.BaseChainId;
-            var nonce = record.VfxLockBlockHeight;
+            // Steps 2 and 3: collect the signatures and submit mintWithProof with the user's own key.
+            await CollectAndMint(record, ownerAddress, userBaseAddress, "");
+        }
 
-            record.MintNonce = nonce;
-            record.RequiredSignatures = requiredSigs;
-            record.Status = BridgeLockStatus.AttestationPending;
-            BridgeLockRecord.Save(record);
+        /// <summary>What became of a mint's submission to Base.</summary>
+        internal enum MintSend
+        {
+            /// <summary>Base holds the mint in a block.</summary>
+            Confirmed,
+            /// <summary>Sent to Base, and not seen in a block within the wait.</summary>
+            Sent,
+            /// <summary>Nothing was sent: Base refused the gas estimate or the transaction.</summary>
+            Refused,
+            /// <summary>Base holds the transaction in a block, reverted.</summary>
+            Reverted,
+            /// <summary>Nothing could be sent from this node (no account, key or configuration).</summary>
+            NotPossible,
+        }
 
-            LogUtility.Log($"[UserBridgeMint] Collecting attestations for {lockId}. Need {requiredSigs} signatures.", "UserBridgeMintService");
+        /// <summary>How many times signatures are collected and the mint submitted before the lock is marked failed.</summary>
+        internal const int MintAttempts = 3;
+        /// <summary>Milliseconds between two such attempts.</summary>
+        internal static int MintRetryDelayMs = 15_000;
 
-            var signatures = await CollectValidatorSignatures(record, nonce, chainId, contractAddress, requiredSigs);
+        private static Task CollectAndMint(BridgeLockRecord record, string ownerAddress, string userBaseAddress, string tag) =>
+            CollectAndMint(record, tag,
+                async () =>
+                {
+                    // Use BaseBridgeService.BaseChainId consistently (same source used for mint submission)
+                    var required = await BaseBridgeService.GetRequiredMintSignaturesFromChainAsync();
+                    record.MintNonce = record.VfxLockBlockHeight;
+                    record.RequiredSignatures = required;
+                    record.Status = BridgeLockStatus.AttestationPending;
+                    BridgeLockRecord.Save(record);
+                    LogUtility.Log($"[UserBridgeMint] {tag}Collecting attestations for {record.LockId}. Need {required} signatures.", "UserBridgeMintService");
+                    return (await CollectValidatorSignatures(record, record.MintNonce, (long)BaseBridgeService.BaseChainId, BaseBridgeService.ContractAddress, required), required);
+                },
+                () => SubmitMintWithProofAsUser(record, ownerAddress, userBaseAddress));
 
-            if (signatures == null || signatures.Count < requiredSigs)
+        /// <summary>
+        /// Collects a lock's signatures and submits its mint. When Base refuses the mint before anything is sent, the
+        /// signatures are collected afresh and it is submitted again, up to <see cref="MintAttempts"/> times: the
+        /// contract counts signatures against its signer lists as they are when the mint runs, so signatures collected
+        /// before a change of those lists, or in a form the contract does not read, are replaced by ones it counts.
+        /// Only after the last refusal is the lock marked failed.
+        /// </summary>
+        internal static async Task CollectAndMint(BridgeLockRecord record, string tag,
+            Func<Task<(Dictionary<string, string>? Signatures, int Required)>> collect, Func<Task<(MintSend Outcome, string? Reason)>> submit)
+        {
+            var lockId = record.LockId;
+            // One mint of a lock at a time: a second one started meanwhile would send a second transaction.
+            if (!MintsUnderWay.TryAdd(lockId, 0))
             {
-                var msg = $"Could not collect enough validator signatures ({signatures?.Count ?? 0}/{requiredSigs}).";
-                BridgeLockRecord.UpdateStatus(lockId, BridgeLockStatus.AttestationPending, errorMessage: msg);
-                LogUtility.Log($"[UserBridgeMint] {msg} Lock: {lockId}", "UserBridgeMintService");
+                LogUtility.Log($"[UserBridgeMint] {tag}A mint of {lockId} is already under way; not started again.", "UserBridgeMintService");
                 return;
             }
+            try
+            {
+                // A run that waited behind another finds what that one left: a lock it minted is not collected for again.
+                if (BridgeLockRecord.GetByLockId(lockId)?.Status == BridgeLockStatus.Minted) return;
+                await CollectAndMintOnce(record, tag, collect, submit);
+            }
+            finally { MintsUnderWay.TryRemove(lockId, out _); }
+        }
 
-            record.ValidatorSignatures = signatures;
-            record.Status = BridgeLockStatus.AttestationReady;
-            BridgeLockRecord.Save(record);
-            LogUtility.Log($"[UserBridgeMint] Attestations ready for {lockId}: {signatures.Count}/{requiredSigs}", "UserBridgeMintService");
+        private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, byte> MintsUnderWay = new(StringComparer.Ordinal);
 
-            // Step 3: Submit mintWithProof using user's own ETH key
-            await SubmitMintWithProofAsUser(record, ownerAddress, userBaseAddress);
+        /// <summary>Whether a mint of this lock is being collected for or submitted on this node right now.</summary>
+        internal static bool MintIsUnderWay(string? lockId) => !string.IsNullOrEmpty(lockId) && MintsUnderWay.ContainsKey(lockId);
+
+        /// <summary>Tests only: answers whether the Base contract has minted a lock (null: could not be asked).</summary>
+        internal static Func<string, Task<bool?>>? LockMintedOnBaseForTests;
+
+        /// <summary>Whether the Base contract has already minted this lock (it mints a lock once); null when no provider could be asked.</summary>
+        internal static async Task<bool?> LockMintedOnBaseAsync(string lockId)
+        {
+            if (LockMintedOnBaseForTests != null) return await LockMintedOnBaseForTests(lockId);
+            if (!BaseBridgeService.IsBridgeConfigured) return null;
+            // Advisory: it settles this node's own record of the lock; the contract mints a lock once whatever is read here.
+            // The first provider that answers gives it; one that fails is passed over for the next.
+            var used = await BaseRpc.AdvisoryFirstAsync(web3 =>
+                web3.Eth.GetContract(BaseBridgeService.CONTRACT_ABI, BaseBridgeService.ContractAddress).GetFunction("isLockIdUsed").CallAsync<bool>(lockId));
+            return used.Answered ? used.Value : null;
+        }
+
+        /// <summary>Marks the lock minted when the Base contract says it has minted it. True when it has.</summary>
+        private static async Task<bool> MintedAfterAll(string lockId, string tag)
+        {
+            if (await LockMintedOnBaseAsync(lockId) != true) return false;
+            BridgeLockRecord.UpdateStatus(lockId, BridgeLockStatus.Minted, errorMessage: "");
+            LogUtility.Log($"[UserBridgeMint] {tag}The Base contract has minted lock {lockId}.", "UserBridgeMintService");
+            return true;
+        }
+
+        private static async Task CollectAndMintOnce(BridgeLockRecord record, string tag,
+            Func<Task<(Dictionary<string, string>? Signatures, int Required)>> collect, Func<Task<(MintSend Outcome, string? Reason)>> submit)
+        {
+            var lockId = record.LockId;
+            for (var attempt = 1; ; attempt++)
+            {
+                var (signatures, requiredSigs) = await collect();
+                if (signatures == null || signatures.Count < requiredSigs)
+                {
+                    var msg = $"Could not collect enough validator signatures ({signatures?.Count ?? 0}/{requiredSigs}).";
+                    BridgeLockRecord.UpdateStatus(lockId, BridgeLockStatus.AttestationPending, errorMessage: msg);
+                    LogUtility.Log($"[UserBridgeMint] {tag}{msg} Lock: {lockId}", "UserBridgeMintService");
+                    return;
+                }
+
+                record.ValidatorSignatures = signatures;
+                record.Status = BridgeLockStatus.AttestationReady;
+                BridgeLockRecord.Save(record);
+                LogUtility.Log($"[UserBridgeMint] {tag}Attestations ready for {lockId}: {signatures.Count}/{requiredSigs}", "UserBridgeMintService");
+
+                var (outcome, reason) = await submit();
+                if (outcome != MintSend.Refused) return;
+                // Refused because an earlier submission of this lock went through after all: it is minted.
+                if (await MintedAfterAll(lockId, tag)) return;
+                if (attempt >= MintAttempts)
+                {
+                    BridgeLockRecord.UpdateStatus(lockId, BridgeLockStatus.Failed, errorMessage: $"Mint submission error: {reason}");
+                    return;
+                }
+                LogUtility.Log($"[UserBridgeMint] {tag}Base refused the mint for {lockId} ({reason}); collecting signatures again ({attempt}/{MintAttempts}).", "UserBridgeMintService");
+                await Task.Delay(MintRetryDelayMs);
+            }
         }
 
         /// <summary>
@@ -364,124 +459,187 @@ namespace VerifiedXCore.Bitcoin.Services
         /// Submit mintWithProof on Base using the user's own derived ETH key.
         /// User pays gas.
         /// </summary>
-        private static async Task SubmitMintWithProofAsUser(BridgeLockRecord record, string ownerAddress, string userBaseAddress)
-        {
-            var lockId = record.LockId;
+        /// <summary>Tests only: sends the mint in place of Base, returning its transaction hash or throwing as Base's refusal.</summary>
+        internal static Func<BridgeLockRecord, Task<string>>? SendMintForTests;
+        /// <summary>Tests only: answers for a mint transaction's receipt (true: in a block and succeeded; false: reverted; null: none).</summary>
+        internal static Func<string, Task<bool?>>? MintReceiptForTests;
+        /// <summary>How many times, and how far apart in milliseconds, a sent mint's receipt is asked for.</summary>
+        internal static int MintReceiptPolls = 60;
+        internal static int MintReceiptPollMs = 5_000;
 
+        /// <summary>A mint transaction's receipt on Base: true when it is in a block and succeeded, false when it reverted, null when Base has none (or could not be asked).</summary>
+        internal static async Task<bool?> MintReceiptAsync(string? txHash)
+        {
+            if (string.IsNullOrEmpty(txHash)) return null;
+            if (MintReceiptForTests != null) return await MintReceiptForTests(txHash);
             try
             {
-                // Get user's ETH private key
-                var account = AccountData.GetSingleAccount(ownerAddress);
-                if (account == null)
+                // Advisory: where this node's own mint transaction stands; the contract judged the mint.
+                var receipt = await BaseRpc.AdvisoryPrimaryAsync(web3 => web3.Eth.Transactions.GetTransactionReceipt.SendRequestAsync(txHash));
+                return receipt == null ? null : receipt.Status?.Value == 1;
+            }
+            catch { return null; }
+        }
+
+        /// <summary>
+        /// Whether a failed send is Base's node answering that it does not take the transaction (an RPC error, a
+        /// revert), so that nothing was sent. A timeout or a broken connection is not: the transaction may have reached
+        /// the node before the answer was lost.
+        /// </summary>
+        internal static bool BaseAnsweredNo(Exception ex) =>
+            ex is Nethereum.JsonRpc.Client.RpcResponseException or Nethereum.ABI.FunctionEncoding.SmartContractRevertException
+            || ex.GetType().Name == "SmartContractCustomErrorRevertException";
+
+        /// <summary>A send whose answer was lost: the lock is neither failed nor submitted again by this run; a retry asks Base first.</summary>
+        private static (MintSend, string?) MayHaveBeenSent(string lockId, Exception ex)
+        {
+            BridgeLockRecord.UpdateStatus(lockId, BridgeLockStatus.ProofSubmitted,
+                errorMessage: $"The mint may have been sent to Base; its answer was lost ({ex.Message}). It can be retried.");
+            LogUtility.Log($"[UserBridgeMint] mintWithProof for {lockId}: no answer from Base to the send ({ex.Message}); it may have been sent.", "UserBridgeMintService");
+            return (MintSend.Sent, null);
+        }
+
+        /// <summary>
+        /// Sends the lock's mint to Base and follows it into a block. The lock is minted only once Base holds the
+        /// transaction in a block and it succeeded: a transaction hash says Base's node took the transaction, not that
+        /// a block has it. Until then the lock is <see cref="BridgeLockStatus.ProofSubmitted"/> with the hash, and can be
+        /// submitted again if no block ever takes it. A refusal before anything is sent is reported, not recorded as
+        /// a failure: the caller collects signatures again.
+        /// </summary>
+        internal static async Task<(MintSend Outcome, string? Reason)> SubmitMintWithProofAsUser(BridgeLockRecord record, string ownerAddress, string userBaseAddress)
+        {
+            var lockId = record.LockId;
+            string txHash;
+            try
+            {
+                if (SendMintForTests != null)
                 {
-                    BridgeLockRecord.UpdateStatus(lockId, BridgeLockStatus.Failed, errorMessage: "User account not found.");
-                    return;
-                }
-
-                var privHex = account.GetKey;
-                if (string.IsNullOrEmpty(privHex))
-                {
-                    BridgeLockRecord.UpdateStatus(lockId, BridgeLockStatus.Failed, errorMessage: "Private key not available.");
-                    return;
-                }
-
-                if (privHex.Length % 2 != 0)
-                    privHex = "0" + privHex;
-
-                var privBytes = HexByteUtility.HexToByte(privHex);
-                var ethKey = new EthECKey(privBytes, true);
-
-                var rpcUrl = BaseBridgeService.BaseRpcUrl;
-                var contractAddress = BaseBridgeService.ContractAddress;
-                var chainId = BaseBridgeService.BaseChainId;
-
-                if (string.IsNullOrEmpty(rpcUrl) || string.IsNullOrEmpty(contractAddress))
-                {
-                    BridgeLockRecord.UpdateStatus(lockId, BridgeLockStatus.Failed, errorMessage: "RPC or contract not configured.");
-                    return;
-                }
-
-                // Mark as submitting
-                BridgeLockRecord.UpdateStatus(lockId, BridgeLockStatus.ProofSubmitted);
-
-                // Create Web3 instance with the user's key
-                var ethAccount = new Account(ethKey, chainId);
-                var web3 = new Web3(ethAccount, rpcUrl);
-
-                var contract = web3.Eth.GetContract(MINT_WITH_PROOF_ABI, contractAddress);
-                var mintFunction = contract.GetFunction("mintWithProof");
-
-                // Prepare signature bytes array
-                var sigValues = record.ValidatorSignatures!.Values.ToList();
-                var sigBytes = sigValues.Select(s => VerifiedXCore.Extensions.GenericExtensions.HexToByteArray(
-                    s.StartsWith("0x", StringComparison.OrdinalIgnoreCase) ? s[2..] : s)).ToList();
-
-                LogUtility.Log($"[UserBridgeMint] Submitting mintWithProof for lock {lockId}: to={record.EvmDestination}, amount={record.AmountSats}sats, nonce={record.MintNonce}, sigs={sigValues.Count}, payer={userBaseAddress}",
-                    "UserBridgeMintService");
-
-                // Estimate gas
-                var gasEstimate = await mintFunction.EstimateGasAsync(
-                    record.EvmDestination,
-                    new BigInteger(record.AmountSats),
-                    record.LockId,
-                    new BigInteger(record.MintNonce),
-                    sigBytes);
-
-                // Add 20% buffer
-                var gasLimit = new BigInteger((double)gasEstimate.Value * 1.2);
-
-                var txHash = await mintFunction.SendTransactionAsync(
-                    ethAccount.Address,
-                    new HexBigInteger(gasLimit),
-                    null, // gas price (let provider decide)
-                    null, // value
-                    record.EvmDestination,
-                    new BigInteger(record.AmountSats),
-                    record.LockId,
-                    new BigInteger(record.MintNonce),
-                    sigBytes);
-
-                LogUtility.Log($"[UserBridgeMint] mintWithProof TX submitted for lock {lockId}: {txHash}",
-                    "UserBridgeMintService");
-
-                BridgeLockRecord.UpdateStatus(lockId, BridgeLockStatus.MintedOnBase, baseTxHash: txHash);
-
-                // Wait for confirmation
-                int attempts = 0;
-                Nethereum.RPC.Eth.DTOs.TransactionReceipt? receipt = null;
-                while (receipt == null && attempts < 60)
-                {
-                    await Task.Delay(5000);
-                    receipt = await web3.Eth.Transactions.GetTransactionReceipt.SendRequestAsync(txHash);
-                    attempts++;
-                }
-
-                if (receipt != null && receipt.Status.Value == 1)
-                {
-                    BridgeLockRecord.UpdateStatus(lockId, BridgeLockStatus.Minted, baseTxHash: txHash);
-                    LogUtility.Log($"[UserBridgeMint] mintWithProof CONFIRMED for lock {lockId} in block {receipt.BlockNumber.Value}",
-                        "UserBridgeMintService");
-                }
-                else if (receipt != null)
-                {
-                    BridgeLockRecord.UpdateStatus(lockId, BridgeLockStatus.Failed,
-                        errorMessage: $"mintWithProof TX reverted: {txHash}");
-                    LogUtility.Log($"[UserBridgeMint] mintWithProof REVERTED for lock {lockId}: {txHash}",
-                        "UserBridgeMintService");
+                    BridgeLockRecord.UpdateStatus(lockId, BridgeLockStatus.ProofSubmitted);
+                    txHash = await SendMintForTests(record);
                 }
                 else
                 {
-                    LogUtility.Log($"[UserBridgeMint] mintWithProof TX pending (no receipt after 5min): {txHash}",
+                    // Get user's ETH private key
+                    var account = AccountData.GetSingleAccount(ownerAddress);
+                    if (account == null)
+                    {
+                        BridgeLockRecord.UpdateStatus(lockId, BridgeLockStatus.Failed, errorMessage: "User account not found.");
+                        return (MintSend.NotPossible, "User account not found.");
+                    }
+
+                    var privHex = account.GetKey;
+                    if (string.IsNullOrEmpty(privHex))
+                    {
+                        BridgeLockRecord.UpdateStatus(lockId, BridgeLockStatus.Failed, errorMessage: "Private key not available.");
+                        return (MintSend.NotPossible, "Private key not available.");
+                    }
+
+                    if (privHex.Length % 2 != 0)
+                        privHex = "0" + privHex;
+
+                    var privBytes = HexByteUtility.HexToByte(privHex);
+                    var ethKey = new EthECKey(privBytes, true);
+
+                    var rpcUrl = BaseBridgeService.BaseRpcUrl;
+                    var contractAddress = BaseBridgeService.ContractAddress;
+                    var chainId = BaseBridgeService.BaseChainId;
+
+                    if (string.IsNullOrEmpty(rpcUrl) || string.IsNullOrEmpty(contractAddress))
+                    {
+                        BridgeLockRecord.UpdateStatus(lockId, BridgeLockStatus.Failed, errorMessage: "RPC or contract not configured.");
+                        return (MintSend.NotPossible, "RPC or contract not configured.");
+                    }
+
+                    // Mark as submitting
+                    BridgeLockRecord.UpdateStatus(lockId, BridgeLockStatus.ProofSubmitted);
+
+                    // Create Web3 instance with the user's key
+                    var ethAccount = new Account(ethKey, chainId);
+                    var web3 = await BaseRpc.SenderAsync(ethAccount);
+
+                    var contract = web3.Eth.GetContract(MINT_WITH_PROOF_ABI, contractAddress);
+                    var mintFunction = contract.GetFunction("mintWithProof");
+
+                    // Prepare signature bytes array
+                    var sigValues = record.ValidatorSignatures!.Values.ToList();
+                    var sigBytes = sigValues.Select(s => VerifiedXCore.Extensions.GenericExtensions.HexToByteArray(
+                        s.StartsWith("0x", StringComparison.OrdinalIgnoreCase) ? s[2..] : s)).ToList();
+
+                    LogUtility.Log($"[UserBridgeMint] Submitting mintWithProof for lock {lockId}: to={record.EvmDestination}, amount={record.AmountSats}sats, nonce={record.MintNonce}, sigs={sigValues.Count}, payer={userBaseAddress}",
                         "UserBridgeMintService");
+
+                    // Estimate gas. Nothing is sent by this: any failure of it leaves nothing on Base.
+                    var gasEstimate = await mintFunction.EstimateGasAsync(
+                        record.EvmDestination,
+                        new BigInteger(record.AmountSats),
+                        record.LockId,
+                        new BigInteger(record.MintNonce),
+                        sigBytes);
+
+                    // Add 20% buffer
+                    var gasLimit = new BigInteger((double)gasEstimate.Value * 1.2);
+
+                    try
+                    {
+                        txHash = await mintFunction.SendTransactionAsync(
+                            ethAccount.Address,
+                            new HexBigInteger(gasLimit),
+                            null, // gas price (let provider decide)
+                            null, // value
+                            record.EvmDestination,
+                            new BigInteger(record.AmountSats),
+                            record.LockId,
+                            new BigInteger(record.MintNonce),
+                            sigBytes);
+                    }
+                    catch (Exception ex) when (!BaseAnsweredNo(ex))
+                    {
+                        return MayHaveBeenSent(lockId, ex);
+                    }
                 }
+            }
+            catch (Exception ex) when (SendMintForTests != null && !BaseAnsweredNo(ex))
+            {
+                return MayHaveBeenSent(lockId, ex);
             }
             catch (Exception ex)
             {
-                BridgeLockRecord.UpdateStatus(lockId, BridgeLockStatus.Failed,
-                    errorMessage: $"Mint submission error: {ex.Message}");
-                LogUtility.Log($"[UserBridgeMint] Error submitting mintWithProof for {lockId}: {ex.Message}",
-                    "UserBridgeMintService");
+                // Nothing was sent. The caller decides what the lock becomes.
+                LogUtility.Log($"[UserBridgeMint] Base refused mintWithProof for {lockId}: {ex.Message}", "UserBridgeMintService");
+                return (MintSend.Refused, ex.Message);
             }
+
+            LogUtility.Log($"[UserBridgeMint] mintWithProof TX submitted for lock {lockId}: {txHash}", "UserBridgeMintService");
+            // Sent, and not yet in a block: the hash is kept with the lock, which is not minted yet.
+            BridgeLockRecord.UpdateStatus(lockId, BridgeLockStatus.ProofSubmitted, baseTxHash: txHash,
+                errorMessage: "The mint was sent to Base and is not in a block yet.");
+
+            bool? receipt = null;
+            for (var attempts = 0; receipt == null && attempts < MintReceiptPolls; attempts++)
+            {
+                await Task.Delay(MintReceiptPollMs);
+                receipt = await MintReceiptAsync(txHash); // a provider that cannot be asked is asked again
+            }
+
+            if (receipt == true)
+            {
+                BridgeLockRecord.UpdateStatus(lockId, BridgeLockStatus.Minted, baseTxHash: txHash, errorMessage: "");
+                LogUtility.Log($"[UserBridgeMint] mintWithProof CONFIRMED for lock {lockId}: {txHash}", "UserBridgeMintService");
+                return (MintSend.Confirmed, null);
+            }
+            if (receipt == false)
+            {
+                // Reverted because another submission of this lock was in a block first: it is minted.
+                if (await MintedAfterAll(lockId, "")) return (MintSend.Confirmed, null);
+                BridgeLockRecord.UpdateStatus(lockId, BridgeLockStatus.Failed, errorMessage: $"mintWithProof TX reverted: {txHash}");
+                LogUtility.Log($"[UserBridgeMint] mintWithProof REVERTED for lock {lockId}: {txHash}", "UserBridgeMintService");
+                return (MintSend.Reverted, $"mintWithProof TX reverted: {txHash}");
+            }
+            var waited = (long)MintReceiptPolls * MintReceiptPollMs / 1000;
+            BridgeLockRecord.UpdateStatus(lockId, BridgeLockStatus.ProofSubmitted, baseTxHash: txHash,
+                errorMessage: $"The mint was sent to Base ({txHash}) and was in no block after {waited} s. It can be retried.");
+            LogUtility.Log($"[UserBridgeMint] mintWithProof TX {txHash} for lock {lockId} was in no Base block after {waited} s.", "UserBridgeMintService");
+            return (MintSend.Sent, null);
         }
 
         /// <summary>
@@ -497,30 +655,24 @@ namespace VerifiedXCore.Bitcoin.Services
         {
             try
             {
+                // Before anything is written: a retry turned away must not change the lock a mint is working on.
+                if (MintIsUnderWay(lockId))
+                    return (false, "A mint of this lock is already under way. Check bridge history for status.");
                 if (!BaseBridgeService.IsBridgeConfigured)
                     return (false, "Base bridge not configured. Set BaseBridgeContract in config.");
 
                 // 1. Check if the lock has already been minted on the Base contract (avoid wasting gas)
                 try
                 {
-                    foreach (var rpcUrl in BaseBridgeService.RpcUrlCandidates())
+                    // Advisory: it only spares a retry the gas of a mint the contract would refuse.
+                    var alreadyUsed = await BaseRpc.AdvisoryFirstAsync(web3 =>
+                        web3.Eth.GetContract(BaseBridgeService.CONTRACT_ABI, BaseBridgeService.ContractAddress).GetFunction("isLockIdUsed").CallAsync<bool>(lockId));
+                    if (alreadyUsed.Answered && alreadyUsed.Value)
                     {
-                        try
-                        {
-                            var web3 = new Nethereum.Web3.Web3(rpcUrl);
-                            var contract = web3.Eth.GetContract(BaseBridgeService.CONTRACT_ABI, BaseBridgeService.ContractAddress);
-                            var isUsedFunc = contract.GetFunction("isLockIdUsed");
-                            var alreadyUsed = await isUsedFunc.CallAsync<bool>(lockId);
-                            if (alreadyUsed)
-                            {
-                                var existingRec = BridgeLockRecord.GetByLockId(lockId);
-                                if (existingRec != null && existingRec.Status != BridgeLockStatus.Minted && existingRec.Status != BridgeLockStatus.MintedOnBase)
-                                    BridgeLockRecord.UpdateStatus(lockId, BridgeLockStatus.Minted);
-                                return (false, $"Lock {lockId} has already been minted on the Base contract. No action needed.");
-                            }
-                            break;
-                        }
-                        catch { /* try next RPC */ }
+                        var existingRec = BridgeLockRecord.GetByLockId(lockId);
+                        if (existingRec != null && existingRec.Status != BridgeLockStatus.Minted && existingRec.Status != BridgeLockStatus.MintedOnBase)
+                            BridgeLockRecord.UpdateStatus(lockId, BridgeLockStatus.Minted);
+                        return (false, $"Lock {lockId} has already been minted on the Base contract. No action needed.");
                     }
                 }
                 catch { /* non-fatal */ }
@@ -652,41 +804,8 @@ namespace VerifiedXCore.Bitcoin.Services
         /// Collect attestations and submit mintWithProof directly — skips the WaitForBridgeLockInState step.
         /// Used by ForceRetryMintForLock when we already know the lock is confirmed on-chain.
         /// </summary>
-        private static async Task CollectAndMintDirect(BridgeLockRecord record, string ownerAddress, string userBaseAddress)
-        {
-            var lockId = record.LockId;
-
-            // Collect validator attestation signatures
-            var requiredSigs = await BaseBridgeService.GetRequiredMintSignaturesFromChainAsync();
-            var contractAddress = BaseBridgeService.ContractAddress;
-            var chainId = (long)BaseBridgeService.BaseChainId;
-            var nonce = record.VfxLockBlockHeight;
-
-            record.MintNonce = nonce;
-            record.RequiredSignatures = requiredSigs;
-            record.Status = BridgeLockStatus.AttestationPending;
-            BridgeLockRecord.Save(record);
-
-            LogUtility.Log($"[UserBridgeMint] ForceRetry: Collecting attestations for {lockId}. Need {requiredSigs} signatures.", "UserBridgeMintService");
-
-            var signatures = await CollectValidatorSignatures(record, nonce, chainId, contractAddress, requiredSigs);
-
-            if (signatures == null || signatures.Count < requiredSigs)
-            {
-                var msg = $"Could not collect enough validator signatures ({signatures?.Count ?? 0}/{requiredSigs}).";
-                BridgeLockRecord.UpdateStatus(lockId, BridgeLockStatus.AttestationPending, errorMessage: msg);
-                LogUtility.Log($"[UserBridgeMint] ForceRetry: {msg} Lock: {lockId}", "UserBridgeMintService");
-                return;
-            }
-
-            record.ValidatorSignatures = signatures;
-            record.Status = BridgeLockStatus.AttestationReady;
-            BridgeLockRecord.Save(record);
-            LogUtility.Log($"[UserBridgeMint] ForceRetry: Attestations ready for {lockId}: {signatures.Count}/{requiredSigs}", "UserBridgeMintService");
-
-            // Submit mintWithProof using user's own ETH key
-            await SubmitMintWithProofAsUser(record, ownerAddress, userBaseAddress);
-        }
+        private static Task CollectAndMintDirect(BridgeLockRecord record, string ownerAddress, string userBaseAddress) =>
+            CollectAndMint(record, ownerAddress, userBaseAddress, "ForceRetry: ");
 
         /// <summary>
         /// Manual retry: collect attestations and submit mint for an existing lock.
@@ -703,7 +822,23 @@ namespace VerifiedXCore.Bitcoin.Services
                 if (record.OwnerAddress != ownerAddress)
                     return (false, "You are not the owner of this lock.");
 
-                if (record.Status == BridgeLockStatus.Minted || record.Status == BridgeLockStatus.MintedOnBase)
+                if (record.Status == BridgeLockStatus.Minted)
+                    return (false, "This lock has already been minted.");
+                // A mint that was sent is minted only if Base holds it in a block: asked now, since it may have been taken
+                // since. One Base never took (or reverted) can be submitted again; the contract mints a lock once.
+                if (MintIsUnderWay(lockId))
+                    return (false, "A mint of this lock is already under way. Check bridge status for updates.");
+                if (record.Status is BridgeLockStatus.MintedOnBase or BridgeLockStatus.ProofSubmitted && !string.IsNullOrEmpty(record.BaseTxHash))
+                {
+                    var receipt = await MintReceiptAsync(record.BaseTxHash);
+                    if (receipt == true)
+                    {
+                        BridgeLockRecord.UpdateStatus(lockId, BridgeLockStatus.Minted, baseTxHash: record.BaseTxHash, errorMessage: "");
+                        return (false, "This lock has already been minted.");
+                    }
+                }
+                // Whatever this node recorded, the contract knows whether it minted the lock.
+                if (await MintedAfterAll(lockId, "Retry: "))
                     return (false, "This lock has already been minted.");
 
                 var userBaseAddress = ValidatorEthKeyService.DeriveBaseAddressFromAccount(ownerAddress);

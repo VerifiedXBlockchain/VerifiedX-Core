@@ -172,7 +172,7 @@ namespace VerifiedXCore.Tests
         }
 
         [Fact]
-        public async Task APendingBurnWhoseRedemptionTheChainCompleted_IsDropped_AndOthersKeepTheirRound()
+        public async Task APendingBurnWhoseRedemptionTheChainCompleted_LeavesTheSweep_AndOthersKeepTheirRound()
         {
             var redeemed = Hash(8);
             var open = Hash(9);
@@ -188,12 +188,14 @@ namespace VerifiedXCore.Tests
             var sweep = WithoutRedeemed(KeptOfThisRun());
 
             Assert.Equal(new[] { open, started, inARound }.OrderBy(h => h), sweep.Select(r => r.BaseBurnTxHash).OrderBy(h => h));
-            Assert.Null(ProcessedBurnForTests(redeemed));
+            // A pool unlock paid through another caster is held as complete, not forgotten.
+            Assert.Equal(BurnExitStatus.Complete, ProcessedBurnForTests(redeemed)!.Status);
             Assert.All(new[] { open, started, inARound }, burn => Assert.NotNull(ProcessedBurnForTests(burn)));
 
-            // And once redeemed, no spelling of it is taken again.
+            // And once redeemed, no spelling of it makes another record or puts it to a round.
             await HandleBurnAlert(Alert(_otherCaster, redeemed + "  "));
-            Assert.Null(ProcessedBurnForTests(redeemed));
+            Assert.Equal(BurnExitStatus.Complete, ProcessedBurnForTests(redeemed)!.Status);
+            Assert.Equal(_caster.Address, ProcessedBurnForTests(redeemed)!.AlertedBy);
         }
 
         [Fact]

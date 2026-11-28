@@ -37,6 +37,9 @@ namespace VerifiedXCore.Services
         private static readonly object DueLock = new();
         private static readonly SemaphoreSlim Gate = new(1, 1);
 
+        /// <summary>Tests only: whether a pull is running.</summary>
+        internal static bool PullRunning => Gate.CurrentCount == 0;
+
         internal static void ResetForTests()
         {
             lock (DueLock) { _lastPullUtc = DateTime.MinValue; _nextDueUtc = DateTime.MinValue; }
@@ -50,7 +53,9 @@ namespace VerifiedXCore.Services
 
         /// <summary>
         /// Brings the next pull forward to <see cref="RetrySeconds"/> after the last one, never later than it was. Block
-        /// validation calls this when it refuses the next block because this node has no record while its peers do.
+        /// validation calls this when it refuses the next block because this node has no record while its peers do, or
+        /// on the caster committee in the record it holds (a certificate, a bridge transaction's votes or sender): its
+        /// peers may hold a newer record and have judged the block by another committee.
         /// </summary>
         public static void RequestSoon()
         {
@@ -59,6 +64,40 @@ namespace VerifiedXCore.Services
                 var soon = _lastPullUtc == DateTime.MinValue ? DateTime.MinValue : _lastPullUtc.AddSeconds(RetrySeconds);
                 if (soon < _nextDueUtc) _nextDueUtc = soon;
             }
+        }
+
+        /// <summary>The longest block validation waits for the pull a refused block asked for (a peer's answer is given 4 s).</summary>
+        public const int WaitSeconds = 6;
+
+        /// <summary>As <see cref="WaitSeconds"/>; a test shortens it.</summary>
+        internal static TimeSpan Wait = TimeSpan.FromSeconds(WaitSeconds);
+
+        /// <summary>
+        /// For block validation, after it refused a block on the committee in this node's record and called
+        /// <see cref="RequestSoon"/>: runs the pull if it is due, or waits for the one that is running, until
+        /// <see cref="WaitSeconds"/> after that pull began. A pull runs no sooner than <see cref="RetrySeconds"/> after the
+        /// last, so refused blocks cannot make this node ask its peers more often than that; before then, and once a pull
+        /// has run longer than the wait, this returns at once.
+        /// </summary>
+        public static async Task PullForRefusedBlockAsync()
+        {
+            using var waited = new CancellationTokenSource();
+            await Task.WhenAny(PullOrJoinAsync(), Task.Delay(Wait, waited.Token));
+            waited.Cancel();
+        }
+
+        private static async Task PullOrJoinAsync()
+        {
+            try
+            {
+                if (await PullIfDueAsync())
+                    return;
+                TimeSpan left;
+                lock (DueLock) left = _lastPullUtc == DateTime.MinValue ? TimeSpan.Zero : _lastPullUtc.Add(Wait) - DateTime.UtcNow;
+                if (Gate.CurrentCount == 0 && left > TimeSpan.Zero && await Gate.WaitAsync(left))
+                    Gate.Release();
+            }
+            catch { }
         }
 
         /// <summary>

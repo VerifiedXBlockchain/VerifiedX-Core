@@ -186,6 +186,40 @@ namespace VerifiedXCore.Bitcoin.Services
 
         public const string VoteListedTwiceReason = "a caster's vote is listed more than once";
 
+        /// <summary>How the refusal of a bridge transaction's caster votes begins, whichever the transaction (TransactionValidatorService).</summary>
+        public const string VotesRejectedPrefix = "Caster consensus votes rejected for ";
+
+        /// <summary>Why votes were refused: no committee could be read for the height.</summary>
+        public const string CommitteeUnavailableReason = "caster committee unavailable";
+
+        /// <summary>How a count of votes short of the committee's majority reads ("2/3 valid committee votes", "2/3 valid bound committee votes").</summary>
+        public const string TooFewVotesMarker = "committee votes";
+
+        /// <summary>
+        /// Whether a transaction was refused on the caster committee this node holds for the height: its sender is not a
+        /// member, or too few members' votes count. The committee is read from this node's membership record
+        /// (<see cref="GetCommitteeForHeight"/>), which reaches a node apart from the blocks, so a node whose record is
+        /// newer judges the same transaction otherwise. A refusal that reads the transaction alone (no votes, no sender,
+        /// no amount, no destination) is not one.
+        /// </summary>
+        public static bool IsCommitteeRefusal(string? reason)
+        {
+            if (string.IsNullOrEmpty(reason)) return false;
+            if (reason == BridgeTxRules.SubmitterNotInCommitteeReason || reason == BridgeTxRules.CommitteeUnavailableReason) return true;
+            if (!reason.StartsWith(VotesRejectedPrefix, StringComparison.Ordinal)) return false;
+            var at = reason.IndexOf(": ", StringComparison.Ordinal);
+            var votes = at < 0 ? "" : reason[(at + 2)..];
+            return votes == CommitteeUnavailableReason || votes == VoteListedTwiceReason || votes.Contains(TooFewVotesMarker, StringComparison.Ordinal);
+        }
+
+        /// <summary>
+        /// A committee refusal that read nothing but the transaction and the membership record: nothing a state snapshot
+        /// holds, so restoring one cannot change it. A count that left a vote out for its time is not one: for a burn whose
+        /// earlier exit failed, the earliest time a vote may carry comes from the stored exit (<see cref="AttemptFor"/>).
+        /// </summary>
+        public static bool IsCommitteeRefusalApartFromState(string? reason) =>
+            IsCommitteeRefusal(reason) && !reason!.Contains(VoteOutsideAttemptTimeReason, StringComparison.Ordinal);
+
         /// <summary>Tests only: how many vote signatures the two committee vote checks have verified.</summary>
         internal static long VoteSignatureChecksForTests;
 
@@ -224,7 +258,7 @@ namespace VerifiedXCore.Bitcoin.Services
         {
             if (votes == null) return (false, "no votes");
             var committee = GetCommitteeForHeight(height);
-            if (committee.Count == 0) return (false, "caster committee unavailable");
+            if (committee.Count == 0) return (false, CommitteeUnavailableReason);
             var required = RequiredVotesFor(committee);
 
             var ok = new HashSet<string>(StringComparer.Ordinal);
@@ -243,7 +277,7 @@ namespace VerifiedXCore.Bitcoin.Services
                 if (!VerifiedXCore.Services.SignatureService.VerifySignature(v.CasterAddress, msg, v.Signature)) continue;
                 ok.Add(v.CasterAddress);
             }
-            return ok.Count >= required ? (true, "") : (false, $"{ok.Count}/{required} valid committee votes");
+            return ok.Count >= required ? (true, "") : (false, $"{ok.Count}/{required} valid {TooFewVotesMarker}");
         }
 
         /// <summary>
@@ -332,7 +366,7 @@ namespace VerifiedXCore.Bitcoin.Services
             if (string.IsNullOrWhiteSpace(destination)) return (false, "destination required");
 
             var committee = GetCommitteeForHeight(height);
-            if (committee.Count == 0) return (false, "caster committee unavailable");
+            if (committee.Count == 0) return (false, CommitteeUnavailableReason);
             var required = RequiredVotesFor(committee);
 
             var ok = new HashSet<string>(StringComparer.Ordinal);
@@ -365,7 +399,7 @@ namespace VerifiedXCore.Bitcoin.Services
                 ok.Add(v.CasterAddress);
             }
             if (ok.Count >= required) return (true, "");
-            var why = $"{ok.Count}/{required} valid bound committee votes";
+            var why = $"{ok.Count}/{required} valid bound {TooFewVotesMarker}";
             if (outsideTime > 0) why += $"; {outsideTime} {VoteOutsideAttemptTimeReason}";
             if (otherHandler > 0) why += $"; {otherHandler} {VoteForOtherHandlerReason}";
             return (false, why);

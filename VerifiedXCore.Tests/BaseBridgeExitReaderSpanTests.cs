@@ -172,6 +172,8 @@ namespace VerifiedXCore.Tests
                 var id = request["id"];
                 switch (request["method"]?.ToString())
                 {
+                    case "eth_chainId":
+                        return new JObject { ["jsonrpc"] = "2.0", ["id"] = id, ["result"] = "0x" + Globals.BaseEvmChainId.ToString("x") }.ToString();
                     case "eth_blockNumber":
                         return new JObject { ["jsonrpc"] = "2.0", ["id"] = id, ["result"] = "0x" + Head.ToString("x") }.ToString();
                     case "eth_getLogs":

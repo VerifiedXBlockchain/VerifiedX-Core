@@ -4135,6 +4135,11 @@ namespace VerifiedXCore.Services
                     if ((blockHeight == null || blockHeight.Value >= Globals.BridgeLockMinimumHeight)
                         && amountSats.Value < Bitcoin.Services.VBTCService.MinBridgeLockSats)
                         return (txResult, $"A bridge lock is at least {Bitcoin.Services.VBTCService.MinBridgeLockSats} sats ({Bitcoin.Services.VBTCService.MinBridgeLockSats / 100_000_000M:0.########} vBTC), the smallest withdrawal.");
+                    // ... and from BridgeLockPartMinimumHeight (in admission, the block it would enter) at least the smallest
+                    // part a vault pays in an exit to Bitcoin, so a fresh lock can pay one by itself.
+                    if ((blockHeight ?? Bitcoin.Services.VBTCService.NextBlockHeight) >= Globals.BridgeLockPartMinimumHeight
+                        && amountSats.Value < Bitcoin.Services.VBTCService.MinBridgeLockPartSats)
+                        return (txResult, $"A bridge lock is at least {Bitcoin.Services.VBTCService.MinBridgeLockPartSats} sats ({Bitcoin.Services.VBTCService.MinBridgeLockPartSats / 100_000_000M:0.########} vBTC), the smallest part of an exit to Bitcoin.");
 
                     if (string.IsNullOrEmpty(evmDestination) || !evmDestination.StartsWith("0x") || evmDestination.Length != 42)
                         return (txResult, "Invalid EvmDestination for bridge lock.");
@@ -4239,7 +4244,7 @@ namespace VerifiedXCore.Services
                         var (votesOk, votesReason) = BridgeCasterConsensus.TryVerifyVotesFromCommittee(votes, exitBurnTxHash!.Trim(), "EXIT", unlockGateHeight,
                             eachCasterOnce: (blockHeight == null && !blockVerify && !blockDownloads) || unlockGateHeight >= Globals.BridgeVoteOncePerCasterHeight);
                         if (!votesOk)
-                            return (txResult, $"Caster consensus votes rejected for VBTCb unlock: {votesReason}");
+                            return (txResult, $"{BridgeCasterConsensus.VotesRejectedPrefix}VBTCb unlock: {votesReason}");
                         if (VBTCBridgeConsumedBurn.IsBurnUsedAnywhere(exitBurnTxHash))
                             return (txResult, "Exit burn transaction has already been consumed.");
                         // Admission-time only: block validation relies on the committee-bound votes above
@@ -4348,7 +4353,7 @@ namespace VerifiedXCore.Services
                             eachCasterOnce: (blockHeight == null && !blockVerify && !blockDownloads) || poolGateHeight >= Globals.BridgeVoteOncePerCasterHeight,
                             attempt: poolAttempt);
                         if (!votesOk)
-                            return (txResult, $"Caster consensus votes rejected for pool unlock: {votesReason}");
+                            return (txResult, $"{BridgeCasterConsensus.VotesRejectedPrefix}pool unlock: {votesReason}");
 
                         if (VBTCBridgeConsumedBurn.IsBurnUsedAnywhere(poolBurnHash))
                             return (txResult, "Exit burn transaction has already been consumed.");
@@ -4487,7 +4492,7 @@ namespace VerifiedXCore.Services
                             eachCasterOnce: (blockHeight == null && !blockVerify && !blockDownloads) || exitGateHeight >= Globals.BridgeVoteOncePerCasterHeight,
                             attempt: exitAttempt);
                         if (!votesOk)
-                            return (txResult, $"Caster consensus votes rejected for exit to BTC: {votesReason}");
+                            return (txResult, $"{BridgeCasterConsensus.VotesRejectedPrefix}exit to BTC: {votesReason}");
 
                         var exitAllocs = jobj["Allocations"];
                         if (exitAllocs != null && exitAllocs.Type == JTokenType.Array && exitAllocs.HasValues)
@@ -5008,6 +5013,10 @@ namespace VerifiedXCore.Services
                 if (rec == null) return (false, $"unknown lock {a.LockId}");
                 if (rec.IsUnlocked) return (false, $"lock {a.LockId} already fully unlocked");
                 if (rec.IsBlacklisted) return (false, $"lock {a.LockId} is blacklisted");
+                // From BridgeAllocationsSignableHeight a lock of a vault whose key cannot sign is not drawn on: an exit part
+                // there is never paid, and vBTC unlocked there can be neither withdrawn nor bridged again.
+                if (height >= Globals.BridgeAllocationsSignableHeight && Bitcoin.Attestation.BtcVaultKeys.CannotSignRefusal(rec.SmartContractUID) is { } cannotSign)
+                    return (false, $"lock {a.LockId}: {cannotSign}");
                 if (!string.IsNullOrEmpty(a.SmartContractUID) && !string.Equals(a.SmartContractUID, rec.SmartContractUID, StringComparison.Ordinal))
                     return (false, $"lock {a.LockId} contract mismatch");
                 if (exact && !string.Equals(a.LockId, rec.LockId, StringComparison.Ordinal))

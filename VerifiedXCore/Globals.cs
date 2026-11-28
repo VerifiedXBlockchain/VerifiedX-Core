@@ -531,6 +531,16 @@ namespace VerifiedXCore
         public const long PoolUnlockCreditsAddressTestnetHeight = long.MaxValue;
 
         /// <summary>
+        /// From this height a block refuses a bridge exit or pool unlock that draws on a lock of a vault whose Bitcoin key
+        /// had fewer holders that count than it needs to sign at the last look (BtcVaultKeys.CannotSignRefusal): an exit
+        /// part on it could not be paid, and vBTC unlocked on it could be neither withdrawn nor bridged again. Bridge locks
+        /// and withdrawals on such a vault were already refused. A tightening rule. Unset (long.MaxValue) on mainnet and
+        /// testnet until the release that activates it. Testnet value in GlobalsNetworkHeights.
+        /// </summary>
+        public static long BridgeAllocationsSignableHeight = long.MaxValue;
+        public const long BridgeAllocationsSignableTestnetHeight = long.MaxValue;
+
+        /// <summary>
         /// From this height a block refuses a vBTC V2 bridge lock whose EvmDestination is not "0x" and 40 hex digits, or is
         /// the zero address: Base mints to neither, and the lock debited vBTC that could never be minted. Admission refuses
         /// one at every height. A tightening rule. Unset (long.MaxValue) on mainnet and testnet until the release that
@@ -538,6 +548,17 @@ namespace VerifiedXCore
         /// </summary>
         public static long BridgeLockEvmAddressHeight = long.MaxValue;
         public const long BridgeLockEvmAddressTestnetHeight = long.MaxValue;
+
+        /// <summary>
+        /// From this height a vBTC V2 bridge lock is at least VBTCService.MinBridgeLockPartSats, the smallest part a vault
+        /// pays in an exit to Bitcoin, so a fresh lock can pay an exit part by itself. Smaller locks, made one by one at a
+        /// VFX fee, were spread across vaults where no exit could use them together, and the cost of combining them fell
+        /// on whoever redeemed against them. Admission refuses a smaller one from the same height (the block it would
+        /// enter). A tightening rule. Unset (long.MaxValue) on mainnet and testnet until the release that activates it.
+        /// Testnet value in GlobalsNetworkHeights.
+        /// </summary>
+        public static long BridgeLockPartMinimumHeight = long.MaxValue;
+        public const long BridgeLockPartMinimumTestnetHeight = long.MaxValue;
 
         /// <summary>
         /// From this height a bridge exit to Bitcoin carries its Allocations as a JSON array of at least one allocation, and

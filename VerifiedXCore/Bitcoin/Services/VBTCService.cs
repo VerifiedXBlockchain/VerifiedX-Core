@@ -57,6 +57,13 @@ namespace VerifiedXCore.Bitcoin.Services
         public const long MinBridgeLockSats = MinWithdrawalTxVBytes + Attestation.BtcCanonicalWithdrawal.DustSats;
 
         /// <summary>
+        /// A bridge lock's minimum from Globals.BridgeLockPartMinimumHeight: the smallest part a vault pays in an exit to
+        /// Bitcoin (BtcWithdrawals.MinExitPartSats: 154 vbytes at 10 sat/vB, borne through four fee doublings (x16), plus dust), so a
+        /// fresh lock can pay one exit part by itself. Written out: a consensus value does not move with the exit rules.
+        /// </summary>
+        public const long MinBridgeLockPartSats = 25_186;
+
+        /// <summary>
         /// Consensus rule (VbtcWithdrawalConcurrencyHeight), shared with the wallet paths so both give the same message:
         /// a withdrawal pays its Bitcoin fee out of the amount, so the amount must cover the fee of the smallest withdrawal
         /// transaction at the request's own fee rate and still leave a relayable payout. Uses only the request's fields, so
@@ -3241,6 +3248,14 @@ namespace VerifiedXCore.Bitcoin.Services
                 if (string.IsNullOrWhiteSpace(evmDestination) || !evmDestination.StartsWith("0x") || evmDestination.Length != 42)
                 {
                     return (false, "Invalid EVM destination address. Must be 0x-prefixed, 42 characters.", string.Empty);
+                }
+
+                // Last before the lock is made: it debits the holder at once, and only a mint on Base gives that back. Not
+                // made while the Base contract's own signers cannot mint it (BaseMintReadiness).
+                if (await BaseMintReadiness.RefusalAsync() is { } cannotMint)
+                {
+                    SCLogUtility.Log($"vBTC V2 Bridge Lock not made: {cannotMint}", "VBTCService.CreateBridgeLockTx()");
+                    return (false, cannotMint, string.Empty);
                 }
 
                 var lockId = string.IsNullOrWhiteSpace(lockIdOverride) ? Guid.NewGuid().ToString("N") : lockIdOverride.Trim();

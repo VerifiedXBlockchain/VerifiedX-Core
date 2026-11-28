@@ -594,7 +594,7 @@ namespace VerifiedXCore.Bitcoin.Services
                     LogUtility.Log($"[BaseValidatorSync] {function}: this validator's Base address {ethAccount.Address} has no ETH for gas; the next validator in turn sends it.", "BaseValidatorSyncService");
                     return;
                 }
-                var web3 = new Nethereum.Web3.Web3(ethAccount, BaseBridgeService.BaseRpcUrl);
+                var web3 = await BaseRpc.SenderAsync(ethAccount);
                 var fn = web3.Eth.GetContract(ValidatorSetAbi, BaseBridgeService.ContractAddress).GetFunction(function);
                 var gas = await fn.EstimateGasAsync(ethAccount.Address, null, null, args);
                 txHash = await fn.SendTransactionAsync(ethAccount.Address, new Nethereum.Hex.HexTypes.HexBigInteger(gas.Value * 12 / 10), null, null, args);

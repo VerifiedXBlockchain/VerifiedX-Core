@@ -718,6 +718,8 @@ namespace VerifiedXCore
 
             // Base Bridge: Load configuration from environment variables
             Bitcoin.Services.BaseBridgeService.LoadConfig();
+            // Each configured Base provider is asked for its chain id now; one on another chain is not read from.
+            VerifiedXCore.Utilities.SafeTask.Forget(Bitcoin.Services.BaseRpc.CheckProvidersAtStartAsync(), "BaseRpc.CheckProvidersAtStartAsync");
             Bitcoin.Services.ValidatorEthKeyService.TryInitializeGlobalsValidatorBaseAddress();
             if (!string.IsNullOrEmpty(Globals.ValidatorBaseAddress))
             {

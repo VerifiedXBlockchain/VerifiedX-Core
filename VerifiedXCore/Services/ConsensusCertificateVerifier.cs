@@ -97,10 +97,7 @@ namespace VerifiedXCore.Services
             if (cert == null)
                 return false;
 
-            if (cert.BlockHeight != block.Height
-                || ConsensusMessageFormatter.NormalizeHash(cert.BlockHash) != ConsensusMessageFormatter.NormalizeHash(block.Hash)
-                || cert.WinnerAddress != block.Validator
-                || ConsensusMessageFormatter.NormalizeHash(cert.PrevHash) != ConsensusMessageFormatter.NormalizeHash(block.PrevHash))
+            if (!NamesBlock(cert, block))
                 return false;
 
             // Wave 3: committee for the block's height when the record era is active; legacy view otherwise.
@@ -131,6 +128,23 @@ namespace VerifiedXCore.Services
 
             return validSigners.Count >= need;
         }
+
+        /// <summary>Whether a certificate is for this block: its height, hash, producer and parent.</summary>
+        private static bool NamesBlock(ConsensusCertificate cert, Block block) =>
+            cert.BlockHeight == block.Height
+            && ConsensusMessageFormatter.NormalizeHash(cert.BlockHash) == ConsensusMessageFormatter.NormalizeHash(block.Hash)
+            && cert.WinnerAddress == block.Validator
+            && ConsensusMessageFormatter.NormalizeHash(cert.PrevHash) == ConsensusMessageFormatter.NormalizeHash(block.PrevHash);
+
+        /// <summary>
+        /// Whether a certificate <see cref="VerifyOrNotRequired"/> refused was refused on the committee this node holds for
+        /// the height (who may attest, and how many must): it is there, it is for this block and it carries attestations.
+        /// That committee is read from this node's membership record, so a node whose record is newer may judge the same
+        /// certificate otherwise. A missing certificate, an empty one or one for another block is refused whatever the
+        /// committee.
+        /// </summary>
+        public static bool RefusalDependsOnCommittee(Block block) =>
+            block.ConsensusCertificate is { Attestations.Count: > 0 } cert && NamesBlock(cert, block);
 
         private static HashSet<string> BuildCasterAddressSet()
         {
