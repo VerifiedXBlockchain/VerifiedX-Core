@@ -668,6 +668,10 @@ namespace VerifiedXCore.Services
             var result = await ValidateBlockOnce(block, ignoreAdjSignatures, blockDownloads, validateOnly, updateCLI, skipCasterCheck, source, refusal);
             if (result || !refusal.Noted || validateOnly)
                 return result;
+            // From the membership chain's start the committee comes from the chain, not from the record this node holds: a
+            // newer record would not change the verdict, and no pull is waited for.
+            if (block != null && MembershipChain.ActiveAt(block.Height))
+                return result;
 
             AfterFirstVerdictForTests?.Invoke();
 
@@ -928,7 +932,7 @@ namespace VerifiedXCore.Services
 
                 // Without a membership record no certificate is required at all, so a synced node waits for the record
                 // its peers hold (ValidatorMembershipPull, every minute) before it takes the next block.
-                if (!validateOnly && AtSyncedTip(block) && CasterMembershipStore.MissingWhilePeersHaveOne())
+                if (!validateOnly && AtSyncedTip(block) && !MembershipChain.ActiveAt(block.Height) && CasterMembershipStore.MissingWhilePeersHaveOne())
                 {
                     ValidatorMembershipPull.RequestSoon(); // ask again within seconds, not at the next minute
                     DbContext.Rollback("BlockValidatorService.ValidateBlock()-noRecord");

@@ -693,15 +693,20 @@ namespace VerifiedXCore.Services
         {
             var r = block?.MembershipRecord;
             if (r == null) return CarriedVerdict.None;
-            if (!Active(block!.Height) || !IsElectionRecord(r) || r.EffectiveFromHeight != block.Height || r.Casters == null) return CarriedVerdict.Invalid;
+            // From the membership chain's start the record extends the chain's, read from the blocks below this one, and a
+            // seed reset rides here too (MembershipChain).
+            var onChain = MembershipChain.ActiveAt(block!.Height);
+            var reset = onChain && r.ChangeType == CasterMembershipStore.BootstrapResetChangeType;
+            if (!Active(block.Height) || !(IsElectionRecord(r) || reset) || r.EffectiveFromHeight != block.Height || r.Casters == null) return CarriedVerdict.Invalid;
             // Before the cache: the key names the record by its claimed hash, so the fields must be shown to be what it hashes.
             if (CasterMembershipStore.FieldHoldingTheSeparator(r) != null || CasterMembershipStore.ComputeRecordHash(r) != r.RecordHash) return CarriedVerdict.Invalid;
-            var prev = CasterMembershipStore.GetBySeq(r.RecordSeq - 1);
+            var prev = onChain ? MembershipChain.ChainBefore(block.Height)?.LastOrDefault() : CasterMembershipStore.GetBySeq(r.RecordSeq - 1);
             if (prev == null) return CarriedVerdict.CannotJudge; // the record chain below it is not here yet
+            if (onChain && r.RecordSeq != prev.RecordSeq + 1) return CarriedVerdict.Invalid;
             var key = CarriedKey(block, r, prev);
             if (_carriedVerdicts.TryGetValue(key, out var known)) return known;
 
-            var verdict = JudgeCarriedUncached(block, r, prev);
+            var verdict = JudgeCarriedUncached(block, r, prev, onChain ? MembershipChain.BySeqAt(block.Height) : CasterMembershipStore.GetBySeq);
             if (verdict != CarriedVerdict.CannotJudge)
             {
                 if (_carriedVerdicts.Count >= CarriedVerdictCacheSize) _carriedVerdicts.Clear();
@@ -710,11 +715,18 @@ namespace VerifiedXCore.Services
             return verdict;
         }
 
-        private static CarriedVerdict JudgeCarriedUncached(Block block, CasterMembershipRecord r, CasterMembershipRecord prev)
+        private static CarriedVerdict JudgeCarriedUncached(Block block, CasterMembershipRecord r, CasterMembershipRecord prev, Func<long, CasterMembershipRecord?> bySeq)
         {
             var parent = BlockAt(block.Height - 1);
             if (parent == null || parent.Hash != block.PrevHash) return CarriedVerdict.CannotJudge;
             if (!string.Equals(r.PrevRecordHash, prev.RecordHash, StringComparison.OrdinalIgnoreCase)) return CarriedVerdict.Invalid;
+            if (r.ChangeType == CasterMembershipStore.BootstrapResetChangeType)
+            {
+                // The seeds' set as hard-coded, two seed signatures. Each seed checked the stall on its own clock before it
+                // signed (CasterMembershipStore.ValidateBootstrapReset at signing); a block reads no clock.
+                if (r.EffectiveFromHeight <= prev.EffectiveFromHeight) return CarriedVerdict.Invalid;
+                return CasterMembershipStore.ValidateBootstrapReset(r, long.MaxValue, out _) ? CarriedVerdict.Valid : CarriedVerdict.Invalid;
+            }
             // No check of the stall in block time: a validator crafts its next block once, just after the tip, so the block
             // that ends a stall is dated from before it. Two thirds of the electorate each checked the stall by their own clock.
             if (r.ChangeType == EmergencyElectionChangeType)
@@ -723,12 +735,12 @@ namespace VerifiedXCore.Services
             }
             else
             {
-                var term = TermOf(prev, CasterMembershipStore.GetBySeq);
+                var term = TermOf(prev, bySeq);
                 if (term == null || block.Height <= term.LapseHeight) return CarriedVerdict.Invalid;
                 if (!string.Equals(r.EpochHash, VrfSeed.BlockHashAt(term.LapseHeight), StringComparison.OrdinalIgnoreCase)) return CarriedVerdict.Invalid;
                 if (r.Rung == 0 && block.Height != term.LapseHeight + HandoverBlocks) return CarriedVerdict.Invalid;
             }
-            return ContentRefusal(EpochFor(prev, r, CasterMembershipStore.GetBySeq), prev, r) == null ? CarriedVerdict.Valid : CarriedVerdict.Invalid;
+            return ContentRefusal(EpochFor(prev, r, bySeq), prev, r) == null ? CarriedVerdict.Valid : CarriedVerdict.Invalid;
         }
 
         /// <summary>The committee of a block that carries a valid record, or null: it needs no record held here to be judged.</summary>
@@ -740,15 +752,16 @@ namespace VerifiedXCore.Services
 
         /// <summary>The rung a block's valid record installs, when its certificate is that committee's, or null: Layer 3 of fork choice. A record alone is public, and anyone could put it on a block.</summary>
         public static int? CarriedRung(Block? block) =>
-            block?.MembershipRecord != null && JudgeCarried(block) == CarriedVerdict.Valid && ConsensusCertificateVerifier.VerifyOrNotRequired(block)
-                ? block.MembershipRecord.Rung : null;
+            IsElectionRecord(block?.MembershipRecord) && JudgeCarried(block!) == CarriedVerdict.Valid && ConsensusCertificateVerifier.VerifyOrNotRequired(block!)
+                ? block!.MembershipRecord!.Rung : null;
 
         /// <summary>Puts the record a block at its effective height carries on the block, when this node holds it.</summary>
         public static void AttachRecord(Block block)
         {
             if (block == null || block.MembershipRecord != null || !Active(block.Height)) return;
             var governing = CasterMembershipStore.GetForHeight(block.Height);
-            if (IsElectionRecord(governing) && governing!.EffectiveFromHeight == block.Height)
+            var carriedReset = governing?.ChangeType == CasterMembershipStore.BootstrapResetChangeType && MembershipChain.ActiveAt(block.Height);
+            if ((IsElectionRecord(governing) || carriedReset) && governing!.EffectiveFromHeight == block.Height && block.MembershipRun is not { Count: > 0 })
                 block.MembershipRecord = governing;
         }
 

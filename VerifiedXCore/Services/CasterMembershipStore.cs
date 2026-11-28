@@ -419,6 +419,10 @@ namespace VerifiedXCore.Services
         /// </summary>
         public static CasterMembershipRecord? GetForHeight(long height)
         {
+            // From the membership chain's start the chain says which record governs a height, the same on every node
+            // that holds its blocks (MembershipChain); the records this node holds decide only below it.
+            if (MembershipChain.RecordFor(height) is { } onChain)
+                return StartingAtNextBlock(height, onChain) ?? onChain;
             var head = GetCurrent();
             if (head == null) return null;
             if (head.EffectiveFromHeight <= height) return head;
@@ -426,6 +430,20 @@ namespace VerifiedXCore.Services
             if (col == null) return null;
             return col.Query().Where(x => x.EffectiveFromHeight <= height)
                 .OrderByDescending(x => x.RecordSeq).FirstOrDefault();
+        }
+
+        /// <summary>
+        /// An election or a seed reset is in force from the block that carries it, and that block is judged before it is
+        /// written: for the next block, the one this node took from the block itself (VreeService.AdoptFromBlock, before its
+        /// transactions are judged) or holds for it, when it extends the chain's record and takes effect at that height.
+        /// VreeElection.PrepareBlockRecord puts a held one on the block, so the block's certificate must be its committee's.
+        /// </summary>
+        private static CasterMembershipRecord? StartingAtNextBlock(long height, CasterMembershipRecord onChain)
+        {
+            if (height != (Globals.LastBlock?.Height ?? -1) + 1) return null;
+            var held = GetBySeq(onChain.RecordSeq + 1);
+            if (held == null || held.EffectiveFromHeight != height || !MembershipChain.IsCarriedType(held.ChangeType)) return null;
+            return string.Equals(held.PrevRecordHash, onChain.RecordHash, StringComparison.OrdinalIgnoreCase) ? held : null;
         }
 
         /// <summary>The record at a sequence number, or null.</summary>

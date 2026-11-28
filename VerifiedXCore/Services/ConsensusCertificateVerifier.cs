@@ -54,7 +54,8 @@ namespace VerifiedXCore.Services
         {
             var carried = VreeElection.CarriedCommittee(block);
             if (carried != null) return carried;
-            if (VreeElection.Lapsed(CasterMembershipStore.GetForHeight(block.Height), block.Height, CasterMembershipStore.GetBySeq))
+            var bySeq = MembershipChain.ActiveAt(block.Height) ? MembershipChain.BySeqAt(block.Height) : CasterMembershipStore.GetBySeq;
+            if (VreeElection.Lapsed(CasterMembershipStore.GetForHeight(block.Height), block.Height, bySeq))
                 return new HashSet<string>(StringComparer.Ordinal);
             return AttestorSetForHeight(block.Height);
         }
@@ -80,7 +81,7 @@ namespace VerifiedXCore.Services
         {
             if (block?.ConsensusCertificate == null)
                 return false;
-            if (block.Height < Globals.CertEnforceHeight || !ConsensusCertificateRules.SupportsConsensusCertificate(block.Version))
+            if (!Required(block))
                 return false;
             return VerifyOrNotRequired(block);
         }
@@ -90,7 +91,7 @@ namespace VerifiedXCore.Services
         {
             // Wave 4: bootstrap no longer skips certs — bootstrap blocks carry ≥2 seed
             // attestations (RequiredAttestationsForHeight handles the reduced quorum).
-            if (block.Height < Globals.CertEnforceHeight || !ConsensusCertificateRules.SupportsConsensusCertificate(block.Version))
+            if (!Required(block))
                 return true;
 
             var cert = block.ConsensusCertificate;
@@ -128,6 +129,15 @@ namespace VerifiedXCore.Services
 
             return validSigners.Count >= need;
         }
+
+        /// <summary>
+        /// Whether a block at its height needs a certificate: from the height the membership record's genesis arms, and on
+        /// every node from the membership chain's start, whose committee every node reads from the chain whether or not it
+        /// holds a record (a node without one took the next block uncertified: mainnet, 23 October 2026).
+        /// </summary>
+        public static bool Required(Block block) =>
+            ConsensusCertificateRules.SupportsConsensusCertificate(block.Version)
+            && (block.Height >= Globals.CertEnforceHeight || MembershipChain.ActiveAt(block.Height));
 
         /// <summary>Whether a certificate is for this block: its height, hash, producer and parent.</summary>
         private static bool NamesBlock(ConsensusCertificate cert, Block block) =>

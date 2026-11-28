@@ -41,6 +41,10 @@ namespace VerifiedXCore.Services
         public static bool IsRunType(string? changeType) =>
             changeType is "Promotion" or "Demotion" or "Departure" or VreeElection.MaintenanceHoldChangeType;
 
+        /// <summary>The records a block carries in its carried record (Block.MembershipRecord), in force from that block.</summary>
+        public static bool IsCarriedType(string? changeType) =>
+            changeType is VreeElection.EmergencyElectionChangeType or VreeElection.ScheduledRotationChangeType or CasterMembershipStore.BootstrapResetChangeType;
+
         /// <summary>One block that carried records.</summary>
         public class ChainRow
         {
@@ -68,22 +72,30 @@ namespace VerifiedXCore.Services
         /// carried record up to <paramref name="height"/> itself. Null when the chain's rules do not judge that height (the
         /// chain has not started below it): the records this node holds decide there.
         /// </summary>
-        public static List<CasterMembershipRecord>? ChainAt(long height)
+        public static List<CasterMembershipRecord>? ChainAt(long height) => Cached(height, carriedAtHeight: true);
+
+        /// <summary>As <see cref="ChainAt"/>, without what the block at <paramref name="height"/> itself carries: the records a
+        /// carried election or reset at that height must extend.</summary>
+        public static List<CasterMembershipRecord>? ChainBefore(long height) => Cached(height, carriedAtHeight: false);
+
+        private static List<CasterMembershipRecord>? Cached(long height, bool carriedAtHeight)
         {
             if (!Configured || height <= Globals.MembershipChainHeight) return null;
-            var key = $"{height}|{Globals.LastBlock?.Height}|{Globals.LastBlock?.Hash}";
+            var key = $"{height}|{carriedAtHeight}|{Globals.LastBlock?.Height}|{Globals.LastBlock?.Hash}";
             if (_cache.TryGetValue(key, out var known)) return known;
-            var result = Compute(height);
+            var result = Compute(carriedAtHeight ? height : height - 1, height);
             if (_cache.Count >= CacheSize) _cache.Clear();
             _cache[key] = result;
             return result;
         }
 
-        private static List<CasterMembershipRecord>? Compute(long height)
+        /// <summary>The records of the rows up to <paramref name="upTo"/>, a run only below <paramref name="height"/>.</summary>
+        private static List<CasterMembershipRecord>? Compute(long upTo, long height)
         {
+            if (upTo < Globals.MembershipChainHeight) return null;
             var col = Collection();
             if (col == null) return null;
-            var rows = col.Query().Where(x => x.Id >= Globals.MembershipChainHeight && x.Id <= height).OrderBy(x => x.Id).ToList();
+            var rows = col.Query().Where(x => x.Id >= Globals.MembershipChainHeight && x.Id <= upTo).OrderBy(x => x.Id).ToList();
             var records = new List<CasterMembershipRecord>();
             var started = false;
             foreach (var row in rows)

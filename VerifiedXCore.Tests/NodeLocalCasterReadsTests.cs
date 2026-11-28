@@ -62,6 +62,15 @@ namespace VerifiedXCore.Tests
                 // The vote count of blocks below the height that bound votes to the committee.
                 ["ActiveCasterCount"] = 1,
             },
+            ["Services/MembershipChain.cs"] = new()
+            {
+                // The committee as the chain carried it. Only the store's pure checks of a record's own fields and
+                // signatures, and a name: nothing this node holds.
+                ["CasterMembershipStore.BootstrapResetChangeType"] = 1,
+                ["CasterMembershipStore.ComputeRecordHash"] = 1,
+                ["CasterMembershipStore.FieldHoldingTheSeparator"] = 1,
+                ["CasterMembershipStore.ValidateSuccessor"] = 1,
+            },
             // Read none.
             ["Data/StateData.cs"] = new(),
             ["Data/BlockchainData.cs"] = new(),

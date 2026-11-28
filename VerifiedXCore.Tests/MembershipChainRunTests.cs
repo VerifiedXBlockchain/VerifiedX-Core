@@ -11,7 +11,8 @@ namespace VerifiedXCore.Tests
     /// <summary>
     /// The run of membership records a block carries, as block validation judges it: the chain starts at the first block
     /// at or after the height whose run begins with the pinned anchor; from then on a run extends the chain's record,
-    /// signed by a majority of the committee before it, inside its carry window, and is in force from the next block.
+    /// signed by a majority of the committee before it, inside its carry window, and is in force from the next block. From
+    /// the start every block needs a certificate by the chain's committee, on every node.
     /// Through BlockValidatorService.ValidateBlock.
     /// </summary>
     [Collection("DbContextSequential")]
@@ -89,7 +90,7 @@ namespace VerifiedXCore.Tests
             await StartAtTheHeight();
             Assert.True(await Take(NextBlock(null, new List<CasterMembershipRecord> { _anchor })));
             var demotion = Next(_anchor, Casters.Take(3), "Demotion", Casters[3].Address, Tip + 1);
-            var carrier = NextBlock(null, new List<CasterMembershipRecord> { demotion });
+            var carrier = NextBlock(Casters.Take(3), new List<CasterMembershipRecord> { demotion });
 
             Assert.True(await Take(carrier));
 
@@ -105,30 +106,30 @@ namespace VerifiedXCore.Tests
             var next = Tip + 1;
 
             var early = Next(_anchor, Casters.Take(3), "Demotion", Casters[3].Address, next + 1);
-            await Refused(NextBlock(null, new List<CasterMembershipRecord> { early }), "after this block");
+            await Refused(NextBlock(Casters.Take(3), new List<CasterMembershipRecord> { early }), "after this block");
 
             var late = Next(_anchor, Casters.Take(3), "Demotion", Casters[3].Address, next - MembershipChain.CarryWindowBlocks - 1);
-            await Refused(NextBlock(null, new List<CasterMembershipRecord> { late }), "at most");
+            await Refused(NextBlock(Casters.Take(3), new List<CasterMembershipRecord> { late }), "at most");
             var lastInWindow = Next(_anchor, Casters.Take(3), "Demotion", Casters[3].Address, next - MembershipChain.CarryWindowBlocks);
-            Assert.Null(MembershipChain.RunRefusal(NextBlock(null, new List<CasterMembershipRecord> { lastInWindow })));
+            Assert.Null(MembershipChain.RunRefusal(NextBlock(Casters.Take(3), new List<CasterMembershipRecord> { lastInWindow })));
 
             var gap = Record(_anchor.RecordSeq + 2, next, _anchor.RecordHash, Casters.Take(3), "Demotion", Casters[3].Address);
-            await Refused(NextBlock(null, new List<CasterMembershipRecord> { Signed(gap, Casters.Take(3)) }), "does not extend");
+            await Refused(NextBlock(Casters.Take(3), new List<CasterMembershipRecord> { Signed(gap, Casters.Take(3)) }), "does not extend");
             var otherPrev = Record(_anchor.RecordSeq + 1, next, "another", Casters.Take(3), "Demotion", Casters[3].Address);
-            await Refused(NextBlock(null, new List<CasterMembershipRecord> { Signed(otherPrev, Casters.Take(3)) }), "does not extend");
+            await Refused(NextBlock(Casters.Take(3), new List<CasterMembershipRecord> { Signed(otherPrev, Casters.Take(3)) }), "does not extend");
 
             var underSigned = Signed(Record(_anchor.RecordSeq + 1, next, _anchor.RecordHash, Casters.Take(3), "Demotion", Casters[3].Address), Casters.Take(2));
-            await Refused(NextBlock(null, new List<CasterMembershipRecord> { underSigned }), "signatures 2/3");
+            await Refused(NextBlock(Casters.Take(3), new List<CasterMembershipRecord> { underSigned }), "signatures 2/3");
             var byOutsiders = Signed(Record(_anchor.RecordSeq + 1, next, _anchor.RecordHash, Casters.Take(3), "Demotion", Casters[3].Address), new[] { Casters[4], Producer, Minter });
-            await Refused(NextBlock(null, new List<CasterMembershipRecord> { byOutsiders }), "signatures 0/3");
+            await Refused(NextBlock(Casters.Take(3), new List<CasterMembershipRecord> { byOutsiders }), "signatures 0/3");
 
             var election = Next(_anchor, Casters.Skip(1).Take(3), VreeElection.EmergencyElectionChangeType, "", next);
-            await Refused(NextBlock(null, new List<CasterMembershipRecord> { election }), "not carried in a run");
+            await Refused(NextBlock(Casters.Take(3), new List<CasterMembershipRecord> { election }), "not carried in a run");
             var reset = Next(_anchor, Casters.Take(3), CasterMembershipStore.BootstrapResetChangeType, "", next);
-            await Refused(NextBlock(null, new List<CasterMembershipRecord> { reset }), "not carried in a run");
+            await Refused(NextBlock(Casters.Take(3), new List<CasterMembershipRecord> { reset }), "not carried in a run");
 
             var tooMany = Enumerable.Range(0, MembershipChain.MaxRunRecords + 1).Select(_ => early).ToList();
-            await Refused(NextBlock(null, tooMany), "more than");
+            await Refused(NextBlock(Casters.Take(3), tooMany), "more than");
 
             Assert.Equal(_anchor.RecordHash, MembershipChain.RecordFor(Tip + 1)!.RecordHash);
         }
@@ -141,7 +142,7 @@ namespace VerifiedXCore.Tests
             Assert.True(await Take(NextBlock(null, new List<CasterMembershipRecord> { _anchor })));
             var demotion = Next(_anchor, Casters.Take(3), "Demotion", Casters[3].Address, Tip);
             var promotion = Next(demotion, Casters.Take(3).Append(Casters[4]), "Promotion", Casters[4].Address, Tip + 1);
-            Assert.True(await Take(NextBlock(null, new List<CasterMembershipRecord> { demotion, promotion })));
+            Assert.True(await Take(NextBlock(Casters.Take(3), new List<CasterMembershipRecord> { demotion, promotion })));
             Assert.Equal(promotion.RecordHash, MembershipChain.RecordFor(Tip + 1)!.RecordHash);
         }
     }
