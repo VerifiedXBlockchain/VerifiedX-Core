@@ -195,7 +195,7 @@ namespace VerifiedXCore.Bitcoin.Services
             return await PollOnceInternal();
         }
 
-        private static async Task<bool> CanReadLogs(Web3 web3, string? contract, long block, long latest)
+        private static async Task<bool> CanReadLogs(string? contract, long block, long latest)
         {
             if (block > latest || string.IsNullOrEmpty(contract)) return false;
             try
@@ -206,7 +206,7 @@ namespace VerifiedXCore.Bitcoin.Services
                     ToBlock = new BlockParameter(new HexBigInteger(block)),
                     Address = new[] { contract },
                 };
-                await web3.Eth.Filters.GetLogs.SendRequestAsync(probe);
+                await BaseRpc.AuthorizingPrimaryAsync((web3, _) => web3.Eth.Filters.GetLogs.SendRequestAsync(probe));
                 return true;
             }
             catch { return false; }
@@ -321,8 +321,8 @@ namespace VerifiedXCore.Bitcoin.Services
 
         private static async Task<(int Processed, long ScannedToBlock, string Message)> PollOnceInternal()
         {
-            var web3 = new Web3(BaseBridgeService.BaseRpcUrl);
-            var latestHex = await web3.Eth.Blocks.GetBlockNumber.SendRequestAsync();
+            // The burns read here start an exit: authorizing reads, of the first configured provider.
+            var latestHex = await BaseRpc.AuthorizingPrimaryAsync((web3, _) => web3.Eth.Blocks.GetBlockNumber.SendRequestAsync());
             var latest = (long)latestHex.Value;
             _behind = false;
 
@@ -387,15 +387,26 @@ namespace VerifiedXCore.Bitcoin.Services
             {
                 if (!string.IsNullOrEmpty(v3Contract))
                 {
-                    var vfxExitHandler = web3.Eth.GetEvent<VfxExitBurnedEventDTO>(v3Contract);
-                    vfxExitLogs = await vfxExitHandler.GetAllChangesAsync(vfxExitHandler.CreateFilterInput(
+                    vfxExitLogs = await BaseRpc.AuthorizingPrimaryAsync((web3, _) =>
+                    {
+                        var vfxExitHandler = web3.Eth.GetEvent<VfxExitBurnedEventDTO>(v3Contract);
+                        return vfxExitHandler.GetAllChangesAsync(vfxExitHandler.CreateFilterInput(
+                            new BlockParameter(new HexBigInteger(from)),
+                            new BlockParameter(new HexBigInteger(to))));
+                    });
+                }
+                btcLogs = await BaseRpc.AuthorizingPrimaryAsync((web3, _) =>
+                {
+                    var btcEventHandler = web3.Eth.GetEvent<BTCExitBurnedEventDTO>(btcExitContract);
+                    return btcEventHandler.GetAllChangesAsync(btcEventHandler.CreateFilterInput(
                         new BlockParameter(new HexBigInteger(from)),
                         new BlockParameter(new HexBigInteger(to))));
-                }
-                var btcEventHandler = web3.Eth.GetEvent<BTCExitBurnedEventDTO>(btcExitContract);
-                btcLogs = await btcEventHandler.GetAllChangesAsync(btcEventHandler.CreateFilterInput(
-                    new BlockParameter(new HexBigInteger(from)),
-                    new BlockParameter(new HexBigInteger(to))));
+                });
+                // The contract writes its own chain's id into every burn: a log that names another chain is not Base's,
+                // and the range is read again like one that could not be read.
+                if (vfxExitLogs.Any(e => e.Event != null && !BaseRpc.IsExpectedChain(e.Event.ChainId))
+                    || btcLogs.Any(e => e.Event != null && !BaseRpc.IsExpectedChain(e.Event.ChainId)))
+                    throw new InvalidOperationException(BaseBridgeService.BurnOnAnotherChain);
             }
             catch (Exception readEx)
             {
@@ -526,7 +537,7 @@ namespace VerifiedXCore.Bitcoin.Services
                     return (processed, state.LastScannedBlock, "Base log query failed for one block; read again next poll");
                 // Passed over only when the provider reads the next block: during an outage nothing is skipped, the
                 // watcher waits (round 22).
-                if (!await CanReadLogs(web3, contract, from + 1, latest))
+                if (!await CanReadLogs(contract, from + 1, latest))
                 {
                     _singleBlockFailures = SingleBlockFailuresBeforeSkip - 1;
                     return (processed, state.LastScannedBlock, "Base log queries are failing; waiting for the provider");

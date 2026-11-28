@@ -406,7 +406,7 @@ namespace VerifiedXCore.Bitcoin.Services
 
                 // Create Web3 instance with the user's key
                 var ethAccount = new Account(ethKey, chainId);
-                var web3 = new Web3(ethAccount, rpcUrl);
+                var web3 = await BaseRpc.SenderAsync(ethAccount);
 
                 var contract = web3.Eth.GetContract(MINT_WITH_PROOF_ABI, contractAddress);
                 var mintFunction = contract.GetFunction("mintWithProof");
@@ -503,24 +503,15 @@ namespace VerifiedXCore.Bitcoin.Services
                 // 1. Check if the lock has already been minted on the Base contract (avoid wasting gas)
                 try
                 {
-                    foreach (var rpcUrl in BaseBridgeService.RpcUrlCandidates())
+                    // Advisory: it only spares a retry the gas of a mint the contract would refuse.
+                    var alreadyUsed = await BaseRpc.AdvisoryFirstAsync(web3 =>
+                        web3.Eth.GetContract(BaseBridgeService.CONTRACT_ABI, BaseBridgeService.ContractAddress).GetFunction("isLockIdUsed").CallAsync<bool>(lockId));
+                    if (alreadyUsed.Answered && alreadyUsed.Value)
                     {
-                        try
-                        {
-                            var web3 = new Nethereum.Web3.Web3(rpcUrl);
-                            var contract = web3.Eth.GetContract(BaseBridgeService.CONTRACT_ABI, BaseBridgeService.ContractAddress);
-                            var isUsedFunc = contract.GetFunction("isLockIdUsed");
-                            var alreadyUsed = await isUsedFunc.CallAsync<bool>(lockId);
-                            if (alreadyUsed)
-                            {
-                                var existingRec = BridgeLockRecord.GetByLockId(lockId);
-                                if (existingRec != null && existingRec.Status != BridgeLockStatus.Minted && existingRec.Status != BridgeLockStatus.MintedOnBase)
-                                    BridgeLockRecord.UpdateStatus(lockId, BridgeLockStatus.Minted);
-                                return (false, $"Lock {lockId} has already been minted on the Base contract. No action needed.");
-                            }
-                            break;
-                        }
-                        catch { /* try next RPC */ }
+                        var existingRec = BridgeLockRecord.GetByLockId(lockId);
+                        if (existingRec != null && existingRec.Status != BridgeLockStatus.Minted && existingRec.Status != BridgeLockStatus.MintedOnBase)
+                            BridgeLockRecord.UpdateStatus(lockId, BridgeLockStatus.Minted);
+                        return (false, $"Lock {lockId} has already been minted on the Base contract. No action needed.");
                     }
                 }
                 catch { /* non-fatal */ }

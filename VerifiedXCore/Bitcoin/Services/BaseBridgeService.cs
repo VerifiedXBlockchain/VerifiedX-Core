@@ -97,11 +97,8 @@ namespace VerifiedXCore.Bitcoin.Services
                 if (!CanReadVbtcToken)
                     return (false, 0, "Base vBTC.b read not configured (set BaseBridgeRpcUrl and BaseBridgeContract in config.txt)");
 
-                var web3 = new Web3(BaseRpcUrl);
-                var contract = web3.Eth.GetContract(BALANCE_ABI, ContractAddress);
-
-                var balanceFunc = contract.GetFunction("balanceOf");
-                var balance = await balanceFunc.CallAsync<BigInteger>(evmAddress);
+                var balance = await BaseRpc.AdvisoryPrimaryAsync(web3 =>
+                    web3.Eth.GetContract(BALANCE_ABI, ContractAddress).GetFunction("balanceOf").CallAsync<BigInteger>(evmAddress));
 
                 // Convert from satoshis (8 decimals) to BTC
                 var btcBalance = (decimal)balance / 100_000_000M;
@@ -123,11 +120,8 @@ namespace VerifiedXCore.Bitcoin.Services
                 if (!CanReadVbtcToken)
                     return (false, 0, "Base vBTC.b read not configured");
 
-                var web3 = new Web3(BaseRpcUrl);
-                var contract = web3.Eth.GetContract(BALANCE_ABI, ContractAddress);
-
-                var supplyFunc = contract.GetFunction("totalSupply");
-                var supply = await supplyFunc.CallAsync<BigInteger>();
+                var supply = await BaseRpc.AdvisoryPrimaryAsync(web3 =>
+                    web3.Eth.GetContract(BALANCE_ABI, ContractAddress).GetFunction("totalSupply").CallAsync<BigInteger>());
 
                 var btcSupply = (decimal)supply / 100_000_000M;
                 return (true, btcSupply, "OK");
@@ -149,8 +143,7 @@ namespace VerifiedXCore.Bitcoin.Services
                 if (string.IsNullOrEmpty(evmAddress) || !evmAddress.StartsWith("0x") || evmAddress.Length != 42)
                     return (false, 0, "Invalid EVM address");
 
-                var web3 = new Web3(BaseRpcUrl);
-                var wei = await web3.Eth.GetBalance.SendRequestAsync(evmAddress);
+                var wei = await BaseRpc.AdvisoryPrimaryAsync(web3 => web3.Eth.GetBalance.SendRequestAsync(evmAddress));
                 var eth = Web3.Convert.FromWei(wei.Value);
                 return (true, eth, "OK");
             }
@@ -166,8 +159,9 @@ namespace VerifiedXCore.Bitcoin.Services
         public static void LoadConfig()
         {
             Globals.VBTCbContractAddress = ContractAddress.Trim();
-            if (BaseChainId == 0)
-                BaseChainId = (int)Globals.BaseEvmChainId;
+            // The network decides which Base chain its bridge is on; a configured id that differs was refused
+            // (Config.ProcessConfig, BaseRpc.AcceptsConfiguredChainId).
+            BaseChainId = (int)Globals.BaseEvmChainId;
 
             if (IsBridgeConfigured)
             {
@@ -197,20 +191,10 @@ namespace VerifiedXCore.Bitcoin.Services
         public static async Task<int> GetRequiredMintSignaturesFromChainAsync()
         {
             if (!IsBridgeConfigured) return 2;
-            foreach (var url in RpcUrlCandidates())
-            {
-                try
-                {
-                    var web3 = new Web3(url);
-                    var c = web3.Eth.GetContract(CONTRACT_ABI, ContractAddress);
-                    var fn = c.GetFunction("requiredMintSignatures");
-                    var v = await fn.CallAsync<BigInteger>();
-                    var i = (int)v;
-                    return i < 2 ? 2 : i;
-                }
-                catch { }
-            }
-            return 2;
+            // Advisory: it sizes this node's own collection of signatures; the contract counts them.
+            var required = await BaseRpc.AdvisoryFirstAsync(async web3 =>
+                (int)await web3.Eth.GetContract(CONTRACT_ABI, ContractAddress).GetFunction("requiredMintSignatures").CallAsync<BigInteger>());
+            return !required.Answered || required.Value < 2 ? 2 : required.Value;
         }
 
         /// <summary>
@@ -241,25 +225,21 @@ namespace VerifiedXCore.Bitcoin.Services
         {
             if (ReadSignerViewForTests != null) return await ReadSignerViewForTests();
             if (!IsBridgeConfigured) return null;
-            foreach (var url in RpcUrlCandidates())
+            var view = await BaseRpc.AuthorizingFirstAsync(async (web3, at) =>
             {
-                try
-                {
-                    var c = new Web3(url).Eth.GetContract(SIGNER_VIEW_ABI, ContractAddress);
-                    var validators = await c.GetFunction("getValidators").CallAsync<List<string>>();
-                    var required = (int)await c.GetFunction("requiredMintSignatures").CallAsync<BigInteger>();
-                    var nonce = await c.GetFunction("adminNonce").CallAsync<BigInteger>();
-                    var version = 3;
-                    try { version = (int)await c.GetFunction("MESSAGE_VERSION").CallAsync<BigInteger>(); }
-                    catch (Exception ex) when (ex is Nethereum.JsonRpc.Client.RpcResponseException or Nethereum.ABI.FunctionEncoding.SmartContractRevertException) { } // V3: no such function
-                    if (version != VbtcbTypedData.MessageVersion) return new SignerView(validators, version, Math.Max(2, required), nonce);
-                    var casters = await c.GetFunction("getCasters").CallAsync<List<string>>();
-                    var requiredCasters = (int)await c.GetFunction("requiredCasterSignatures").CallAsync<BigInteger>();
-                    return new SignerView(validators, version, Math.Max(2, required), nonce, casters, requiredCasters);
-                }
-                catch { }
-            }
-            return null;
+                var c = web3.Eth.GetContract(SIGNER_VIEW_ABI, ContractAddress);
+                var validators = await c.GetFunction("getValidators").CallAsync<List<string>>(at);
+                var required = (int)await c.GetFunction("requiredMintSignatures").CallAsync<BigInteger>(at);
+                var nonce = await c.GetFunction("adminNonce").CallAsync<BigInteger>(at);
+                var version = 3;
+                try { version = (int)await c.GetFunction("MESSAGE_VERSION").CallAsync<BigInteger>(at); }
+                catch (Exception ex) when (ex is Nethereum.JsonRpc.Client.RpcResponseException or Nethereum.ABI.FunctionEncoding.SmartContractRevertException) { } // V3: no such function
+                if (version != VbtcbTypedData.MessageVersion) return new SignerView(validators, version, Math.Max(2, required), nonce);
+                var casters = await c.GetFunction("getCasters").CallAsync<List<string>>(at);
+                var requiredCasters = (int)await c.GetFunction("requiredCasterSignatures").CallAsync<BigInteger>(at);
+                return new SignerView(validators, version, Math.Max(2, required), nonce, casters, requiredCasters);
+            });
+            return view.Answered ? view.Value : null;
         }
 
         /// <summary>The contract's pending proposeRemoval: the validators and casters it names, and when it can run (0: none).</summary>
@@ -279,20 +259,16 @@ namespace VerifiedXCore.Bitcoin.Services
         {
             if (ReadPendingRemovalForTests != null) return await ReadPendingRemovalForTests();
             if (!IsBridgeConfigured) return null;
-            foreach (var url in RpcUrlCandidates())
+            var pending = await BaseRpc.AuthorizingFirstAsync(async (web3, at) =>
             {
-                try
-                {
-                    var c = new Web3(url).Eth.GetContract(PENDING_REMOVAL_ABI, ContractAddress);
-                    var eta = await c.GetFunction("pendingRemovalEta").CallAsync<BigInteger>();
-                    if (eta == 0) return new PendingRemoval(Array.Empty<string>(), Array.Empty<string>(), 0);
-                    var validators = await c.GetFunction("getPendingRemovals").CallAsync<List<string>>();
-                    var casters = await c.GetFunction("getPendingCasterRemovals").CallAsync<List<string>>();
-                    return new PendingRemoval(validators, casters, eta);
-                }
-                catch { }
-            }
-            return null;
+                var c = web3.Eth.GetContract(PENDING_REMOVAL_ABI, ContractAddress);
+                var eta = await c.GetFunction("pendingRemovalEta").CallAsync<BigInteger>(at);
+                if (eta == 0) return new PendingRemoval(Array.Empty<string>(), Array.Empty<string>(), 0);
+                var validators = await c.GetFunction("getPendingRemovals").CallAsync<List<string>>(at);
+                var casters = await c.GetFunction("getPendingCasterRemovals").CallAsync<List<string>>(at);
+                return new PendingRemoval(validators, casters, eta);
+            });
+            return pending.Answered ? pending.Value : null;
         }
 
         public sealed class BurnEventInfo
@@ -370,24 +346,18 @@ namespace VerifiedXCore.Bitcoin.Services
             if (!IsBridgeConfigured) return (false, "Bridge not configured");
             if (string.IsNullOrWhiteSpace(txHash)) return (false, "Empty tx hash");
             var h = NormalizeTxHash(txHash);
-            string lastErr = "no RPC reachable";
-            foreach (var url in RpcUrlCandidates())
+            var verdict = await BaseRpc.AuthorizingAskAsync<(bool Ok, string Reason)>(async (web3, _) =>
             {
-                try
-                {
-                    var web3 = new Web3(url);
-                    var r = await web3.Eth.Transactions.GetTransactionReceipt.SendRequestAsync(h);
-                    if (r == null) { lastErr = "receipt not found"; continue; }
-                    if (r.Status?.Value != 1) return (false, "Base transaction did not succeed");
-                    // Key on the EMITTING address, not receipt.to: a burn made through a smart-contract
-                    // wallet (e.g. a Safe) has a different `to` but its logs still come from the bridge.
-                    if (!ReceiptHasLogFromContract(r))
-                        return (false, "Base transaction emitted no event from the bridge contract");
-                    return (true, "");
-                }
-                catch (Exception ex) { lastErr = ex.Message; }
-            }
-            return (false, $"Could not read Base receipt: {lastErr}");
+                var r = await web3.Eth.Transactions.GetTransactionReceipt.SendRequestAsync(h);
+                if (r == null) return BaseAnswer<(bool Ok, string Reason)>.No("receipt not found");
+                if (r.Status?.Value != 1) return BaseAnswer<(bool Ok, string Reason)>.Yes((false, "Base transaction did not succeed"));
+                // Key on the EMITTING address, not receipt.to: a burn made through a smart-contract
+                // wallet (e.g. a Safe) has a different `to` but its logs still come from the bridge.
+                if (!ReceiptHasLogFromContract(r))
+                    return BaseAnswer<(bool Ok, string Reason)>.Yes((false, "Base transaction emitted no event from the bridge contract"));
+                return BaseAnswer<(bool Ok, string Reason)>.Yes((true, ""));
+            });
+            return verdict.Answered ? verdict.Value : (false, $"Could not read Base receipt: {verdict.Reason}");
         }
 
         /// <summary>
@@ -405,41 +375,45 @@ namespace VerifiedXCore.Bitcoin.Services
             if (!IsBridgeConfigured) return (false, null, "Bridge not configured");
             if (string.IsNullOrWhiteSpace(txHash)) return (false, null, "Empty tx hash");
             var h = NormalizeTxHash(txHash);
-            string lastErr = "no RPC reachable";
-            foreach (var url in RpcUrlCandidates())
+            var verdict = await BaseRpc.AuthorizingAskAsync<(bool Ok, BurnEventInfo? Info, string Reason)>(async (web3, _) =>
             {
-                try
-                {
-                    var web3 = new Web3(url);
-                    var r = await web3.Eth.Transactions.GetTransactionReceipt.SendRequestAsync(h);
-                    if (r == null) { lastErr = "receipt not found"; continue; }
-                    if (r.Status?.Value != 1) return (false, null, "Base transaction did not succeed");
-                    // No receipt.to check: the event decoders below filter on the emitting log address,
-                    // which is what proves the burn came from the bridge contract (smart-contract
-                    // wallets call it indirectly).
+                var r = await web3.Eth.Transactions.GetTransactionReceipt.SendRequestAsync(h);
+                if (r == null) return BaseAnswer<(bool Ok, BurnEventInfo? Info, string Reason)>.No("receipt not found");
+                if (r.Status?.Value != 1) return BaseAnswer<(bool Ok, BurnEventInfo? Info, string Reason)>.Yes((false, null, "Base transaction did not succeed"));
+                // No receipt.to check: the event decoders below filter on the emitting log address,
+                // which is what proves the burn came from the bridge contract (smart-contract
+                // wallets call it indirectly).
 
-                    // Every bridge burn of the transaction, both kinds, in the order it emitted them (BurnId).
-                    var burns = new List<(BigInteger LogIndex, bool Vfx, BurnEventInfo? Info)>();
-                    foreach (var ev in r.DecodeAllEvents<BaseBridgeExitWatchService.VfxExitBurnedEventDTO>())
-                    {
-                        if (!string.Equals(ev.Log.Address, ContractAddress, StringComparison.OrdinalIgnoreCase)) continue;
-                        var amt = ev.Event.Amount;
-                        burns.Add((ev.Log.LogIndex?.Value ?? BigInteger.Zero, true, amt <= 0 || amt > long.MaxValue ? null
-                            : new BurnEventInfo { AmountSats = (long)amt, Destination = ev.Event.VfxDestinationAddress?.Trim() ?? "", Burner = ev.Event.Burner ?? "" }));
-                    }
-                    foreach (var ev in r.DecodeAllEvents<BaseBridgeExitWatchService.BTCExitBurnedEventDTO>())
-                    {
-                        if (!string.Equals(ev.Log.Address, ContractAddress, StringComparison.OrdinalIgnoreCase)) continue;
-                        var amt = ev.Event.Amount;
-                        burns.Add((ev.Log.LogIndex?.Value ?? BigInteger.Zero, false, amt <= 0 || amt > long.MaxValue ? null
-                            : new BurnEventInfo { AmountSats = (long)amt, Destination = ev.Event.BtcDestination?.Trim() ?? "", Burner = ev.Event.Burner ?? "" }));
-                    }
-                    return BurnAt(burns.OrderBy(b => b.LogIndex).Select(b => (b.Vfx, b.Info)).ToList(), SplitBurnId(txHash).Position, vfxExit);
+                // Every bridge burn of the transaction, both kinds, in the order it emitted them (BurnId).
+                var burns = new List<(BigInteger LogIndex, bool Vfx, BurnEventInfo? Info)>();
+                foreach (var ev in r.DecodeAllEvents<BaseBridgeExitWatchService.VfxExitBurnedEventDTO>())
+                {
+                    if (!string.Equals(ev.Log.Address, ContractAddress, StringComparison.OrdinalIgnoreCase)) continue;
+                    if (!BaseRpc.IsExpectedChain(ev.Event.ChainId)) return BaseAnswer<(bool Ok, BurnEventInfo? Info, string Reason)>.No(BurnOnAnotherChain);
+                    var amt = ev.Event.Amount;
+                    burns.Add((ev.Log.LogIndex?.Value ?? BigInteger.Zero, true, amt <= 0 || amt > long.MaxValue ? null
+                        : new BurnEventInfo { AmountSats = (long)amt, Destination = ev.Event.VfxDestinationAddress?.Trim() ?? "", Burner = ev.Event.Burner ?? "" }));
                 }
-                catch (Exception ex) { lastErr = ex.Message; }
-            }
-            return (false, null, $"Could not read Base receipt: {lastErr}");
+                foreach (var ev in r.DecodeAllEvents<BaseBridgeExitWatchService.BTCExitBurnedEventDTO>())
+                {
+                    if (!string.Equals(ev.Log.Address, ContractAddress, StringComparison.OrdinalIgnoreCase)) continue;
+                    if (!BaseRpc.IsExpectedChain(ev.Event.ChainId)) return BaseAnswer<(bool Ok, BurnEventInfo? Info, string Reason)>.No(BurnOnAnotherChain);
+                    var amt = ev.Event.Amount;
+                    burns.Add((ev.Log.LogIndex?.Value ?? BigInteger.Zero, false, amt <= 0 || amt > long.MaxValue ? null
+                        : new BurnEventInfo { AmountSats = (long)amt, Destination = ev.Event.BtcDestination?.Trim() ?? "", Burner = ev.Event.Burner ?? "" }));
+                }
+                return BaseAnswer<(bool Ok, BurnEventInfo? Info, string Reason)>.Yes(
+                    BurnAt(burns.OrderBy(b => b.LogIndex).Select(b => (b.Vfx, b.Info)).ToList(), SplitBurnId(txHash).Position, vfxExit));
+            });
+            return verdict.Answered ? verdict.Value : (false, null, $"Could not read Base receipt: {verdict.Reason}");
         }
+
+        /// <summary>
+        /// Why a provider's receipt is not taken: a burn event in it names another chain than this network's Base chain
+        /// (the contract writes its own chain's id into every burn). The provider is passed over, as one without the
+        /// receipt is.
+        /// </summary>
+        public const string BurnOnAnotherChain = "the burn event names another chain";
 
         /// <summary>
         /// The burn a burn id names among its transaction's bridge burns (both kinds, in emitted order; Info null for an
@@ -490,18 +464,12 @@ namespace VerifiedXCore.Bitcoin.Services
         public static async Task<bool> HasSuccessfulReceiptAsync(string txHash)
         {
             if (string.IsNullOrWhiteSpace(txHash)) return false;
-            foreach (var url in RpcUrlCandidates())
+            var succeeded = await BaseRpc.AuthorizingAskAsync<bool>(async (web3, _) =>
             {
-                try
-                {
-                    var web3 = new Web3(url);
-                    var r = await web3.Eth.Transactions.GetTransactionReceipt.SendRequestAsync(txHash);
-                    if (r != null && r.Status?.Value == 1)
-                        return true;
-                }
-                catch { }
-            }
-            return false;
+                var r = await web3.Eth.Transactions.GetTransactionReceipt.SendRequestAsync(txHash);
+                return r != null && r.Status?.Value == 1 ? BaseAnswer<bool>.Yes(true) : BaseAnswer<bool>.No("no successful receipt");
+            });
+            return succeeded.Answered;
         }
     }
 }
