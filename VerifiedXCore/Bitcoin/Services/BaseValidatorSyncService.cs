@@ -251,13 +251,16 @@ namespace VerifiedXCore.Bitcoin.Services
         /// The first member a pending removal names that this node sees live at its tip, by the rule the operator's
         /// signature on a proposal is given by (<see cref="BaseSignerSetPolicy.LiveForRemovalAt"/>): a caster in its
         /// current caster record, or a funded validator seen on VFX. Null when it names none, as when it clears members
-        /// that went dark.
+        /// that went dark. A validator this node's operator named as not signing on Base, when signing this very proposal,
+        /// is not counted (BaseRemovalOverride): the node does not veto what its operator approved, for that validator.
         /// </summary>
         internal static string? LiveTargetOf(BaseBridgeService.PendingRemoval pending, long tip)
         {
             if (pending.Eta == 0) return null;
             var live = BaseSignerSetPolicy.LiveForRemovalAt(tip);
-            return live.LiveCaster(pending.Casters) ?? live.LiveValidator(pending.Validators);
+            if (live.LiveCaster(pending.Casters) is { } caster) return caster;
+            var named = VerifiedXCore.Bitcoin.Models.BaseRemovalOverride.For(BaseBridgeService.ContractAddress, pending.Validators, pending.Casters, pending.Eta.ToString());
+            return live.LiveValidator(pending.Validators.Where(v => !named.Contains((v ?? "").Trim().ToLowerInvariant())));
         }
 
         /// <summary>This node's signature on the request, or null and why not (see <see cref="AuthorizeAsync"/>).</summary>

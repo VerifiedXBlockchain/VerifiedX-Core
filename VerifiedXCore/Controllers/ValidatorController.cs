@@ -91,7 +91,10 @@ namespace VerifiedXCore.Controllers
         /// <summary>
         /// The node operator signs a vBTCb contract change with this validator's Base key: UPGRADE (V3), or on V4
         /// PROPOSE_UPGRADE, PROPOSE_UPGRADE_DELAY, PROPOSE_REMOVAL, CANCEL_PENDING (BaseAdminSigningService). Localhost only:
-        /// these signatures change the contract's code and validator set, so only the operator asks for them.
+        /// these signatures change the contract's code and validator set, so only the operator asks for them. That holds
+        /// for PROPOSE_REMOVAL's NotSigningOnBase too (a validator still seen on VFX that the operator names as not signing
+        /// on Base): it is read here and nowhere else, so no other caller can have this node sign for, or stop vetoing for,
+        /// a live validator.
         /// </summary>
         [HttpPost]
         [Route("SignBaseAdminAction")]

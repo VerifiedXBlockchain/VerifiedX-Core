@@ -1154,6 +1154,87 @@ namespace VerifiedXCore.Tests
         }
 
         /// <summary>
+        /// A validator that still runs on VFX but does not sign on Base is live by every rule the node has, so its removal
+        /// was neither signed nor left alone. The node's own operator can name it (NotSigningOnBase, on the route that
+        /// answers loopback only): the node then signs the proposal, and does not veto that proposal on its account,
+        /// neither by signing a cancellation for another member nor by sending one. Without the name, for another caller,
+        /// for another validator in the proposal and for a later proposal with the same lists, nothing changes.
+        /// </summary>
+        [Fact]
+        public async Task TheOperatorNamesAValidatorNotSigningOnBase_ItsRemovalIsSigned_AndThatProposalIsNotVetoedByThisNode()
+        {
+            var members = new[] { _me, _seed2, _seed3 };
+            var targets = new[] { _new1.Base };                                   // registered, funded, seen on VFX
+            var priorFactory = Globals.HttpClientFactory;
+            Globals.HttpClientFactory = new ValidatorNetwork(members.Append(_new1).Select((v, i) => (v, ip: $"10.0.0.{i + 1}")).ToDictionary(x => x.ip, x => x.v));
+            var sent = new List<string>();
+            BaseValidatorSyncService.SubmitForTests = (f, _) => { sent.Add(f); return Task.FromResult<string?>("0xtx"); };
+            var t0 = DateTime.UtcNow;
+            static BaseBridgeService.PendingRemoval Pending(params string[] validators) =>
+                new(validators, Array.Empty<string>(), new System.Numerics.BigInteger(Random.Shared.NextInt64(1, long.MaxValue)));
+            async Task<List<string>> Loop(BaseBridgeService.PendingRemoval pending)      // as the loop runs it: before and after every turn came
+            {
+                sent.Clear();
+                BaseValidatorSyncService.PendingCache = null;
+                BaseBridgeService.ReadPendingRemovalForTests = () => Task.FromResult<BaseBridgeService.PendingRemoval?>(pending);
+                BaseValidatorSyncService.Clock = () => t0;
+                await BaseValidatorSyncService.CancelHostileRemovalAsync();
+                BaseValidatorSyncService.Clock = () => t0.AddDays(1);
+                if (sent.Count == 0) await BaseValidatorSyncService.CancelHostileRemovalAsync();
+                return sent.ToList();
+            }
+            var vetoed = new[] { "cancelPending" };
+            try
+            {
+                Contract(30, members.Append(_new1).ToArray(), members);
+
+                // Not named: refused as live, and a pending removal of it is vetoed.
+                var (plainCode, plain) = await OperatorSign(new { Action = "PROPOSE_REMOVAL", Validators = targets, VfxBlockHeight = Epoch });
+                Assert.Equal(HttpStatusCode.BadRequest, plainCode);
+                Assert.Contains("still a registered vBTC validator", plain.Value<string>("Error"));
+                Assert.Equal(vetoed, await Loop(Pending(targets)));
+
+                // Named by anyone but the node's own operator: no signature, and the veto stands.
+                var (remoteCode, remote) = await OperatorSign(new { Action = "PROPOSE_REMOVAL", Validators = targets, NotSigningOnBase = targets, VfxBlockHeight = Epoch }, from: "203.0.113.7");
+                Assert.Equal(HttpStatusCode.Unauthorized, remoteCode);
+                Assert.Null(remote["Signature"]?.Value<string>());
+                Assert.Equal(vetoed, await Loop(Pending(targets)));
+
+                // Only a validator the proposal removes can be named, and the others it removes are judged as ever.
+                var (_, foreign) = await OperatorSign(new { Action = "PROPOSE_REMOVAL", Validators = targets, NotSigningOnBase = new[] { _seed2.Base }, VfxBlockHeight = Epoch });
+                Assert.Contains("NotSigningOnBase names only", foreign.Value<string>("Error"));
+                var (_, other) = await OperatorSign(new { Action = "PROPOSE_REMOVAL", Validators = new[] { _new1.Base, _seed2.Base }, NotSigningOnBase = targets, VfxBlockHeight = Epoch });
+                Assert.Contains($"{_seed2.Base} is still a registered vBTC validator", other.Value<string>("Error"));
+                Assert.Equal(vetoed, await Loop(Pending(targets)));               // neither refusal left a record
+
+                // Named by the operator: signed, over the proposal as the contract reads it.
+                var (code, signed) = await OperatorSign(new { Action = "PROPOSE_REMOVAL", Validators = targets, NotSigningOnBase = targets, VfxBlockHeight = Epoch });
+                Assert.True(code == HttpStatusCode.OK, signed.ToString());
+                var digest = VbtcbTypedData.ProposeRemovalDigest(targets, Array.Empty<string>(), Epoch, 30, 8453, Proxy);
+                Assert.Equal("0x" + Convert.ToHexString(digest).ToLowerInvariant(), signed.Value<string>("Digest"));
+                Assert.Equal(_me.Base, ValidatorEthKeyService.RecoverSigner(digest, signed.Value<string>("Signature"), personalMessage: false), StringComparer.OrdinalIgnoreCase);
+
+                // That proposal, once pending: this node signs no cancellation of it and sends none.
+                var approved = Pending(targets);
+                BaseValidatorSyncService.PendingCache = null;
+                BaseBridgeService.ReadPendingRemovalForTests = () => Task.FromResult<BaseBridgeService.PendingRemoval?>(approved);
+                Assert.Contains("No pending removal names", Refusal(await Ask("CANCEL", Array.Empty<string>(), Epoch, 30)));
+                Assert.Empty(await Loop(approved));
+
+                // A later proposal with the same lists is not the one the operator signed for, nor is one that also removes
+                // a validator the operator did not name: vetoed as ever. The approved one stays approved.
+                Assert.Equal(vetoed, await Loop(Pending(targets)));
+                Assert.Equal(vetoed, await Loop(Pending(_new1.Base, _seed2.Base)));
+                Assert.Empty(await Loop(approved));
+            }
+            finally
+            {
+                BaseValidatorSyncService.SubmitForTests = null;
+                Globals.HttpClientFactory = priorFactory;
+            }
+        }
+
+        /// <summary>
         /// A signed change counts as done only once the contract shows it, not when anything else moves the admin nonce:
         /// anyone can have a member sign the epoch's removal, and a caster change sent first must not make that member refuse
         /// the removal itself for the rest of the epoch.
