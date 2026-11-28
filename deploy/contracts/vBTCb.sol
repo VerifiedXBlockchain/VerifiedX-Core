@@ -521,9 +521,10 @@ contract vBTCb is ERC20Upgradeable, UUPSUpgradeable {
         if (n > 0) _removeValidators(list, height);
         if (m + adds.length > 0) {
             for (uint256 i = 0; i < m; i++) _removeCaster(casterList[i]);
-            // Seated as by updateCasters; one seated meanwhile is kept as it is.
+            // Seated as by updateCasters; one seated meanwhile is kept as it is. Never more than the casters this removes,
+            // whatever the casters changed during the delay.
             uint256 k = 0;
-            for (uint256 i = 0; i < adds.length; i++) {
+            for (uint256 i = 0; i < adds.length && k < m; i++) {
                 // Seated meanwhile (and perhaps removed again since) by updateCasters: left as the casters made it.
                 if (isCaster[adds[i]] || casterSince[adds[i]] >= pendingNonce) continue;
                 isCaster[adds[i]] = true;

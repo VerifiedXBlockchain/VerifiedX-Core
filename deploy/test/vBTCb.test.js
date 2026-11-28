@@ -1352,6 +1352,18 @@ describe("vBTCb V4", function () {
             expect([...(await token.getCasters())].sort()).to.deep.equal([casters[1].address, casters[2].address, fresh[0].address].sort());
         });
 
+        it("seats no more casters than it removes, even when the casters removed a target during the delay", async function () {
+            const { token, vals, casters } = await loadFixture(deploySplitFixture);
+            const [fresh, swap] = wallets(2);
+            await proposeReplacement(token, vals.slice(0, 2), [casters[0].address], [fresh]);
+            // The live casters swap the target out themselves: the replacement then removes nobody, so it seats nobody.
+            await updateCasters(token, [...vals.slice(0, 2), ...casters.slice(1)], [swap], [casters[0].address]);
+            await time.increase(48 * HOUR);
+            await expect(token.executeRemoval()).to.emit(token, "CastersUpdated").withArgs([], [], 100n);
+            expect(await token.isCaster(fresh.address)).to.equal(false);
+            expect(await token.casterCount()).to.equal(3n);
+        });
+
         it("a newcomer the casters seated and removed again during the delay is not seated by the replacement", async function () {
             const { token, vals, casters } = await loadFixture(deploySplitFixture);
             const [fresh, other] = wallets(2);
