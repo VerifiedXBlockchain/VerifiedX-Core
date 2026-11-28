@@ -70,6 +70,10 @@ namespace VerifiedXCore.Tests
                 ["CasterMembershipStore.ComputeRecordHash"] = 1,
                 ["CasterMembershipStore.FieldHoldingTheSeparator"] = 1,
                 ["CasterMembershipStore.ValidateSuccessor"] = 1,
+                // A producer offers the records it holds (AttachPending); each is judged as every verifier judges it, and a
+                // block without them is taken, so what one node holds never decides a verdict.
+                ["CasterMembershipStore.GetSince"] = 1,
+                ["CasterMembershipStore.GetBySeq"] = 1,
             },
             // Read none.
             ["Data/StateData.cs"] = new(),

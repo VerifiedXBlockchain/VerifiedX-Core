@@ -414,6 +414,8 @@ namespace VerifiedXCore.Data
                         ErrorLogUtility.LogError("No VRF proof could be made for this block: its seed or the previous block's mix is not known.", "BlockchainData.CraftBlock_V5()");
                         return null;
                     }
+                    // From the membership chain height: the records this node holds that the chain has not carried yet.
+                    Services.MembershipChain.AttachPending(block);
                     block.Build();
 
                     if (block.PrevHash == "0")
@@ -534,6 +536,8 @@ namespace VerifiedXCore.Data
                         ErrorLogUtility.LogError("No VRF proof could be made for this block: its seed or the previous block's mix is not known.", "BlockchainData.CraftBlock_V5()");
                         return null;
                     }
+                    // From the membership chain height: the records this node holds that the chain has not carried yet.
+                    Services.MembershipChain.AttachPending(block);
                     block.Build();
 
                     if (block.PrevHash == "0")

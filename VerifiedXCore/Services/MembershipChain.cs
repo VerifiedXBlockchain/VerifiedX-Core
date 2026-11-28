@@ -192,6 +192,51 @@ namespace VerifiedXCore.Services
             return null;
         }
 
+        // ── Producing ────────────────────────────────────────────────────────────────────────────
+
+        /// <summary>
+        /// Puts on a block being crafted the records this node holds that extend the chain's record and that the block may
+        /// carry (before the chain starts: the anchor and the records after it). Each is judged as a verifier judges it
+        /// (<see cref="RunRefusal"/>), and the run stops at the first that would not pass, so the producer never builds a
+        /// block its own validation refuses. Nothing held, or nothing that may go yet: no run.
+        /// </summary>
+        public static void AttachPending(Block block)
+        {
+            if (block == null) return;
+            block.MembershipRun = null;
+            if (!Configured || block.Height < Globals.MembershipChainHeight || block.MembershipRecord != null) return;
+            try
+            {
+                var head = RecordFor(block.Height);
+                CasterMembershipRecord? prev;
+                var run = new List<CasterMembershipRecord>();
+                if (head == null)
+                {
+                    prev = CasterMembershipStore.GetSince(-1).FirstOrDefault(r => string.Equals(r.RecordHash, Globals.MembershipAnchorRecordHash, StringComparison.OrdinalIgnoreCase));
+                    if (prev == null) return; // this node does not hold the anchor: another producer starts the chain
+                    run.Add(prev);
+                    block.MembershipRun = run;
+                    if (RunRefusal(block) != null) { block.MembershipRun = null; return; }
+                }
+                else prev = head;
+
+                var cap = head == null ? MaxActivationRunRecords : MaxRunRecords;
+                while (run.Count < cap && CasterMembershipStore.GetBySeq(prev.RecordSeq + 1) is { } next)
+                {
+                    run.Add(next);
+                    block.MembershipRun = run;
+                    if (RunRefusal(block) != null) { run.RemoveAt(run.Count - 1); break; }
+                    prev = next;
+                }
+                block.MembershipRun = run.Count > 0 ? run : null;
+            }
+            catch (Exception ex)
+            {
+                block.MembershipRun = null;
+                ErrorLogUtility.LogError($"Could not put the pending membership records on block {block.Height}: {ex.Message}", "MembershipChain.AttachPending()");
+            }
+        }
+
         // ── Writes ───────────────────────────────────────────────────────────────────────────────
 
         /// <summary>
