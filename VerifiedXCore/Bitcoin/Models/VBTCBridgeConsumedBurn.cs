@@ -53,22 +53,25 @@ namespace VerifiedXCore.Bitcoin.Models
 
         public static bool IsConsumed(string? hash)
         {
+            try { return IsConsumedOrThrow(hash); }
+            catch { return false; }
+        }
+
+        /// <summary><see cref="IsConsumed"/> for a caller that must tell "not consumed" from "could not be read": a failed read throws.</summary>
+        internal static bool IsConsumedOrThrow(string? hash)
+        {
             var n = Normalize(hash);
             if (n.Length == 0) return false;
-            try
+            var c = GetCollection();
+            if (c.FindOne(x => x.BaseBurnTxHash == n) != null) return true;
+            var colon = n.IndexOf(':');
+            if (colon >= 0)
             {
-                var c = GetCollection();
-                if (c.FindOne(x => x.BaseBurnTxHash == n) != null) return true;
-                var colon = n.IndexOf(':');
-                if (colon >= 0)
-                {
-                    var bare = n[..colon];
-                    return c.FindOne(x => x.BaseBurnTxHash == bare) != null;
-                }
-                var positioned = n + ":";
-                return c.Exists(x => x.BaseBurnTxHash.StartsWith(positioned));
+                var bare = n[..colon];
+                return c.FindOne(x => x.BaseBurnTxHash == bare) != null;
             }
-            catch { return false; }
+            var positioned = n + ":";
+            return c.Exists(x => x.BaseBurnTxHash.StartsWith(positioned));
         }
 
         /// <summary>
