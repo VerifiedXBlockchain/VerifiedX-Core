@@ -264,7 +264,7 @@ namespace VerifiedXCore.Bitcoin.Services
             if (live.LiveCaster(pending.Casters) is { } caster) return caster;
             if (live.LiveValidator(pending.Validators) == null) return null;
             var named = VerifiedXCore.Bitcoin.Models.BaseRemovalOverride.For(BaseBridgeService.ContractAddress, BaseBridgeService.BaseChainId,
-                pending, adminNonce, BaseRemovalProposal.ProposedUnder(pending.Eta));
+                pending, adminNonce, BaseRemovalProposal.ProposedUnder(pending));
             return live.LiveValidator(pending.Validators.Where(v => !named.Contains((v ?? "").Trim().ToLowerInvariant())));
         }
 

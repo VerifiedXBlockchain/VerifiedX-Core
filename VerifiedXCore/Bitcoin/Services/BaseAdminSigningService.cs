@@ -128,7 +128,7 @@ namespace VerifiedXCore.Bitcoin.Services
                         var pendingNow = await BaseBridgeService.ReadPendingRemovalAsync();
                         if (pendingNow == null) return Fail("Could not read the Base contract's pending removal");
                         var (signedDigest, signedAt) = (digest, view.AdminNonce);
-                        beforeSigning = () => VerifiedXCore.Bitcoin.Models.BaseRemovalOverride.Save(contract, signedDigest, signedAt, notSigning, pendingNow.Eta);
+                        beforeSigning = () => VerifiedXCore.Bitcoin.Models.BaseRemovalOverride.Save(contract, signedDigest, signedAt, notSigning, pendingNow);
                     }
                     break;
                 default:

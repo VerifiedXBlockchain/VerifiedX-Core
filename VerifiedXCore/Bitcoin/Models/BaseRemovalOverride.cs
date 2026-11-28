@@ -21,7 +21,9 @@ namespace VerifiedXCore.Bitcoin.Models
     /// <item>while the contract is still at the signed nonce, nothing made with the signature can be pending: the record
     /// waits;</item>
     /// <item>proposed under the signed nonce and giving the signed digest: it is the signed proposal, and the record is
-    /// tied to its eta, after which no further read is needed;</item>
+    /// tied to it by everything the contract shows of it (its eta, VFX block height, validators and casters: an eta
+    /// alone is not one proposal, since a proposal, its cancellation and another proposal fit in one Base block and
+    /// then share it), after which no further read is needed;</item>
     /// <item>proposed under the signed nonce and giving another digest, or proposed under a later nonce: the signed nonce
     /// went to something else, or the signed proposal is no longer the pending one. The record is dead and is removed;</item>
     /// <item>proposed under an earlier nonce: an older proposal (or an old read). Not the signed one; the record stays;</item>
@@ -29,6 +31,8 @@ namespace VerifiedXCore.Bitcoin.Models
     /// record stays. Meanwhile a pending removal that gives the signed digest and was not already pending at signing is
     /// taken for the signed one, so a failed read never has the node veto what its operator signed.</item>
     /// </list>
+    /// A later proposal the same in every field the contract shows, eta included, cannot be told from the one a record
+    /// is tied to without its event; it removes the same validators at the same height, and is taken for it.
     /// Written only through the operator's own route. Local key use, not chain state.
     /// </summary>
     public class BaseRemovalOverride
@@ -40,10 +44,10 @@ namespace VerifiedXCore.Bitcoin.Models
         /// <summary>The contract's admin nonce the proposal was signed at.</summary>
         public string AdminNonce { get; set; } = "";
         public string[] NotSigningOnBase { get; set; } = Array.Empty<string>();
-        /// <summary>The eta of the removal that was pending when the operator signed ("0": none): that one is not the proposal signed.</summary>
-        public string PendingEtaAtSigning { get; set; } = "0";
-        /// <summary>The signed proposal's eta once the node has seen it pending; none until then.</summary>
-        public string? Eta { get; set; }
+        /// <summary>The removal that was pending when the operator signed (BaseRemovalProposal.IdentityOf; none: empty): that one is not the proposal signed.</summary>
+        public string? PendingAtSigning { get; set; }
+        /// <summary>The signed proposal (BaseRemovalProposal.IdentityOf) once the node has found it pending; none until then.</summary>
+        public string? BoundTo { get; set; }
         public long SignedAt { get; set; }
 
         private const string CollectionName = "rsrv_base_removal_override";
@@ -53,13 +57,14 @@ namespace VerifiedXCore.Bitcoin.Models
         private static string Norm(string? contract) => (contract ?? "").Trim().ToLowerInvariant();
 
         /// <summary>Records the operator's signature on <paramref name="digest"/> at <paramref name="adminNonce"/>; it is tied to no pending proposal yet.</summary>
-        public static void Save(string? contract, byte[] digest, BigInteger adminNonce, IEnumerable<string> notSigningOnBase, BigInteger pendingEtaAtSigning)
+        public static void Save(string? contract, byte[] digest, BigInteger adminNonce, IEnumerable<string> notSigningOnBase, BaseBridgeService.PendingRemoval pendingAtSigning)
         {
             Rows.Upsert(new BaseRemovalOverride
             {
                 Id = Convert.ToHexString(digest), Contract = Norm(contract), AdminNonce = adminNonce.ToString(),
                 NotSigningOnBase = notSigningOnBase.Select(a => (a ?? "").Trim().ToLowerInvariant()).ToArray(),
-                PendingEtaAtSigning = pendingEtaAtSigning.ToString(), Eta = null, SignedAt = VerifiedXCore.Utilities.TimeUtil.GetTime(),
+                PendingAtSigning = pendingAtSigning.Eta == 0 ? null : BaseRemovalProposal.IdentityOf(contract, pendingAtSigning), BoundTo = null,
+                SignedAt = VerifiedXCore.Utilities.TimeUtil.GetTime(),
             });
         }
 
@@ -74,7 +79,7 @@ namespace VerifiedXCore.Bitcoin.Models
             BigInteger adminNonce, BigInteger? proposedUnder)
         {
             var at = Norm(contract);
-            var eta = pending.Eta.ToString();
+            var identity = BaseRemovalProposal.IdentityOf(contract, pending);
             IReadOnlyCollection<string> named = Array.Empty<string>();
             foreach (var row in Rows.Find(r => r.Contract == at).ToList())
             {
@@ -83,18 +88,19 @@ namespace VerifiedXCore.Bitcoin.Models
                 // one cannot cancel a proposal made with the signature either: it is good at that nonce only.)
                 if (adminNonce <= signedAt) continue;
                 var names = row.NotSigningOnBase ?? Array.Empty<string>();
-                if (!string.IsNullOrEmpty(row.Eta) && row.Eta == eta) { named = names; continue; }   // tied to this very proposal
+                if (!string.IsNullOrEmpty(row.BoundTo) && row.BoundTo == identity) { named = names; continue; }   // tied to this very proposal
 
-                var givesTheDigest = string.IsNullOrEmpty(row.Eta) && eta != row.PendingEtaAtSigning && IsTheProposalSigned(row, at, chainId, pending, signedAt);
+                var givesTheDigest = string.IsNullOrEmpty(row.BoundTo) && IsTheProposalSigned(row, at, chainId, pending, signedAt);
                 if (proposedUnder is not { } nonce)
                 {
-                    if (givesTheDigest) named = names;                        // not proven either way: not vetoed while it is not known
+                    // Not proven either way: not vetoed while it is not known, unless it is the one that was pending at signing.
+                    if (givesTheDigest && identity != row.PendingAtSigning) named = names;
                     continue;
                 }
                 if (nonce < signedAt) continue;                               // an older proposal: not the one signed
                 if (nonce == signedAt && givesTheDigest)
                 {
-                    row.Eta = eta;
+                    row.BoundTo = identity;
                     Rows.Update(row);
                     named = names;
                     continue;
@@ -111,9 +117,9 @@ namespace VerifiedXCore.Bitcoin.Models
         public static bool WaitsOnTheProposalsNonce(string? contract, BaseBridgeService.PendingRemoval pending, BigInteger adminNonce)
         {
             var at = Norm(contract);
-            var eta = pending.Eta.ToString();
+            var identity = BaseRemovalProposal.IdentityOf(contract, pending);
             return Rows.Find(r => r.Contract == at).ToList().Any(row =>
-                BigInteger.TryParse(row.AdminNonce, out var signedAt) && adminNonce > signedAt && row.Eta != eta);
+                BigInteger.TryParse(row.AdminNonce, out var signedAt) && adminNonce > signedAt && row.BoundTo != identity);
         }
 
         /// <summary>Whether the pending removal's validators, casters and VFX block height give the digest signed, at the nonce it was signed at.</summary>

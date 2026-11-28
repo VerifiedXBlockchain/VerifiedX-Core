@@ -1164,6 +1164,7 @@ namespace VerifiedXCore.Tests
         {
             private readonly BaseSignerSetTests _t;
             private readonly System.Net.Http.IHttpClientFactory _priorFactory = Globals.HttpClientFactory;
+            private readonly (string, string, string) _priorProviders = (BaseBridgeService.BaseRpcUrl, BaseBridgeService.BaseRpcUrl2, BaseBridgeService.BaseRpcUrl3);
             private readonly DateTime _t0 = DateTime.UtcNow;
             private readonly Dictionary<string, int> _proposedUnder = new();
             private readonly List<string> _sent = new();
@@ -1185,7 +1186,7 @@ namespace VerifiedXCore.Tests
                 BaseRemovalProposal.AttemptForTests = pending =>
                 {
                     EventReads++;
-                    return Task.FromResult(_proposedUnder.TryGetValue(pending.Eta.ToString(), out var nonce) ? new System.Numerics.BigInteger(nonce) : (System.Numerics.BigInteger?)null);
+                    return Task.FromResult(_proposedUnder.TryGetValue(Key(pending), out var nonce) ? new System.Numerics.BigInteger(nonce) : (System.Numerics.BigInteger?)null);
                 };
             }
 
@@ -1193,6 +1194,8 @@ namespace VerifiedXCore.Tests
             {
                 BaseRemovalProposal.AttemptForTests = null;
                 BaseRemovalProposal.ForgetForTests();
+                (BaseBridgeService.BaseRpcUrl, BaseBridgeService.BaseRpcUrl2, BaseBridgeService.BaseRpcUrl3) = _priorProviders;
+                BaseRpc.ForgetChainChecksForTests();
                 BaseValidatorSyncService.SubmitForTests = null;
                 Globals.HttpClientFactory = _priorFactory;
             }
@@ -1200,16 +1203,35 @@ namespace VerifiedXCore.Tests
             /// <summary>The contract at this admin nonce.</summary>
             public void ContractAt(int nonce) => Contract(nonce, OnContract, Members);
 
+            /// <summary>From here on a removal's event is read from this provider, through the node's own Base layer, not told.</summary>
+            public void BaseIs(FakeRemovalChain chain)
+            {
+                BaseRemovalProposal.AttemptForTests = null;
+                (BaseBridgeService.BaseRpcUrl, BaseBridgeService.BaseRpcUrl2, BaseBridgeService.BaseRpcUrl3) = (chain.Rpc.Url, "", "");
+                BaseRpc.ForgetChainChecksForTests();
+            }
+
             /// <summary>A removal of these validators at this VFX block height; Base can say which nonce it was proposed under only when one is given.</summary>
             public BaseBridgeService.PendingRemoval Removal(int? proposedUnder, long height, params string[] validators)
             {
                 var removal = new BaseBridgeService.PendingRemoval(validators, Array.Empty<string>(), new System.Numerics.BigInteger(Random.Shared.NextInt64(1, long.MaxValue)), height);
-                if (proposedUnder is int nonce) _proposedUnder[removal.Eta.ToString()] = nonce;
+                if (proposedUnder is int nonce) _proposedUnder[Key(removal)] = nonce;
                 return removal;
             }
 
+            /// <summary>One removal as the contract shows it (two with one eta are two).</summary>
+            private static string Key(BaseBridgeService.PendingRemoval removal) => BaseRemovalProposal.IdentityOf(Proxy, removal);
+
+            /// <summary>Another removal with the eta of <paramref name="removal"/> (proposed in the same block), at another VFX block height.</summary>
+            public BaseBridgeService.PendingRemoval WithTheSameEta(BaseBridgeService.PendingRemoval removal, int proposedUnder, long height)
+            {
+                var other = new BaseBridgeService.PendingRemoval(removal.Validators, removal.Casters, removal.Eta, height);
+                _proposedUnder[Key(other)] = proposedUnder;
+                return other;
+            }
+
             /// <summary>Base can now say which nonce this removal was proposed under.</summary>
-            public void EventReadable(BaseBridgeService.PendingRemoval removal, int proposedUnder) => _proposedUnder[removal.Eta.ToString()] = proposedUnder;
+            public void EventReadable(BaseBridgeService.PendingRemoval removal, int proposedUnder) => _proposedUnder[Key(removal)] = proposedUnder;
 
             /// <summary>What the contract shows as pending, read afresh (and nothing known yet of its event).</summary>
             public void PendingIs(BaseBridgeService.PendingRemoval pending)
@@ -1311,8 +1333,9 @@ namespace VerifiedXCore.Tests
             Assert.Empty(await desk.Loop(approved));
             desk.ContractAt(35);
             Assert.Empty(await desk.Loop(approved));
-            // Once a later proposal is the pending one, the approval is spent: the same validators again are vetoed.
-            Assert.Equal(Vetoed, await desk.Loop(desk.Removal(35, Epoch, targets)));
+            // Once a later proposal is the pending one, the approval is spent: the same validators again are vetoed, also
+            // in a removal with the approved one's eta (an eta is not one proposal).
+            Assert.Equal(Vetoed, await desk.Loop(desk.WithTheSameEta(approved, proposedUnder: 35, height: Epoch + BaseSignerSetPolicy.EpochBlocks)));
             Assert.Equal(0, desk.Records());
 
             // Signed for one VFX block height, proposed under the signed nonce with another: not the digest signed.
@@ -1419,6 +1442,62 @@ namespace VerifiedXCore.Tests
             // So a later removal that names what was signed is vetoed even when its event cannot be read.
             desk.ContractAt(62);
             Assert.Equal(Vetoed, await desk.Loop(desk.Removal(null, Epoch, desk.Targets)));
+        }
+
+        /// <summary>
+        /// One Base block holds a removal proposal (under nonce 70), its cancellation (71) and the same removal proposed
+        /// again (72): two proposals alike in every field the contract shows, eta included, and the second is the pending
+        /// one. The operator signed the second. Its event is the later of the two in the block, so the approval is tied to
+        /// it and this node signs no cancellation and sends none. The event is read from a provider, as the node reads it.
+        /// </summary>
+        [Fact]
+        public async Task TwoProposalsInOneBlock_TheOperatorSignedTheSecond_ItIsNotVetoed()
+        {
+            const long block = 2_000_000;
+            using var chain = new FakeRemovalChain(Proxy, head: block + 90_000);
+            using var desk = new NamedRemovals(this);
+            desk.BaseIs(chain);
+            var eta = new System.Numerics.BigInteger(FakeRemovalChain.TimeOf(block) + 48 * 3600);
+
+            desk.ContractAt(72);
+            desk.PendingIs(desk.Nothing);
+            await desk.SignNaming(72, Epoch);
+            chain.Proposed(block, eta, underNonce: 70, desk.Targets, Epoch, logIndex: 0);
+            chain.Proposed(block, eta, underNonce: 72, desk.Targets, Epoch, logIndex: 2);
+            desk.ContractAt(73);
+
+            var pending = new BaseBridgeService.PendingRemoval(desk.Targets, Array.Empty<string>(), eta, Epoch);
+            Assert.Empty(await desk.Loop(pending));
+            Assert.Equal(new System.Numerics.BigInteger(72), BaseRemovalProposal.ProposedUnder(pending));
+            Assert.True(await desk.RefusesToCancel(73));
+            Assert.Equal(1, desk.Records());
+        }
+
+        /// <summary>
+        /// The same block, and the operator signed the first proposal, the one that was cancelled. The pending one was
+        /// proposed under a later nonce: the approval is not tied to it, the record is removed, and the pending removal of
+        /// a validator this node sees live is vetoed as ever.
+        /// </summary>
+        [Fact]
+        public async Task TwoProposalsInOneBlock_TheOperatorSignedTheFirst_ItsApprovalIsNotGivenToTheSecond()
+        {
+            const long block = 2_000_000;
+            using var chain = new FakeRemovalChain(Proxy, head: block + 90_000);
+            using var desk = new NamedRemovals(this);
+            desk.BaseIs(chain);
+            var eta = new System.Numerics.BigInteger(FakeRemovalChain.TimeOf(block) + 48 * 3600);
+
+            desk.ContractAt(70);
+            desk.PendingIs(desk.Nothing);
+            await desk.SignNaming(70, Epoch);
+            chain.Proposed(block, eta, underNonce: 70, desk.Targets, Epoch, logIndex: 0);
+            chain.Proposed(block, eta, underNonce: 72, desk.Targets, Epoch, logIndex: 2);
+            desk.ContractAt(73);
+
+            var pending = new BaseBridgeService.PendingRemoval(desk.Targets, Array.Empty<string>(), eta, Epoch);
+            Assert.Equal(Vetoed, await desk.Loop(pending));
+            Assert.Equal(new System.Numerics.BigInteger(72), BaseRemovalProposal.ProposedUnder(pending));
+            Assert.Equal(0, desk.Records());
         }
 
         /// <summary>
