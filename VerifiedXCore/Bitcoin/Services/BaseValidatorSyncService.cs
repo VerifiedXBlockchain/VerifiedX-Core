@@ -146,7 +146,7 @@ namespace VerifiedXCore.Bitcoin.Services
                 if (!asMember) return (null, "Only a validator or caster on the contract signs a cancellation");
                 var pending = await PendingForSigningAsync();
                 if (pending == null) return (null, "Could not read the Base contract");
-                if (LiveTargetOf(pending, tip, view.AdminNonce) == null) return (null, "No pending removal names a validator or caster that is still live");
+                if (await LiveTargetOfAsync(pending, tip, view.AdminNonce) == null) return (null, "No pending removal names a validator or caster that is still live");
                 return (new Authorized(VbtcbTypedData.CancelPendingDigest(view.AdminNonce, chainId, BaseBridgeService.ContractAddress), action, null, epoch, view.AdminNonce.ToString()), "");
             }
 
@@ -252,16 +252,42 @@ namespace VerifiedXCore.Bitcoin.Services
         /// signature on a proposal is given by (<see cref="BaseSignerSetPolicy.LiveForRemovalAt"/>): a caster in its
         /// current caster record, or a funded validator seen on VFX. Null when it names none, as when it clears members
         /// that went dark. A validator this node's operator named as not signing on Base, when signing this very proposal,
-        /// is not counted (BaseRemovalOverride, which tells that proposal from any other by the digest signed and the
-        /// contract's <paramref name="adminNonce"/>): the node does not veto what its operator approved, for that validator.
+        /// is not counted (BaseRemovalOverride, which tells that proposal from any other by the digest signed and the admin
+        /// nonce the pending removal was proposed under): the node does not veto what its operator approved, for that
+        /// validator. <paramref name="adminNonce"/> is the contract's now.
         /// </summary>
-        internal static string? LiveTargetOf(BaseBridgeService.PendingRemoval pending, long tip, System.Numerics.BigInteger adminNonce)
+        internal static async Task<string?> LiveTargetOfAsync(BaseBridgeService.PendingRemoval pending, long tip, System.Numerics.BigInteger adminNonce)
         {
             if (pending.Eta == 0) return null;
             var live = BaseSignerSetPolicy.LiveForRemovalAt(tip);
             if (live.LiveCaster(pending.Casters) is { } caster) return caster;
-            var named = VerifiedXCore.Bitcoin.Models.BaseRemovalOverride.For(BaseBridgeService.ContractAddress, BaseBridgeService.BaseChainId, pending, adminNonce);
+            if (live.LiveValidator(pending.Validators) == null) return null;
+            var named = await VerifiedXCore.Bitcoin.Models.BaseRemovalOverride.ForAsync(BaseBridgeService.ContractAddress, BaseBridgeService.BaseChainId,
+                pending, adminNonce, () => ProposedUnderAsync(pending));
             return live.LiveValidator(pending.Validators.Where(v => !named.Contains((v ?? "").Trim().ToLowerInvariant())));
+        }
+
+        /// <summary>Seconds before a pending removal's proposing nonce is asked of Base again after it could not be read.</summary>
+        internal const int ProposedUnderRetrySeconds = 60;
+
+        /// <summary>By contract and eta: the nonce that removal was proposed under (it never changes), or that it could not be read, and when.</summary>
+        internal static readonly System.Collections.Concurrent.ConcurrentDictionary<string, (DateTime At, System.Numerics.BigInteger? Nonce)> ProposedUnderCache = new();
+
+        /// <summary>
+        /// The admin nonce the pending removal was proposed under, read from Base once and kept; one that could not be
+        /// read is asked again after <see cref="ProposedUnderRetrySeconds"/>, so requests on the open signing route cannot
+        /// make this node read Base more often than that.
+        /// </summary>
+        private static async Task<System.Numerics.BigInteger?> ProposedUnderAsync(BaseBridgeService.PendingRemoval pending)
+        {
+            var key = (BaseBridgeService.ContractAddress ?? "") + ":" + pending.Eta;
+            if (ProposedUnderCache.TryGetValue(key, out var kept)
+                && (kept.Nonce != null || Math.Abs((DateTime.UtcNow - kept.At).TotalSeconds) < ProposedUnderRetrySeconds))
+                return kept.Nonce;
+            var nonce = await BaseBridgeService.ReadRemovalProposalNonceAsync(pending);
+            if (ProposedUnderCache.Count >= 64) ProposedUnderCache.Clear();
+            ProposedUnderCache[key] = (DateTime.UtcNow, nonce);
+            return nonce;
         }
 
         /// <summary>This node's signature on the request, or null and why not (see <see cref="AuthorizeAsync"/>).</summary>
@@ -344,7 +370,7 @@ namespace VerifiedXCore.Bitcoin.Services
             var members = view.Validators.Concat(view.CasterList).Select(m => m.ToLowerInvariant()).Distinct().ToList();
             if (string.IsNullOrEmpty(myBase) || !members.Contains(myBase.ToLowerInvariant())) return;
             var pending = await BaseBridgeService.ReadPendingRemovalAsync();
-            if (pending == null || pending.Eta == 0 || LiveTargetOf(pending, tip, view.AdminNonce) is not { } live) return;
+            if (pending == null || pending.Eta == 0 || await LiveTargetOfAsync(pending, tip, view.AdminNonce) is not { } live) return;
 
             var seed = pending.Eta.ToString();
             var first = FirstSeenPending.GetOrAdd(BaseBridgeService.ContractAddress + ":" + seed, Clock());

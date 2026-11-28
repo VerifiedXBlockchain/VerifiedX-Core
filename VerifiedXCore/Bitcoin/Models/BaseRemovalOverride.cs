@@ -10,18 +10,23 @@ namespace VerifiedXCore.Bitcoin.Models
     /// but do not sign on Base (BaseAdminSigningService, NotSigningOnBase): the digest that was signed, the admin nonce
     /// it was signed at, and the validators the operator named. While that proposal is pending, this node does not
     /// count the named validators as live, so it neither signs nor sends a veto of the proposal on their account
-    /// (BaseValidatorSyncService.LiveTargetOf).
+    /// (BaseValidatorSyncService.LiveTargetOfAsync).
     ///
-    /// The record belongs to the proposal that was signed and to no other. A signature is good at one admin nonce, and the
-    /// proposal made with it is the change that moves the contract from that nonce to the next. So:
+    /// The record belongs to the proposal that was signed and to no other. A signature is good at one admin nonce, so
+    /// the signed proposal is the removal that was proposed under that nonce with the signed validators, casters and VFX
+    /// block height; the nonce a pending removal was proposed under is read from its RemovalProposed event, whatever the
+    /// contract's nonce is by now. So, for the removal that is pending:
     /// <list type="bullet">
     /// <item>while the contract is still at the signed nonce, nothing made with the signature can be pending: the record
     /// waits;</item>
-    /// <item>the first time the node sees the contract one nonce on, the pending removal is the signed one when it was
-    /// not already pending at signing and its validators, casters and VFX block height give the signed digest at the
-    /// signed nonce; the record is then tied to that proposal's eta;</item>
-    /// <item>in every other case the nonce was used by something else (or the node cannot tell), the signature can no
-    /// longer make a proposal, and the record is removed. So is a record whose proposal is no longer the pending one.</item>
+    /// <item>proposed under the signed nonce and giving the signed digest: it is the signed proposal, and the record is
+    /// tied to its eta, after which no further read is needed;</item>
+    /// <item>proposed under the signed nonce and giving another digest, or proposed under a later nonce: the signed nonce
+    /// went to something else, or the signed proposal is no longer the pending one. The record is dead and is removed;</item>
+    /// <item>proposed under an earlier nonce: an older proposal (or an old read). Not the signed one; the record stays;</item>
+    /// <item>the event cannot be read: nothing is proven, and the record stays. Meanwhile a pending removal that gives the
+    /// signed digest and was not already pending at signing is taken for the signed one, so a failed read never has
+    /// the node veto what its operator signed.</item>
     /// </list>
     /// Written only through the operator's own route. Local key use, not chain state.
     /// </summary>
@@ -59,29 +64,44 @@ namespace VerifiedXCore.Bitcoin.Models
 
         /// <summary>
         /// The validators the operator named when signing the proposal that is now pending, lower-cased; none when the
-        /// pending proposal is not one the operator signed with names (see the class remarks). Records that can no longer
-        /// apply are removed.
+        /// pending proposal is not one the operator signed with names (see the class remarks). <paramref name="adminNonce"/>
+        /// is the contract's now; <paramref name="proposedUnder"/> reads the nonce the pending removal was proposed
+        /// under (null when it cannot be read), and is asked at most once, only when a record needs it. A record is
+        /// removed only once it is proven dead.
         /// </summary>
-        public static IReadOnlyCollection<string> For(string? contract, long chainId, BaseBridgeService.PendingRemoval pending, BigInteger adminNonce)
+        public static async Task<IReadOnlyCollection<string>> ForAsync(string? contract, long chainId, BaseBridgeService.PendingRemoval pending,
+            BigInteger adminNonce, Func<Task<BigInteger?>> proposedUnder)
         {
             var at = Norm(contract);
             var eta = pending.Eta.ToString();
             IReadOnlyCollection<string> named = Array.Empty<string>();
+            BigInteger? under = null;
+            var asked = false;
             foreach (var row in Rows.Find(r => r.Contract == at).ToList())
             {
                 if (!BigInteger.TryParse(row.AdminNonce, out var signedAt)) { Rows.Delete(row.Id); continue; }
-                if (adminNonce <= signedAt) continue;                         // the signature is unused so far
-                if (string.IsNullOrEmpty(row.Eta))
+                // The signature is unused so far. (A cancellation signed while the contract reads this nonce or a lower
+                // one cannot cancel a proposal made with the signature either: it is good at that nonce only.)
+                if (adminNonce <= signedAt) continue;
+                var names = row.NotSigningOnBase ?? Array.Empty<string>();
+                if (!string.IsNullOrEmpty(row.Eta) && row.Eta == eta) { named = names; continue; }   // tied to this very proposal
+
+                if (!asked) (under, asked) = (await proposedUnder(), true);
+                var givesTheDigest = string.IsNullOrEmpty(row.Eta) && eta != row.PendingEtaAtSigning && IsTheProposalSigned(row, at, chainId, pending, signedAt);
+                if (under is not { } nonce)
                 {
-                    if (adminNonce == signedAt + 1 && eta != row.PendingEtaAtSigning && IsTheProposalSigned(row, at, chainId, pending, signedAt))
-                    {
-                        row.Eta = eta;
-                        Rows.Update(row);
-                    }
-                    else { Rows.Delete(row.Id); continue; }                   // the nonce went to something else
+                    if (givesTheDigest) named = names;                        // not proven either way: not vetoed on a failed read
+                    continue;
                 }
-                if (row.Eta == eta) named = row.NotSigningOnBase ?? Array.Empty<string>();
-                else Rows.Delete(row.Id);                                     // its proposal is no longer the pending one
+                if (nonce < signedAt) continue;                               // an older proposal: not the one signed
+                if (nonce == signedAt && givesTheDigest)
+                {
+                    row.Eta = eta;
+                    Rows.Update(row);
+                    named = names;
+                    continue;
+                }
+                Rows.Delete(row.Id);                                          // the signed nonce went elsewhere, or a later proposal is the pending one
             }
             return named;
         }

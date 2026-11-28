@@ -1154,130 +1154,289 @@ namespace VerifiedXCore.Tests
         }
 
         /// <summary>
+        /// The operator's desk for a test of named removals: the contract holds this node, two more members and a
+        /// validator that is registered, funded and seen on VFX (the one named); the other members' nodes answer over the
+        /// network; what the veto loop sends is kept; and Base answers which admin nonce a pending removal was proposed
+        /// under (its RemovalProposed event) only for the removals a test says it can.
+        /// </summary>
+        private sealed class NamedRemovals : IDisposable
+        {
+            private readonly BaseSignerSetTests _t;
+            private readonly System.Net.Http.IHttpClientFactory _priorFactory = Globals.HttpClientFactory;
+            private readonly DateTime _t0 = DateTime.UtcNow;
+            private readonly Dictionary<string, int> _proposedUnder = new();
+            private readonly List<string> _sent = new();
+            public readonly V[] Members, OnContract;
+            public readonly string[] Targets;
+            public readonly BaseBridgeService.PendingRemoval Nothing = new(Array.Empty<string>(), Array.Empty<string>(), 0);
+            /// <summary>How often Base was asked for a removal's proposing nonce.</summary>
+            public int EventReads;
+
+            public NamedRemovals(BaseSignerSetTests t)
+            {
+                _t = t;
+                Members = new[] { t._me, t._seed2, t._seed3 };
+                OnContract = Members.Append(t._new1).ToArray();
+                Targets = new[] { t._new1.Base };
+                Globals.HttpClientFactory = new ValidatorNetwork(OnContract.Select((v, i) => (v, ip: $"10.0.0.{i + 1}")).ToDictionary(x => x.ip, x => x.v));
+                BaseValidatorSyncService.SubmitForTests = (f, _) => { _sent.Add(f); return Task.FromResult<string?>("0xtx"); };
+                BaseBridgeService.ReadRemovalProposalNonceForTests = pending =>
+                {
+                    EventReads++;
+                    return Task.FromResult(_proposedUnder.TryGetValue(pending.Eta.ToString(), out var nonce) ? new System.Numerics.BigInteger(nonce) : (System.Numerics.BigInteger?)null);
+                };
+            }
+
+            public void Dispose()
+            {
+                BaseBridgeService.ReadRemovalProposalNonceForTests = null;
+                BaseValidatorSyncService.ProposedUnderCache.Clear();
+                BaseValidatorSyncService.SubmitForTests = null;
+                Globals.HttpClientFactory = _priorFactory;
+            }
+
+            /// <summary>The contract at this admin nonce.</summary>
+            public void ContractAt(int nonce) => Contract(nonce, OnContract, Members);
+
+            /// <summary>A removal of these validators at this VFX block height; Base can say which nonce it was proposed under only when one is given.</summary>
+            public BaseBridgeService.PendingRemoval Removal(int? proposedUnder, long height, params string[] validators)
+            {
+                var removal = new BaseBridgeService.PendingRemoval(validators, Array.Empty<string>(), new System.Numerics.BigInteger(Random.Shared.NextInt64(1, long.MaxValue)), height);
+                if (proposedUnder is int nonce) _proposedUnder[removal.Eta.ToString()] = nonce;
+                return removal;
+            }
+
+            /// <summary>Base can now say which nonce this removal was proposed under.</summary>
+            public void EventReadable(BaseBridgeService.PendingRemoval removal, int proposedUnder) => _proposedUnder[removal.Eta.ToString()] = proposedUnder;
+
+            /// <summary>What the contract shows as pending, read afresh (and Base asked afresh for its event).</summary>
+            public void PendingIs(BaseBridgeService.PendingRemoval pending)
+            {
+                BaseValidatorSyncService.PendingCache = null;
+                BaseValidatorSyncService.ProposedUnderCache.Clear();
+                BaseBridgeService.ReadPendingRemovalForTests = () => Task.FromResult<BaseBridgeService.PendingRemoval?>(pending);
+            }
+
+            /// <summary>What the veto loop sends for this pending removal: run before and after every member's turn came.</summary>
+            public async Task<List<string>> Loop(BaseBridgeService.PendingRemoval pending)
+            {
+                _sent.Clear();
+                PendingIs(pending);
+                BaseValidatorSyncService.Clock = () => _t0;
+                await BaseValidatorSyncService.CancelHostileRemovalAsync();
+                BaseValidatorSyncService.Clock = () => _t0.AddDays(1);
+                if (_sent.Count == 0) await BaseValidatorSyncService.CancelHostileRemovalAsync();
+                return _sent.ToList();
+            }
+
+            /// <summary>The operator signs a removal of the named validator, naming it as not signing on Base, at the contract's nonce.</summary>
+            public async Task SignNaming(int nonce, long height)
+            {
+                var (code, signed) = await OperatorSign(new { Action = "PROPOSE_REMOVAL", Validators = Targets, NotSigningOnBase = Targets, VfxBlockHeight = height });
+                Assert.True(code == HttpStatusCode.OK, signed.ToString());
+                var digest = VbtcbTypedData.ProposeRemovalDigest(Targets, Array.Empty<string>(), height, nonce, 8453, Proxy);
+                Assert.Equal("0x" + Convert.ToHexString(digest).ToLowerInvariant(), signed.Value<string>("Digest"));
+                Assert.Equal(_t._me.Base, ValidatorEthKeyService.RecoverSigner(digest, signed.Value<string>("Signature"), personalMessage: false), StringComparer.OrdinalIgnoreCase);
+            }
+
+            /// <summary>Whether this node refuses to sign a cancellation of what is pending, asked as another member asks it.</summary>
+            public async Task<bool> RefusesToCancel(int nonce) =>
+                Refusal(await Ask("CANCEL", Array.Empty<string>(), Epoch, nonce)).Contains("No pending removal names");
+
+            /// <summary>The records this node keeps of removals its operator signed with names.</summary>
+            public int Records() => DbContext.DB_vBTC.GetCollection<VerifiedXCore.Bitcoin.Models.BaseRemovalOverride>("rsrv_base_removal_override").Count();
+        }
+
+        private static readonly string[] Vetoed = { "cancelPending" };
+
+        /// <summary>
         /// A validator that still runs on VFX but does not sign on Base is live by every rule the node has, so its removal
         /// was neither signed nor left alone. The node's own operator can name it (NotSigningOnBase, on the route that
         /// answers loopback only): the node then signs the proposal, and does not veto that proposal on its account,
         /// neither by signing a cancellation for another member nor by sending one. Without the name, for another caller
         /// and for another validator in the proposal, nothing changes.
         ///
-        /// What is not vetoed is the proposal that was signed and no other: the one made at the admin nonce the signature
-        /// is good at, with the validators, casters and VFX block height that were signed. A signature that was never used
-        /// (another change took its nonce) excuses no later proposal, whatever that one names.
+        /// What is not vetoed is the proposal that was signed and no other: the removal proposed under the admin nonce the
+        /// signature is good at, with the validators, casters and VFX block height that were signed. A signature that was
+        /// never used excuses no later proposal, whatever that one names.
         /// </summary>
         [Fact]
         public async Task TheOperatorNamesAValidatorNotSigningOnBase_ItsRemovalIsSigned_AndThatProposalIsNotVetoedByThisNode()
         {
-            var members = new[] { _me, _seed2, _seed3 };
-            var onContract = members.Append(_new1).ToArray();
-            var targets = new[] { _new1.Base };                                   // registered, funded, seen on VFX
-            var priorFactory = Globals.HttpClientFactory;
-            Globals.HttpClientFactory = new ValidatorNetwork(onContract.Select((v, i) => (v, ip: $"10.0.0.{i + 1}")).ToDictionary(x => x.ip, x => x.v));
-            var sent = new List<string>();
-            BaseValidatorSyncService.SubmitForTests = (f, _) => { sent.Add(f); return Task.FromResult<string?>("0xtx"); };
-            var t0 = DateTime.UtcNow;
-            static BaseBridgeService.PendingRemoval Pending(long height, params string[] validators) =>
-                new(validators, Array.Empty<string>(), new System.Numerics.BigInteger(Random.Shared.NextInt64(1, long.MaxValue)), height);
-            var nothing = new BaseBridgeService.PendingRemoval(Array.Empty<string>(), Array.Empty<string>(), 0);
-            void PendingIs(BaseBridgeService.PendingRemoval pending)
+            using var desk = new NamedRemovals(this);
+            var targets = desk.Targets;
+            desk.ContractAt(30);
+            desk.PendingIs(desk.Nothing);
+
+            // Not named: refused as live, and a pending removal of it is vetoed.
+            var (plainCode, plain) = await OperatorSign(new { Action = "PROPOSE_REMOVAL", Validators = targets, VfxBlockHeight = Epoch });
+            Assert.Equal(HttpStatusCode.BadRequest, plainCode);
+            Assert.Contains("still a registered vBTC validator", plain.Value<string>("Error"));
+            Assert.Equal(Vetoed, await desk.Loop(desk.Removal(30, Epoch, targets)));
+
+            // Named by anyone but the node's own operator: no signature, and the veto stands.
+            desk.PendingIs(desk.Nothing);
+            var (remoteCode, remote) = await OperatorSign(new { Action = "PROPOSE_REMOVAL", Validators = targets, NotSigningOnBase = targets, VfxBlockHeight = Epoch }, from: "203.0.113.7");
+            Assert.Equal(HttpStatusCode.Unauthorized, remoteCode);
+            Assert.Null(remote["Signature"]?.Value<string>());
+            desk.ContractAt(31);
+            Assert.Equal(Vetoed, await desk.Loop(desk.Removal(30, Epoch, targets)));
+
+            // Only a validator the proposal removes can be named, and the others it removes are judged as ever.
+            desk.ContractAt(30);
+            desk.PendingIs(desk.Nothing);
+            var (_, foreign) = await OperatorSign(new { Action = "PROPOSE_REMOVAL", Validators = targets, NotSigningOnBase = new[] { _seed2.Base }, VfxBlockHeight = Epoch });
+            Assert.Contains("NotSigningOnBase names only", foreign.Value<string>("Error"));
+            var (_, other) = await OperatorSign(new { Action = "PROPOSE_REMOVAL", Validators = new[] { _new1.Base, _seed2.Base }, NotSigningOnBase = targets, VfxBlockHeight = Epoch });
+            Assert.Contains($"{_seed2.Base} is still a registered vBTC validator", other.Value<string>("Error"));
+            Assert.Equal(0, desk.Records());                                     // neither refusal left a record
+
+            // Named by the operator and signed at nonce 30, but never used: another change took nonce 30. A removal with
+            // the same validators and height proposed after that (under nonce 31) is not the one signed, and is vetoed.
+            await desk.SignNaming(30, Epoch);
+            desk.ContractAt(32);
+            Assert.Equal(Vetoed, await desk.Loop(desk.Removal(31, Epoch, targets)));
+            Assert.Equal(0, desk.Records());
+
+            // Signed at nonce 32 and proposed with that signature: this node signs no cancellation of it and sends none,
+            // also once other changes have moved the nonce further.
+            desk.PendingIs(desk.Nothing);
+            await desk.SignNaming(32, Epoch);
+            desk.ContractAt(33);
+            var approved = desk.Removal(32, Epoch, targets);
+            desk.PendingIs(approved);
+            Assert.True(await desk.RefusesToCancel(33));
+            Assert.Empty(await desk.Loop(approved));
+            desk.ContractAt(35);
+            Assert.Empty(await desk.Loop(approved));
+            // Once a later proposal is the pending one, the approval is spent: the same validators again are vetoed.
+            Assert.Equal(Vetoed, await desk.Loop(desk.Removal(35, Epoch, targets)));
+            Assert.Equal(0, desk.Records());
+
+            // Signed for one VFX block height, proposed under the signed nonce with another: not the digest signed.
+            desk.ContractAt(36);
+            desk.PendingIs(desk.Nothing);
+            await desk.SignNaming(36, Epoch);
+            desk.ContractAt(37);
+            Assert.Equal(Vetoed, await desk.Loop(desk.Removal(36, Epoch + BaseSignerSetPolicy.EpochBlocks, targets)));
+            Assert.Equal(0, desk.Records());
+
+            // Signed while a removal with the same validators and height was already pending: that one is not the proposal
+            // the signature makes.
+            var older = desk.Removal(34, Epoch, targets);
+            desk.PendingIs(older);
+            await desk.SignNaming(37, Epoch);
+            desk.ContractAt(38);
+            Assert.Equal(Vetoed, await desk.Loop(older));
+        }
+
+        /// <summary>
+        /// The node may first look at a pending removal after another change has already followed it: the removal took the
+        /// signed nonce, a caster change took the next, and the contract reads two on. Which nonce the removal was proposed
+        /// under is read from its own event, so it is still known for the one the operator signed.
+        /// </summary>
+        [Fact]
+        public async Task AnApprovedRemoval_IsNotVetoed_WhenAnotherChangeFollowedItBeforeThisNodeLooked()
+        {
+            using var desk = new NamedRemovals(this);
+            desk.ContractAt(40);
+            desk.PendingIs(desk.Nothing);
+            await desk.SignNaming(40, Epoch);
+
+            desk.ContractAt(42);                                                  // the removal used 40, another change 41
+            var approved = desk.Removal(40, Epoch, desk.Targets);
+            desk.PendingIs(approved);
+            Assert.True(await desk.RefusesToCancel(42));
+            Assert.Empty(await desk.Loop(approved));
+            Assert.Equal(1, desk.Records());
+        }
+
+        /// <summary>
+        /// When Base cannot say which nonce a pending removal was proposed under, nothing is proven: the record of what the
+        /// operator signed stays, a pending removal that gives the signed digest is not vetoed meanwhile, and any other is
+        /// judged as ever. A read that failed is asked again a minute later, not at every request.
+        /// </summary>
+        [Fact]
+        public async Task WhenTheProposalsEventCannotBeRead_TheApprovalIsKept_AndTheSignedRemovalIsNotVetoed()
+        {
+            using var desk = new NamedRemovals(this);
+            desk.ContractAt(50);
+            desk.PendingIs(desk.Nothing);
+            await desk.SignNaming(50, Epoch);
+            desk.ContractAt(51);
+
+            // Another removal is shown first, and its event cannot be read: vetoed for its live validators, the record kept.
+            Assert.Equal(Vetoed, await desk.Loop(desk.Removal(null, Epoch, _new1.Base, _seed2.Base)));
+            Assert.Equal(1, desk.Records());
+
+            // The signed removal, its event unreadable: not vetoed, and asked of Base once though it is asked about twice.
+            var approved = desk.Removal(null, Epoch, desk.Targets);
+            desk.PendingIs(approved);
+            desk.EventReads = 0;
+            Assert.True(await desk.RefusesToCancel(51));
+            Assert.True(await desk.RefusesToCancel(51));
+            Assert.Equal(1, desk.EventReads);
+            Assert.Empty(await desk.Loop(approved));
+            Assert.Equal(1, desk.Records());
+
+            // Once the event is read, the record is tied to that removal and no further read is made for it.
+            desk.EventReadable(approved, 50);
+            Assert.Empty(await desk.Loop(approved));
+            desk.EventReads = 0;
+            Assert.Empty(await desk.Loop(approved));
+            Assert.Equal(0, desk.EventReads);
+            Assert.Equal(1, desk.Records());
+        }
+
+        /// <summary>
+        /// The record of a signed removal is removed once it is proven dead: another change was proposed under the signed
+        /// nonce. A removal proposed under an earlier nonce (an older proposal, or an old read of the contract) proves
+        /// nothing and leaves it.
+        /// </summary>
+        [Fact]
+        public async Task AnotherChangeUnderTheSignedNonce_RemovesTheApproval_AnOlderProposalDoesNot()
+        {
+            using var desk = new NamedRemovals(this);
+            desk.ContractAt(60);
+            desk.PendingIs(desk.Nothing);
+            await desk.SignNaming(60, Epoch);
+            desk.ContractAt(61);
+
+            // An older removal of the same validator (proposed under 58): vetoed as ever, the record kept.
+            Assert.Equal(Vetoed, await desk.Loop(desk.Removal(58, Epoch, desk.Targets)));
+            Assert.Equal(1, desk.Records());
+
+            // A removal proposed under nonce 60 that is not the one signed (another VFX block height): the signature's
+            // nonce is used up. Vetoed, and the record removed.
+            Assert.Equal(Vetoed, await desk.Loop(desk.Removal(60, Epoch + BaseSignerSetPolicy.EpochBlocks, desk.Targets)));
+            Assert.Equal(0, desk.Records());
+
+            // So a later removal that names what was signed is vetoed even when its event cannot be read.
+            desk.ContractAt(62);
+            Assert.Equal(Vetoed, await desk.Loop(desk.Removal(null, Epoch, desk.Targets)));
+        }
+
+        /// <summary>
+        /// A removal's proposing block is found by its time (eta less the delay): the first block not before that time, also
+        /// where several blocks share a second and where every block is earlier, in about as many reads as halving takes.
+        /// </summary>
+        [Fact]
+        public async Task TheProposingBlock_IsFoundByItsTime_InAFewReads()
+        {
+            var times = Enumerable.Range(0, 100_000).Select(i => new System.Numerics.BigInteger(1_700_000_000 + i / 3 * 2)).ToArray();   // three blocks a second, every other second
+            var reads = 0;
+            Task<System.Numerics.BigInteger> TimeOf(System.Numerics.BigInteger number) { reads++; return Task.FromResult(times[(int)number]); }
+            var latest = new System.Numerics.BigInteger(times.Length - 1);
+
+            foreach (var block in new[] { 0, 1, 3, 4_998, 60_000, 99_999 })
             {
-                BaseValidatorSyncService.PendingCache = null;
-                BaseBridgeService.ReadPendingRemovalForTests = () => Task.FromResult<BaseBridgeService.PendingRemoval?>(pending);
+                reads = 0;
+                var first = await BaseBridgeService.FirstBlockAtOrAfterAsync(latest, times[block], TimeOf);
+                Assert.Equal(block / 3 * 3, (int)first);                         // the first of the blocks at that second
+                Assert.InRange(reads, 1, 18);
             }
-            async Task<List<string>> Loop(BaseBridgeService.PendingRemoval pending)      // as the loop runs it: before and after every turn came
-            {
-                sent.Clear();
-                PendingIs(pending);
-                BaseValidatorSyncService.Clock = () => t0;
-                await BaseValidatorSyncService.CancelHostileRemovalAsync();
-                BaseValidatorSyncService.Clock = () => t0.AddDays(1);
-                if (sent.Count == 0) await BaseValidatorSyncService.CancelHostileRemovalAsync();
-                return sent.ToList();
-            }
-            async Task SignNaming(int nonce, long height)                           // the operator signs at the contract's nonce
-            {
-                var (code, signed) = await OperatorSign(new { Action = "PROPOSE_REMOVAL", Validators = targets, NotSigningOnBase = targets, VfxBlockHeight = height });
-                Assert.True(code == HttpStatusCode.OK, signed.ToString());
-                var digest = VbtcbTypedData.ProposeRemovalDigest(targets, Array.Empty<string>(), height, nonce, 8453, Proxy);
-                Assert.Equal("0x" + Convert.ToHexString(digest).ToLowerInvariant(), signed.Value<string>("Digest"));
-                Assert.Equal(_me.Base, ValidatorEthKeyService.RecoverSigner(digest, signed.Value<string>("Signature"), personalMessage: false), StringComparer.OrdinalIgnoreCase);
-            }
-            var vetoed = new[] { "cancelPending" };
-            try
-            {
-                Contract(30, onContract, members);
-                PendingIs(nothing);
-
-                // Not named: refused as live, and a pending removal of it is vetoed.
-                var (plainCode, plain) = await OperatorSign(new { Action = "PROPOSE_REMOVAL", Validators = targets, VfxBlockHeight = Epoch });
-                Assert.Equal(HttpStatusCode.BadRequest, plainCode);
-                Assert.Contains("still a registered vBTC validator", plain.Value<string>("Error"));
-                Assert.Equal(vetoed, await Loop(Pending(Epoch, targets)));
-
-                // Named by anyone but the node's own operator: no signature, and the veto stands.
-                PendingIs(nothing);
-                var (remoteCode, remote) = await OperatorSign(new { Action = "PROPOSE_REMOVAL", Validators = targets, NotSigningOnBase = targets, VfxBlockHeight = Epoch }, from: "203.0.113.7");
-                Assert.Equal(HttpStatusCode.Unauthorized, remoteCode);
-                Assert.Null(remote["Signature"]?.Value<string>());
-                Contract(31, onContract, members);
-                Assert.Equal(vetoed, await Loop(Pending(Epoch, targets)));
-
-                // Only a validator the proposal removes can be named, and the others it removes are judged as ever.
-                Contract(30, onContract, members);
-                PendingIs(nothing);
-                var (_, foreign) = await OperatorSign(new { Action = "PROPOSE_REMOVAL", Validators = targets, NotSigningOnBase = new[] { _seed2.Base }, VfxBlockHeight = Epoch });
-                Assert.Contains("NotSigningOnBase names only", foreign.Value<string>("Error"));
-                var (_, other) = await OperatorSign(new { Action = "PROPOSE_REMOVAL", Validators = new[] { _new1.Base, _seed2.Base }, NotSigningOnBase = targets, VfxBlockHeight = Epoch });
-                Assert.Contains($"{_seed2.Base} is still a registered vBTC validator", other.Value<string>("Error"));
-                Contract(31, onContract, members);
-                Assert.Equal(vetoed, await Loop(Pending(Epoch, targets)));        // neither refusal left a record
-
-                // Named by the operator and signed at nonce 30, but never used: another change takes nonce 30. A removal
-                // with the same validators and height proposed after that is not the one signed, and is vetoed.
-                Contract(30, onContract, members);
-                PendingIs(nothing);
-                await SignNaming(30, Epoch);
-                Contract(32, onContract, members);                                 // nonce 30 went elsewhere, 31 to the later proposal
-                Assert.Equal(vetoed, await Loop(Pending(Epoch, targets)));
-
-                // Signed at nonce 32 and proposed with that signature (the contract moves to 33): this node signs no
-                // cancellation of it and sends none, also once other changes have moved the nonce further.
-                PendingIs(nothing);
-                await SignNaming(32, Epoch);
-                Contract(33, onContract, members);
-                var approved = Pending(Epoch, targets);
-                PendingIs(approved);
-                Assert.Contains("No pending removal names", Refusal(await Ask("CANCEL", Array.Empty<string>(), Epoch, 33)));
-                Assert.Empty(await Loop(approved));
-                Contract(35, onContract, members);
-                Assert.Empty(await Loop(approved));
-                // Once another proposal is the pending one, the approval is spent: the same validators again are vetoed.
-                Assert.Equal(vetoed, await Loop(Pending(Epoch, targets)));
-
-                // Signed for one VFX block height, proposed at the signed nonce with another: not the digest signed.
-                PendingIs(nothing);
-                await SignNaming(35, Epoch);
-                Contract(36, onContract, members);
-                Assert.Equal(vetoed, await Loop(Pending(Epoch + BaseSignerSetPolicy.EpochBlocks, targets)));
-
-                // Signed while a removal with the same validators and height was already pending: that one is not the
-                // proposal the signature makes, though the nonce has moved one on.
-                var older = Pending(Epoch, targets);
-                PendingIs(older);
-                await SignNaming(36, Epoch);
-                Contract(37, onContract, members);
-                Assert.Equal(vetoed, await Loop(older));
-
-                // Signed for one list of validators, proposed at the signed nonce with another: not the digest signed.
-                PendingIs(nothing);
-                await SignNaming(37, Epoch);
-                Contract(38, onContract, members);
-                Assert.Equal(vetoed, await Loop(Pending(Epoch, _new1.Base, _seed2.Base)));
-            }
-            finally
-            {
-                BaseValidatorSyncService.SubmitForTests = null;
-                Globals.HttpClientFactory = priorFactory;
-            }
+            Assert.Equal(3, (int)await BaseBridgeService.FirstBlockAtOrAfterAsync(latest, times[0] + 1, TimeOf));   // between two seconds: the next block
+            Assert.Equal(times.Length, (int)await BaseBridgeService.FirstBlockAtOrAfterAsync(latest, times[^1] + 1, TimeOf));   // later than every block
         }
 
         /// <summary>
