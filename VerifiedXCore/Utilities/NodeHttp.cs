@@ -72,6 +72,21 @@ namespace VerifiedXCore.Utilities
         }
 
         /// <summary>
+        /// Asks another node with a GET and returns its answer when that is a short, successful one, as
+        /// <see cref="PostForShortReplyAsync"/> does for a POST: the same limit, and one deadline for the whole exchange.
+        /// </summary>
+        public static async Task<string?> GetForShortReplyAsync(string url, CancellationToken cancel = default, TimeSpan? timeout = null, int maxBytes = MaxPeerReplyBytes)
+        {
+            using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancel);
+            deadline.CancelAfter(timeout ?? PeerReplyTimeout);
+            using var request = new HttpRequestMessage(HttpMethod.Get, url);
+            using var client = PeerClient();
+            using var response = await client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, deadline.Token);
+            if (!response.IsSuccessStatusCode) return null;
+            return await Bitcoin.Attestation.Net.BtcValidatorSource.ReadBoundedAsync(response.Content, maxBytes, deadline.Token);
+        }
+
+        /// <summary>
         /// Posts JSON to another node whose answer is not used: none of its body is read. Within
         /// <see cref="PeerReplyTimeout"/>, as <see cref="PostForShortReplyAsync"/>.
         /// </summary>

@@ -3243,6 +3243,14 @@ namespace VerifiedXCore.Bitcoin.Services
                     return (false, "Invalid EVM destination address. Must be 0x-prefixed, 42 characters.", string.Empty);
                 }
 
+                // Last before the lock is made: it debits the holder at once, and only a mint on Base gives that back. Not
+                // made while the Base contract's own signers cannot mint it (BaseMintReadiness).
+                if (await BaseMintReadiness.RefusalAsync() is { } cannotMint)
+                {
+                    SCLogUtility.Log($"vBTC V2 Bridge Lock not made: {cannotMint}", "VBTCService.CreateBridgeLockTx()");
+                    return (false, cannotMint, string.Empty);
+                }
+
                 var lockId = string.IsNullOrWhiteSpace(lockIdOverride) ? Guid.NewGuid().ToString("N") : lockIdOverride.Trim();
                 long amountSats = (long)(amount * 100_000_000M);
 
