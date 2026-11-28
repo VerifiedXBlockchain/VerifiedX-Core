@@ -114,7 +114,10 @@ namespace VerifiedXCore.Controllers
         /// <summary>
         /// The node operator signs a vBTCb contract change with this validator's Base key: UPGRADE (V3), or on V4
         /// PROPOSE_UPGRADE, PROPOSE_UPGRADE_DELAY, PROPOSE_REMOVAL, CANCEL_PENDING (BaseAdminSigningService). Localhost only:
-        /// these signatures change the contract's code and validator set, so only the operator asks for them.
+        /// these signatures change the contract's code and validator set, so only the operator asks for them. That holds
+        /// for PROPOSE_REMOVAL's NotSigningOnBase too (a validator still seen on VFX that the operator names as not signing
+        /// on Base): it is read here and nowhere else, so no other caller can have this node sign for, or stop vetoing for,
+        /// a live validator.
         /// </summary>
         [HttpPost]
         [Route("SignBaseAdminAction")]
@@ -148,7 +151,6 @@ namespace VerifiedXCore.Controllers
                 if (string.IsNullOrEmpty(rpcUrl) || string.IsNullOrEmpty(contractAddr))
                     return Ok(JsonConvert.SerializeObject(new { Success = false, Message = "Base bridge not configured" }));
 
-                var web3 = new Nethereum.Web3.Web3(rpcUrl);
                 var abi = @"[
                     {""inputs"":[],""name"":""getValidators"",""outputs"":[{""internalType"":""address[]"",""name"":"""",""type"":""address[]""}],""stateMutability"":""view"",""type"":""function""},
                     {""inputs"":[],""name"":""getAdminNonce"",""outputs"":[{""internalType"":""uint256"",""name"":"""",""type"":""uint256""}],""stateMutability"":""view"",""type"":""function""},
@@ -157,12 +159,16 @@ namespace VerifiedXCore.Controllers
                     {""inputs"":[],""name"":""requiredRemoveSignatures"",""outputs"":[{""internalType"":""uint256"",""name"":"""",""type"":""uint256""}],""stateMutability"":""view"",""type"":""function""}
                 ]";
 
-                var contract = web3.Eth.GetContract(abi, contractAddr);
-                var validators = await contract.GetFunction("getValidators").CallAsync<List<string>>();
-                var adminNonce = await contract.GetFunction("getAdminNonce").CallAsync<System.Numerics.BigInteger>();
-                var valCount = await contract.GetFunction("validatorCount").CallAsync<System.Numerics.BigInteger>();
-                var mintSigs = await contract.GetFunction("requiredMintSignatures").CallAsync<System.Numerics.BigInteger>();
-                var removeSigs = await contract.GetFunction("requiredRemoveSignatures").CallAsync<System.Numerics.BigInteger>();
+                // Advisory: the contract's state as shown to the operator.
+                var (validators, adminNonce, valCount, mintSigs, removeSigs) = await Bitcoin.Services.BaseRpc.AdvisoryPrimaryAsync(async web3 =>
+                {
+                    var contract = web3.Eth.GetContract(abi, contractAddr);
+                    return (await contract.GetFunction("getValidators").CallAsync<List<string>>(),
+                        await contract.GetFunction("getAdminNonce").CallAsync<System.Numerics.BigInteger>(),
+                        await contract.GetFunction("validatorCount").CallAsync<System.Numerics.BigInteger>(),
+                        await contract.GetFunction("requiredMintSignatures").CallAsync<System.Numerics.BigInteger>(),
+                        await contract.GetFunction("requiredRemoveSignatures").CallAsync<System.Numerics.BigInteger>());
+                });
 
                 return Ok(JsonConvert.SerializeObject(new
                 {
@@ -1538,6 +1544,10 @@ namespace VerifiedXCore.Controllers
                 TipHash = lastBlock?.Hash ?? "",
                 IsChainSynced = Globals.IsChainSynced,
                 IsValidator = !string.IsNullOrEmpty(Globals.ValidatorAddress),
+                // Whether this node would sign a Base mint for a lock right now (BaseBridgeAttestationService.NotReadyToAttest:
+                // at the network's height with a recent tip, not stalled, not on another chain than its peers). A node about
+                // to make a bridge lock asks this of the contract's signers; only the signer knows how old its own tip is.
+                ReadyToAttest = Bitcoin.Services.BaseBridgeAttestationService.NotReadyToAttest() == null,
                 IsBlockCaster = Globals.IsBlockCaster,
                 // SEAT-HEAL: casting right now (resumed, record current). Peers time a member's absence by this.
                 Casting = CasterSeatService.CastingNow,

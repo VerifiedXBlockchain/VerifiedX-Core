@@ -32,6 +32,7 @@ namespace VerifiedXCore.Tests
         private readonly Block _priorLastBlock = Globals.LastBlock;
         private readonly bool _priorIsBlockCaster = Globals.IsBlockCaster;
         private readonly string _priorRpc = BaseBridgeService.BaseRpcUrl;
+        private readonly string _priorRpc2 = BaseBridgeService.BaseRpcUrl2;
         private readonly string _priorContract = BaseBridgeService.ContractAddress;
 
         public BaseBridgeExitReaderSpanTests()
@@ -50,6 +51,8 @@ namespace VerifiedXCore.Tests
         public void Dispose()
         {
             BaseBridgeService.BaseRpcUrl = _priorRpc;
+            BaseBridgeService.BaseRpcUrl2 = _priorRpc2;
+            BaseRpc.ForgetChainChecksForTests();
             BaseBridgeService.ContractAddress = _priorContract;
             BaseBridgeExitWatchService.ResetSpanForTests();
             BaseBridgeExitWatchService.ResetRewindForTests();
@@ -63,10 +66,13 @@ namespace VerifiedXCore.Tests
         [Fact]
         public async Task ACasterBehindBase_CatchesUpInAFewPolls_AndSettlesAtTheProvidersCap()
         {
+            // Two providers with the cap: the watch passes a range only once two have read it.
             var rpc = new CappedRpc();
+            var second = new CappedRpc();
             try
             {
                 BaseBridgeService.BaseRpcUrl = rpc.Url;
+                BaseBridgeService.BaseRpcUrl2 = second.Url;
                 var state = BridgeExitSyncState.GetOrCreate();
                 state.LastScannedBlock = Head - 6_000;
                 BridgeExitSyncState.Save(state);
@@ -95,19 +101,21 @@ namespace VerifiedXCore.Tests
             finally
             {
                 rpc.Dispose();
+                second.Dispose();
             }
         }
 
         [Fact]
         public void ARangeThatFailsAtASpanThatWorked_ShrinksAsBefore_AndGrowsBackToIt()
         {
-            Assert.Equal(1000, BaseBridgeExitWatchService.SpanAfterFailure(4000));     // no span has worked yet
-            Assert.Equal(2100, BaseBridgeExitWatchService.SpanAfterSuccess(200));      // worked: halfway to the narrowest refused (4000)
-            Assert.Equal(200, BaseBridgeExitWatchService.SpanAfterFailure(400));       // refused above 200: back to 200
-            Assert.Equal(50, BaseBridgeExitWatchService.SpanAfterFailure(200));        // refused at a span that worked: a dense range, a quarter
-            Assert.Equal(100, BaseBridgeExitWatchService.SpanAfterSuccess(50));        // and back up to the span that worked
-            Assert.Equal(200, BaseBridgeExitWatchService.SpanAfterSuccess(100));
-            Assert.Equal(300, BaseBridgeExitWatchService.SpanAfterSuccess(200));       // then halfway to the narrowest refused (400)
+            var provider = new BaseBridgeExitWatchService.SpanState();             // each provider's span is its own
+            Assert.Equal(1000, provider.AfterFailure(4000));     // no span has worked yet
+            Assert.Equal(2100, provider.AfterSuccess(200));      // worked: halfway to the narrowest refused (4000)
+            Assert.Equal(200, provider.AfterFailure(400));       // refused above 200: back to 200
+            Assert.Equal(50, provider.AfterFailure(200));        // refused at a span that worked: a dense range, a quarter
+            Assert.Equal(100, provider.AfterSuccess(50));        // and back up to the span that worked
+            Assert.Equal(200, provider.AfterSuccess(100));
+            Assert.Equal(300, provider.AfterSuccess(200));       // then halfway to the narrowest refused (400)
         }
 
         /// <summary>A JSON-RPC endpoint on loopback: head <see cref="Head"/>, no logs, eth_getLogs over <see cref="ProviderCap"/> blocks refused.</summary>
@@ -172,8 +180,12 @@ namespace VerifiedXCore.Tests
                 var id = request["id"];
                 switch (request["method"]?.ToString())
                 {
+                    case "eth_chainId":
+                        return new JObject { ["jsonrpc"] = "2.0", ["id"] = id, ["result"] = "0x" + Globals.BaseEvmChainId.ToString("x") }.ToString();
                     case "eth_blockNumber":
                         return new JObject { ["jsonrpc"] = "2.0", ["id"] = id, ["result"] = "0x" + Head.ToString("x") }.ToString();
+                    case "eth_getBlockByNumber": // the finalized block: the head
+                        return new JObject { ["jsonrpc"] = "2.0", ["id"] = id, ["result"] = new JObject { ["number"] = "0x" + Head.ToString("x"), ["hash"] = "0x" + new string('1', 64), ["transactions"] = new JArray() } }.ToString();
                     case "eth_getLogs":
                         var filter = (JObject)request["params"]![0]!;
                         var from = Convert.ToInt64(filter["fromBlock"]!.ToString(), 16);

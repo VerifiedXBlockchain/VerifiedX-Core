@@ -1315,6 +1315,14 @@ namespace VerifiedXCore.Data
                                         // 60-minute timestamp rule removes it if Electrum never answers.
                                         LogUtility.Log($"[ProcessTxPool] Skipping {tx.Hash} for this block: {txVerify.Item2}", "TransactionData.ProcessTxPool()");
                                     }
+                                    else if (!txVerify.Item1 && VerifiedXCore.Bitcoin.Services.BaseBridgeService.IsNotYet(txVerify.Item2))
+                                    {
+                                        // A bridge exit whose burn Base has no final answer on at this moment (no provider
+                                        // answered, or the burn's block is not final for this node's provider yet) is not
+                                        // invalid: it stays in the pool and is asked about again for the next block. The
+                                        // 60-minute timestamp rule removes it if the answer never comes.
+                                        LogUtility.Log($"[ProcessTxPool] Skipping {tx.Hash} for this block: {txVerify.Item2}", "TransactionData.ProcessTxPool()");
+                                    }
                                     else
                                     {
                                         var txToDelete = collection.FindOne(t => t.Hash == tx.Hash);

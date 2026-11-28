@@ -768,14 +768,16 @@ namespace VerifiedXCore.Bitcoin.FROST
         }
 
         /// <summary>
-        /// Whether a signing ceremony on a key the chain watches is led by neither a holder of that key nor a caster: a
-        /// withdrawal's requester, whose transaction the holders sign without it. An older vault's withdrawal has its owner
-        /// as its only leader, and is not counted here: in the requester's share four addresses could keep every older
-        /// vault's owner out until those vaults freeze (fifth review, round 25).
+        /// Whether a signing ceremony is led by neither a holder of the key nor a caster: a withdrawal's requester. On a
+        /// key the chain watches the holders sign its transaction without it; an older vault's withdrawal has its owner as
+        /// its only leader. Both are counted against their own vault and no other
+        /// (<see cref="FrostSessionStorage.MAX_REQUESTER_LED_SIGNING_SESSIONS_PER_VAULT"/>): in one share for every
+        /// vault, four addresses could keep every older vault's owner out until those vaults freeze (fifth review, round
+        /// 25), and counted with the key holders instead, a few owners' addresses took the holders' room.
         /// </summary>
         internal static bool LedByRequester(string? leaderAddress, string? keyUid) =>
-            !string.IsNullOrEmpty(leaderAddress) && keyUid != null && Attestation.BtcVaultKeys.KeyRow(keyUid) != null
-            && !(keyUid != null && Attestation.BtcWithdrawalSigner.SignersOf(keyUid).Contains(leaderAddress, StringComparer.Ordinal))
+            !string.IsNullOrEmpty(leaderAddress) && keyUid != null
+            && !Attestation.BtcWithdrawalSigner.SignersOf(keyUid).Contains(leaderAddress, StringComparer.Ordinal)
             && !IsKnownCaster(leaderAddress);
     }
 }

@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Numerics;
 using System.Threading.Tasks;
 using VerifiedXCore.Bitcoin.Services;
@@ -35,7 +36,7 @@ namespace VerifiedXCore.Tests
             new BaseBridgeService.SignerView(new List<string> { "0xv1", "0xv2" }, version, 2, BigInteger.One);
 
         [Fact]
-        public async Task AProviderThatFailsOnTheVersion_IsPassedOver_AndTheNextOnesVersionIsUsed()
+        public async Task AProviderThatFailsOnTheVersion_IsPassedOver_AndTheVersionTwoOthersGiveIsUsed()
         {
             var asked = new List<string>();
             // Each provider's read, as the node makes it: the version call goes through ReadMessageVersionAsync.
@@ -51,9 +52,13 @@ namespace VerifiedXCore.Tests
                 return View(version);
             }
 
-            var view = await BaseBridgeService.ReadSignerViewFromAsync(new[] { "limited", "down", "good" }, Read);
+            // The view is the one two providers give alike: one good provider beside the two that fail is not enough.
+            Assert.Null(await BaseBridgeService.ReadSignerViewFromAsync(new[] { "limited", "down", "good" }, Read));
+            asked.Clear();
 
-            Assert.Equal(new[] { "limited", "down", "good" }, asked);
+            var view = await BaseBridgeService.ReadSignerViewFromAsync(new[] { "limited", "down", "good", "also good" }, Read);
+
+            Assert.Equal(new[] { "also good", "down", "good", "limited" }, asked.OrderBy(a => a, StringComparer.Ordinal)); // every provider is asked
             Assert.NotNull(view);
             Assert.Equal(4, view!.MessageVersion); // not the older form, which the first provider's failure used to mean
         }
@@ -63,7 +68,7 @@ namespace VerifiedXCore.Tests
         {
             Assert.Null(await BaseBridgeService.ReadSignerViewFromAsync(new[] { "a", "b" }, async url => View(await BaseBridgeService.ReadMessageVersionAsync(() => throw Rpc(-32603, "Internal error")))));
 
-            // A contract without the function reverts: that is the older contract, read from the first provider.
+            // A contract without the function reverts: that is the older contract, as both providers give it.
             var older = await BaseBridgeService.ReadSignerViewFromAsync(new[] { "a", "b" }, async url => View(await BaseBridgeService.ReadMessageVersionAsync(() => throw Rpc(3, "execution reverted"))));
             Assert.Equal(3, older!.MessageVersion);
         }

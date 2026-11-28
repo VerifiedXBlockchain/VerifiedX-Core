@@ -28,12 +28,10 @@ namespace VerifiedXCore.Bitcoin.Services
         {
             if (IsRefundedForTests != null) return await IsRefundedForTests(refundId);
             if (!BaseBridgeService.IsBridgeConfigured) return null;
-            try
-            {
-                var c = new Web3(BaseBridgeService.BaseRpcUrl).Eth.GetContract(BaseBridgeService.CONTRACT_ABI, BaseBridgeService.ContractAddress);
-                return await c.GetFunction("isBurnRefunded").CallAsync<bool>(refundId);
-            }
-            catch { return null; }
+            // Advisory: it only spares a send the contract would refuse; the contract refunds a burn id once whatever is read here.
+            var refunded = await BaseRpc.AdvisoryFirstAsync(web3 =>
+                web3.Eth.GetContract(BaseBridgeService.CONTRACT_ABI, BaseBridgeService.ContractAddress).GetFunction("isBurnRefunded").CallAsync<bool>(refundId));
+            return refunded.Answered ? refunded.Value : null;
         }
 
         /// <summary>
@@ -111,7 +109,7 @@ namespace VerifiedXCore.Bitcoin.Services
                 var key = account.GetKey;
                 if (key.Length % 2 != 0) key = "0" + key;
                 var ethAccount = new Account(new EthECKey(BoundedDecode.Hex(key, 33), true), signed.ChainId);
-                var web3 = new Web3(ethAccount, BaseBridgeService.BaseRpcUrl);
+                var web3 = await BaseRpc.SenderAsync(ethAccount);
                 var refundBurn = web3.Eth.GetContract(BaseBridgeService.CONTRACT_ABI, signed.ContractAddress).GetFunction("refundBurn");
                 var sigBytes = signed.Signatures.Select(s => BoundedDecode.Hex(s.StartsWith("0x", StringComparison.OrdinalIgnoreCase) ? s[2..] : s, 65)).ToList();
                 var args = new object[] { refund.BaseBurner, new BigInteger(refund.AmountSats), refund.RefundId, sigBytes };
