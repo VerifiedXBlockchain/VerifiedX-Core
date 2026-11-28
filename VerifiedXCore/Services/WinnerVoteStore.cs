@@ -34,6 +34,13 @@ namespace VerifiedXCore.Services
         private static readonly ConcurrentDictionary<long, ConcurrentDictionary<string, SignedWinnerVote>> _signed = new();
         private static long _lastSequence;
 
+        /// <summary>
+        /// Heights kept behind the committed tip. A vote is only taken for a height ahead of the tip, and the tally reads
+        /// the height being agreed, so a vote this far behind is read by nothing. The store prunes on every vote it keeps:
+        /// the caster agreement loop also prunes it, but a validator that is not a caster never runs that loop.
+        /// </summary>
+        public const long KeepHeightsBehindTip = 10;
+
         /// <summary>Records a vote if it is well-formed, signed by its voter and the voter is accepted.</summary>
         /// <param name="relayed">A vote relayed in a peer's answer: one no newer than the vote held from its voter is not verified
         /// again, as it would not be kept. A caster's own request is always verified.</param>
@@ -58,6 +65,8 @@ namespace VerifiedXCore.Services
             Globals.CasterWinnerVoteDict.GetOrAdd(vote.BlockHeight, _ => new ConcurrentDictionary<string, string>())[vote.VoterAddress] = vote.WinnerAddress;
             if (vote.ExcludedAddresses != null && vote.ExcludedAddresses.Any())
                 Globals.CasterExcludedAddressDict.GetOrAdd(vote.BlockHeight, _ => new ConcurrentDictionary<string, List<string>>())[vote.VoterAddress] = vote.ExcludedAddresses;
+            if (Globals.LastBlock is { } tip)
+                PruneBelow(tip.Height - KeepHeightsBehindTip);
             return WinnerVoteRecordResult.Stored;
         }
 
@@ -88,10 +97,15 @@ namespace VerifiedXCore.Services
             return vote;
         }
 
+        /// <summary>Drops every height below <paramref name="height"/> from the signed votes and from the two maps written here.</summary>
         public static void PruneBelow(long height)
         {
             foreach (var k in _signed.Keys.Where(k => k < height).ToList())
                 _signed.TryRemove(k, out _);
+            foreach (var k in Globals.CasterWinnerVoteDict.Keys.Where(k => k < height).ToList())
+                Globals.CasterWinnerVoteDict.TryRemove(k, out _);
+            foreach (var k in Globals.CasterExcludedAddressDict.Keys.Where(k => k < height).ToList())
+                Globals.CasterExcludedAddressDict.TryRemove(k, out _);
         }
     }
 }
