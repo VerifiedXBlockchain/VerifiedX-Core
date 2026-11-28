@@ -100,13 +100,12 @@ namespace VerifiedXCore.Bitcoin.Services
                     if (targets.Any(t => !view.Validators.Contains(t, StringComparer.OrdinalIgnoreCase))) return Fail("Every address must be a validator on the contract");
                     if (casterTargets.Any(t => !view.CasterList.Contains(t, StringComparer.OrdinalIgnoreCase))) return Fail("Every caster must be a caster on the contract");
                     // The way out for validators and casters that went dark: not for one that still runs as a vBTC
-                    // validator, or that still sits in the caster committee.
-                    var active = VBTCValidatorRegistry.GetActiveValidatorsAt(Globals.LastBlock?.Height ?? 0)
-                        .Select(v => SafeBaseAddress(v.FrostPublicKey)).Where(a => a.Length > 0).ToHashSet(StringComparer.OrdinalIgnoreCase);
-                    if (targets.FirstOrDefault(active.Contains) is { } live) return Fail($"{live} is still a registered vBTC validator");
-                    var committee = (VerifiedXCore.Services.CasterMembershipStore.GetCurrent()?.Casters ?? new List<VerifiedXCore.Models.CasterInfo>())
-                        .Select(c => SafeBaseAddress(c.PublicKey)).Where(a => a.Length > 0).ToHashSet(StringComparer.OrdinalIgnoreCase);
-                    if (casterTargets.FirstOrDefault(committee.Contains) is { } sitting) return Fail($"{sitting} is still in the caster committee");
+                    // validator, or that still sits in the caster committee. Judged by the rule the members' veto of a
+                    // pending removal is judged by, at this node's tip, so what is signed here is not what it cancels.
+                    var stillLive = BaseSignerSetPolicy.LiveForRemovalAt(Globals.LastBlock?.Height ?? -1);
+                    if (stillLive.LiveValidator(targets) is { } live)
+                        return Fail($"{live} is still a registered vBTC validator (seen on VFX in the last {BaseSignerSetPolicy.RemovalLiveBlocks} blocks)");
+                    if (stillLive.LiveCaster(casterTargets) is { } sitting) return Fail($"{sitting} is still in the caster committee");
                     if (req.VfxBlockHeight is not long height || height < 0) return Fail("VfxBlockHeight required");
                     digest = VbtcbTypedData.ProposeRemovalDigest(targets, casterTargets, height, view.AdminNonce, chainId, contract);
                     break;
@@ -153,12 +152,6 @@ namespace VerifiedXCore.Bitcoin.Services
                 catch { }
             }
             return null;
-        }
-
-        private static string SafeBaseAddress(string? publicKey)
-        {
-            try { return string.IsNullOrEmpty(publicKey) ? "" : ValidatorEthKeyService.DeriveBaseAddressFromVfxPublicKey(publicKey) ?? ""; }
-            catch { return ""; }
         }
 
         private static bool IsAddress(string? a)

@@ -54,7 +54,8 @@ namespace VerifiedXCore.Tests
             AccountData.GetAccounts().InsertSafe(new Account { Address = me, PublicKey = _myPub, PrivateKey = "0" + key.secret.ToString("x") });
             _myBase = ValidatorEthKeyService.DeriveBaseAddressFromVfxPublicKey(_myPub);
             Globals.ValidatorAddress = me;
-            // This node is a registered vBTC validator.
+            // This node is a registered vBTC validator, holding the validator balance.
+            StateData.GetAccountStateTrei().InsertSafe(new AccountStateTrei { Key = me, Balance = 5_000M, Nonce = 0 });
             BlockchainData.GetBlocks().InsertSafe(new Block
             {
                 Height = 10, Hash = "h10",

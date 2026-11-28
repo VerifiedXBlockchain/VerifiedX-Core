@@ -146,7 +146,7 @@ namespace VerifiedXCore.Bitcoin.Services
                 if (!asMember) return (null, "Only a validator or caster on the contract signs a cancellation");
                 var pending = await PendingForSigningAsync();
                 if (pending == null) return (null, "Could not read the Base contract");
-                if (LiveTargetOf(pending, epoch) == null) return (null, "No pending removal names a validator or caster that is still live");
+                if (LiveTargetOf(pending, tip) == null) return (null, "No pending removal names a validator or caster that is still live");
                 return (new Authorized(VbtcbTypedData.CancelPendingDigest(view.AdminNonce, chainId, BaseBridgeService.ContractAddress), action, null, epoch, view.AdminNonce.ToString()), "");
             }
 
@@ -248,18 +248,16 @@ namespace VerifiedXCore.Bitcoin.Services
         }
 
         /// <summary>
-        /// The first member a pending removal names that this node sees live: a caster in its current caster record, or a
-        /// validator that keeps its seat at the epoch boundary (funded, seen in the two days before it). Null when it names
-        /// none, as when it clears members that went dark.
+        /// The first member a pending removal names that this node sees live at its tip, by the rule the operator's
+        /// signature on a proposal is given by (<see cref="BaseSignerSetPolicy.LiveForRemovalAt"/>): a caster in its
+        /// current caster record, or a funded validator seen on VFX. Null when it names none, as when it clears members
+        /// that went dark.
         /// </summary>
-        internal static string? LiveTargetOf(BaseBridgeService.PendingRemoval pending, long epoch)
+        internal static string? LiveTargetOf(BaseBridgeService.PendingRemoval pending, long tip)
         {
             if (pending.Eta == 0) return null;
-            var committee = (VerifiedXCore.Services.CasterMembershipStore.GetCurrent()?.Casters ?? new List<VerifiedXCore.Models.CasterInfo>())
-                .Select(c => BaseSignerSetPolicy.BaseAddressOf(c.PublicKey).ToLowerInvariant()).Where(a => a.Length > 0).ToHashSet();
-            if (pending.Casters.FirstOrDefault(c => committee.Contains(c.ToLowerInvariant())) is { } caster) return caster;
-            var kept = BaseSignerSetPolicy.KeptAt(epoch);
-            return pending.Validators.FirstOrDefault(v => kept.Contains(v.ToLowerInvariant()));
+            var live = BaseSignerSetPolicy.LiveForRemovalAt(tip);
+            return live.LiveCaster(pending.Casters) ?? live.LiveValidator(pending.Validators);
         }
 
         /// <summary>This node's signature on the request, or null and why not (see <see cref="AuthorizeAsync"/>).</summary>
@@ -342,7 +340,7 @@ namespace VerifiedXCore.Bitcoin.Services
             var members = view.Validators.Concat(view.CasterList).Select(m => m.ToLowerInvariant()).Distinct().ToList();
             if (string.IsNullOrEmpty(myBase) || !members.Contains(myBase.ToLowerInvariant())) return;
             var pending = await BaseBridgeService.ReadPendingRemovalAsync();
-            if (pending == null || pending.Eta == 0 || LiveTargetOf(pending, epoch) is not { } live) return;
+            if (pending == null || pending.Eta == 0 || LiveTargetOf(pending, tip) is not { } live) return;
 
             var seed = pending.Eta.ToString();
             var first = FirstSeenPending.GetOrAdd(BaseBridgeService.ContractAddress + ":" + seed, Clock());
