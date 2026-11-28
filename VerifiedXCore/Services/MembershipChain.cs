@@ -246,7 +246,7 @@ namespace VerifiedXCore.Services
                     // An election or a seed reset that took effect before the chain started is kept, not reverted.
                     if (r.RecordSeq != prev.RecordSeq + 1 || !string.Equals(r.PrevRecordHash, prev.RecordHash, StringComparison.OrdinalIgnoreCase))
                         return $"seq {r.RecordSeq} does not extend the chain's record seq {prev.RecordSeq}";
-                    if (PreChainReplacementRefusal(r, prev, block.Height) is { } notKept) return $"seq {r.RecordSeq}: {notKept}";
+                    if (PreChainReplacementRefusal(r, prev, block.Height, BySeq) is { } notKept) return $"seq {r.RecordSeq}: {notKept}";
                     chained.Add(r);
                     prev = r;
                     continue;
@@ -272,7 +272,7 @@ namespace VerifiedXCore.Services
         /// record. A seed reset rode on no block before the chain: it must be the hard-coded seed set with two seed
         /// signatures (each seed checked the stall on its own clock before signing). Either took effect before this block.
         /// </summary>
-        private static string? PreChainReplacementRefusal(CasterMembershipRecord r, CasterMembershipRecord prev, long height)
+        private static string? PreChainReplacementRefusal(CasterMembershipRecord r, CasterMembershipRecord prev, long height, Func<long, CasterMembershipRecord?> bySeq)
         {
             if (CasterMembershipStore.FieldHoldingTheSeparator(r) is { } f) return $"its {f} holds the payload separator";
             if (CasterMembershipStore.ComputeRecordHash(r) != r.RecordHash) return "its fields do not hash to its record hash";
@@ -280,10 +280,10 @@ namespace VerifiedXCore.Services
             if (r.EffectiveFromHeight <= prev.EffectiveFromHeight) return "effective height not advancing";
             if (r.ChangeType == CasterMembershipStore.BootstrapResetChangeType)
                 return CasterMembershipStore.ValidateBootstrapReset(r, long.MaxValue, out var why) ? null : why;
-            if (!VreeElection.Active(r.EffectiveFromHeight)) return "elections are not active at its height";
-            var carrier = BlockchainData.GetBlockByHeight(r.EffectiveFromHeight);
-            return carrier?.MembershipRecord != null && string.Equals(carrier.MembershipRecord.RecordHash, r.RecordHash, StringComparison.OrdinalIgnoreCase)
-                ? null : $"this chain's block at {r.EffectiveFromHeight} does not carry it";
+            // An election is judged on its own, against the record before it as this run carries it, on this chain's
+            // blocks: never on the stored copy's carried record or certificate, both outside the block hash (a node that
+            // downloaded the block without them must reach the same verdict as one that has them).
+            return VreeElection.PreChainElectionRefusal(r, prev, bySeq);
         }
 
         /// <summary>
@@ -299,6 +299,12 @@ namespace VerifiedXCore.Services
             if (ChainBefore(block.Height) != null) return null; // not the block that starts the chain
             var last = run[^1];
             var held = CasterMembershipStore.HeldForHeight(block.Height);
+            // Nor a start that puts in force an election or reset this node does not hold as in force: a ratified rung
+            // that never produced its block is valid by its signatures, and only the committee in force can tell.
+            foreach (var r in run.Skip(1).Where(r => IsCarriedType(r.ChangeType)))
+                if (held == null || held.RecordSeq < r.RecordSeq
+                    || !string.Equals(CasterMembershipStore.GetBySeq(r.RecordSeq)?.RecordHash, r.RecordHash, StringComparison.OrdinalIgnoreCase))
+                    return $"the run that starts the membership chain puts in force the {r.ChangeType} seq {r.RecordSeq}, which is not in force here";
             if (held == null || held.RecordSeq <= last.RecordSeq) return null;
             for (var seq = last.RecordSeq + 1; seq <= held.RecordSeq; seq++)
                 if (CasterMembershipStore.GetBySeq(seq) is { } skipped && IsCarriedType(skipped.ChangeType))

@@ -269,11 +269,13 @@ namespace VerifiedXCore.Services
         }
 
         /// <summary>E: the election for a stall at <paramref name="stallHeight"/>. Null when the record era or the VRF epochs have not started.</summary>
-        public static ElectionEpoch? EpochForStall(long stallHeight, string stallHash)
+        /// <param name="committee">The committee the election replaces, when the caller has it from the chain; this node's
+        /// records otherwise.</param>
+        public static ElectionEpoch? EpochForStall(long stallHeight, string stallHash, HashSet<string>? committee = null)
         {
             if (!VrfSeed.Active(stallHeight))
                 return null;
-            var committee = CasterMembershipStore.GetCommitteeForHeight(stallHeight);
+            committee ??= CasterMembershipStore.GetCommitteeForHeight(stallHeight);
             if (committee == null)
                 return null;
             var anchor = VrfSeed.AnchorHeight(stallHeight);
@@ -741,6 +743,40 @@ namespace VerifiedXCore.Services
                 if (r.Rung == 0 && block.Height != term.LapseHeight + HandoverBlocks) return CarriedVerdict.Invalid;
             }
             return ContentRefusal(EpochFor(prev, r, bySeq), prev, r) == null ? CarriedVerdict.Valid : CarriedVerdict.Invalid;
+        }
+
+        /// <summary>
+        /// Why an election in the run that starts the membership chain is not one this chain ratified, or null. It is judged as
+        /// the block at its effective height would judge it (<see cref="JudgeCarried"/>), against <paramref name="prev"/>, the
+        /// record the run carries before it, and on this chain's block hashes alone: the copy of that block this node stored
+        /// may lack the record or the certificate, both outside the block hash, so neither is read. Two thirds of the
+        /// electorate signed it for that block; whether it then governed is the certifying committee's to say
+        /// (MembershipChain.ActivationSigningRefusal).
+        /// </summary>
+        internal static string? PreChainElectionRefusal(CasterMembershipRecord r, CasterMembershipRecord prev, Func<long, CasterMembershipRecord?> bySeq)
+        {
+            if (!IsElectionRecord(r) || r.Casters == null) return "not an election";
+            if (!Active(r.EffectiveFromHeight)) return "elections are not active at its height";
+            var carrier = BlockAt(r.EffectiveFromHeight);
+            if (carrier == null) return $"this chain has no block at {r.EffectiveFromHeight}";
+            var parent = BlockAt(r.EffectiveFromHeight - 1);
+            if (parent == null || parent.Hash != carrier.PrevHash) return "this chain's block before it is not here";
+            if (!string.Equals(r.PrevRecordHash, prev.RecordHash, StringComparison.OrdinalIgnoreCase)) return "prevRecordHash mismatch";
+            ElectionEpoch? epoch;
+            if (r.ChangeType == EmergencyElectionChangeType)
+            {
+                if (!string.Equals(r.EpochHash, carrier.PrevHash, StringComparison.OrdinalIgnoreCase)) return "the election is for another block than this chain's";
+                epoch = EpochForStall(r.EffectiveFromHeight - 1, r.EpochHash, prev.Casters.Select(c => c.Address).ToHashSet(StringComparer.Ordinal));
+            }
+            else
+            {
+                var term = TermOf(prev, bySeq);
+                if (term == null || r.EffectiveFromHeight <= term.LapseHeight) return "a rotation follows an elected committee only";
+                if (!string.Equals(r.EpochHash, VrfSeed.BlockHashAt(term.LapseHeight), StringComparison.OrdinalIgnoreCase)) return "the rotation is for another block than this chain's lapse block";
+                if (r.Rung == 0 && r.EffectiveFromHeight != term.LapseHeight + HandoverBlocks) return "rung 0 of a rotation takes effect at the lapse + the handover";
+                epoch = EpochForRotation(term, prev);
+            }
+            return ContentRefusal(epoch, prev, r);
         }
 
         /// <summary>The committee of a block that carries a valid record, or null: it needs no record held here to be judged.</summary>

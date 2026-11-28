@@ -61,13 +61,15 @@ namespace VerifiedXCore.Tests
         }
 
         /// <summary>
-        /// An election took effect after the anchor was pinned and before the chain started: it rode on the block at its
-        /// effective height, which this chain holds. The run that starts the chain keeps it, so the chain starts with the
-        /// elected committee and not the older one, which may have no live signers left. A run that claims an election the
-        /// chain's block does not carry is refused, and a caster holding the election does not certify a start without it.
+        /// An election this node holds as in force before the chain started, which no electorate ratified (it carries no
+        /// signatures), and which this chain's stored block at its effective height even carries: the run that starts the
+        /// chain may not put it in force, since the stored copy of a record outside the hash proves nothing. The producer
+        /// stops before it, and a caster holding it as in force does not certify that start either: a start that leaves
+        /// out a replacement in force here would revert it, so the chain waits. A caster does not certify a start that puts
+        /// in force an election it does not hold as in force. (A ratified one is kept: VreeElectionTests.)
         /// </summary>
         [Fact]
-        public async Task AnElectionBeforeTheStart_IsKept_NotReverted()
+        public async Task AStartNeverRevertsOrInventsAnElection()
         {
             var priorVree = Globals.VreeActivationHeight;
             Globals.VreeActivationHeight = 1;
@@ -78,17 +80,16 @@ namespace VerifiedXCore.Tests
                 BlockchainData.GetBlocks().InsertSafe(new Block { Height = 60, Hash = "h60-election", Transactions = new List<Transaction>(), MembershipRecord = election });
                 Hold(election);
 
-                var withoutIt = NextBlock(null, new List<CasterMembershipRecord> { _anchor });
-                Assert.NotNull(MembershipChain.ActivationSigningRefusal(withoutIt));    // a caster holding it does not certify this start
-                var notCarried = Record(_anchor.RecordSeq + 1, 61, _anchor.RecordHash, Casters.Skip(1), VreeElection.EmergencyElectionChangeType);
-                Assert.Contains("does not carry it", MembershipChain.RunRefusal(NextBlock(null, new List<CasterMembershipRecord> { _anchor, notCarried })) ?? "");
-
+                Assert.NotNull(MembershipChain.RunRefusal(NextBlock(null, new List<CasterMembershipRecord> { _anchor, election })));
                 var block = await Craft();
+                Assert.Equal(new[] { _anchor.RecordHash }, block.MembershipRun!.Select(r => r.RecordHash));
+                Assert.NotNull(MembershipChain.ActivationSigningRefusal(block));     // reverts the election in force here
 
-                Assert.Equal(new[] { _anchor.RecordHash, election.RecordHash }, block.MembershipRun!.Select(r => r.RecordHash));
-                Assert.Null(MembershipChain.ActivationSigningRefusal(block));
-                await Commit(block, null);
-                Assert.Equal(election.RecordHash, MembershipChain.RecordFor(Tip + 1)!.RecordHash);
+                Hold(_anchor);
+                Data.DbContext.DB_Config!.GetCollection<CasterMembershipRecord>("rsrv_caster_membership").Delete(election.RecordSeq);
+                CasterMembershipStore.InvalidateCache();
+                Assert.NotNull(MembershipChain.ActivationSigningRefusal(NextBlock(null, new List<CasterMembershipRecord> { _anchor, election }))); // not in force here
+                Assert.Null(MembershipChain.ActivationSigningRefusal(NextBlock(null, new List<CasterMembershipRecord> { _anchor })));
             }
             finally { Globals.VreeActivationHeight = priorVree; }
         }

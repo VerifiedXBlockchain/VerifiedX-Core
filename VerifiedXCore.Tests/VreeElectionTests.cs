@@ -2505,5 +2505,57 @@ namespace VerifiedXCore.Tests
             Assert.Contains("\"RatifyNeed\":8", json);
             Assert.Contains("\"ReachNeed\":5", json);
         }
+    
+        // ── The run that starts the membership chain keeps an election ───────────────────────────
+
+        /// <summary>
+        /// An election took effect before the membership chain started, and the run that starts the chain carries it after the
+        /// anchor. A node that downloaded the election's block without its record or certificate (both outside the block
+        /// hash), and that holds no membership records at all, judges that run as every node does: by the election's own
+        /// signatures against the record before it, on this chain's block hashes. A made-up election, or one for another
+        /// block, is refused all the same.
+        /// </summary>
+        [Fact]
+        public void TheStartingRunsElection_IsJudgedTheSameOnANodeThatDownloadedItsBlockStripped()
+        {
+            var priorHeight = Globals.MembershipChainHeight;
+            var priorAnchor = Globals.MembershipAnchorRecordHash;
+            try
+            {
+                var election = Ratified(0);
+                Store(election);
+                var elsewhere = Ratified(0);
+                elsewhere.EpochHash = "another-block";
+                elsewhere.RecordHash = CasterMembershipStore.ComputeRecordHash(elsewhere);
+                var start = H + 10;
+                Globals.MembershipChainHeight = start;
+                Globals.MembershipAnchorRecordHash = _head.RecordHash;
+                MembershipChain.ResetForTests();
+                _blocks[H + 1] = new Block { Height = H + 1, Hash = VrfSeed.BlockHashAt(H + 1), PrevHash = VrfSeed.BlockHashAt(H), Version = 4 }; // stripped: no record, no certificate
+
+                // The producer, holding both, starts the chain with the election kept.
+                var crafted = new Block { Height = start };
+                MembershipChain.AttachPending(crafted);
+                Assert.Equal(new[] { _head.RecordHash, election.RecordHash }, crafted.MembershipRun!.Select(r => r.RecordHash));
+
+                DbContext.DB_Config!.GetCollection<CasterMembershipRecord>("rsrv_caster_membership").DeleteAll();         // and no records held here
+                CasterMembershipStore.InvalidateCache();
+                MembershipChain.ResetForTests();
+                Block Starting(params CasterMembershipRecord[] run) => new Block { Height = start, MembershipRun = run.ToList() };
+
+                Assert.Null(MembershipChain.RunRefusal(Starting(_head, election)));
+
+                var view = VreeElection.EpochForStall(H, VrfSeed.BlockHashAt(H), _committee.Select(m => m.Address).ToHashSet(StringComparer.Ordinal))!;
+                var tooFew = Signed(Ordinary(HeadSeq + 1, H + 1, _head.RecordHash, _electors.Take(5), VreeElection.EmergencyElectionChangeType), _electors.Take(view.RatifyNeeded));
+                Assert.NotNull(MembershipChain.RunRefusal(Starting(_head, tooFew)));         // a set the epoch does not give
+                Assert.NotNull(MembershipChain.RunRefusal(Starting(_head, elsewhere)));      // for another block
+            }
+            finally
+            {
+                Globals.MembershipChainHeight = priorHeight;
+                Globals.MembershipAnchorRecordHash = priorAnchor;
+                MembershipChain.ResetForTests();
+            }
+        }
     }
 }

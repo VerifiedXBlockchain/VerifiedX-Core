@@ -74,9 +74,10 @@ namespace VerifiedXCore.Tests
                 ["CasterMembershipStore.ValidateBootstrapReset"] = 1,
                 // A producer offers the records it holds (AttachPending); each is judged as every verifier judges it, and a
                 // block without them is taken, so what one node holds never decides a verdict. A caster declines to certify
-                // a start that leaves out an election or reset it holds (ActivationSigningRefusal): its signature only.
+                // a start that leaves out an election or reset it holds, or puts in force one it does not hold as in force
+                // (ActivationSigningRefusal): its signature only.
                 ["CasterMembershipStore.GetSince"] = 1,
-                ["CasterMembershipStore.GetBySeq"] = 2,
+                ["CasterMembershipStore.GetBySeq"] = 3,
                 ["CasterMembershipStore.HeldForHeight"] = 1,
                 // After a block is written this node's records are brought to the chain's (a write; no verdict reads it).
                 ["CasterMembershipStore.FollowChain"] = 1,
