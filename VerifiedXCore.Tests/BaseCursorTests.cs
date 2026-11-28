@@ -129,6 +129,33 @@ namespace VerifiedXCore.Tests
         }
 
         /// <summary>
+        /// Three providers: one answers ranges of 100 blocks at most, one of 200, and the third names a finalized block
+        /// but does not hold the blocks the ranges end at, so its reads never count. The watch reads at a span the two
+        /// that work both take, and moves on. Sized by the third's untouched span as well, the range stayed at what only
+        /// the 200-block provider reads, and the cursor stopped with two providers working.
+        /// </summary>
+        [Fact]
+        public async Task TwoWorkingProvidersWithDifferentCaps_KeepTheWatchMoving_BesideOneThatCannotReadTheRange()
+        {
+            var all = Providers(3);
+            all.At(5_000);
+            all[0].LogRangeCap = 100;
+            all[1].LogRangeCap = 200;
+            all[2].HeldUpTo = 3_000; // it gives 5,000 as final, and holds no block the watch reads to
+            StartAt(4_000);
+            all.AddBurn(NewBurn(), Contract, vfxExit: true, 300_000, "xDestination", blockNumber: 4_900);
+
+            var taken = 0;
+            for (var i = 0; i < 80 && Cursor.LastScannedBlock < 5_000; i++)
+                taken += (await BaseBridgeExitWatchService.PollOnce()).Processed;
+
+            Assert.Equal(5_000, Cursor.LastScannedBlock);
+            Assert.True(taken >= 1);
+            Assert.InRange(BaseBridgeExitWatchService.CurrentSpan, 1, 100); // what both working providers take
+            Assert.True(all[2].CallsTo("eth_getLogs") > 0);                 // the third was asked all along; its reads did not count
+        }
+
+        /// <summary>
         /// The providers give 5,000 as final, but the backends that answer for blocks and logs hold the chain only up to
         /// 4,992: they answer the range with no logs and no error. That is not "no burns": the cursor stays until the
         /// providers hold the block the range ends at, and the burn in it is then read.

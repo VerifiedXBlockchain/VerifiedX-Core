@@ -37,6 +37,13 @@ namespace VerifiedXCore.Bitcoin.Services
         internal sealed class SpanState
         {
             public int Span = MaxBlockSpan;
+            /// <summary>
+            /// Whether this provider's read of the last range it was asked for counted toward passing it (true until one
+            /// does not). One whose read did not count, for whatever reason (it refused the range, it is not on Base or
+            /// its logs are not Base's, it does not hold the block the range ended at, it did not answer), is left out
+            /// when the next range is sized, until a read of its counts again.
+            /// </summary>
+            public bool ReadLast = true;
             private int _good;
             private int _refused = int.MaxValue;
 
@@ -70,14 +77,18 @@ namespace VerifiedXCore.Bitcoin.Services
         private static SpanState SpanOf(string provider) => Spans.GetOrAdd(provider, _ => new SpanState());
 
         /// <summary>
-        /// The span a range is read at: the widest that BaseRpc.RequiredAgreement of <paramref name="providers"/> take now,
-        /// which is what it takes to pass the range. One provider with a low cap or a bad moment does not narrow it for
-        /// the others.
+        /// The span a range is read at. A range is passed only when BaseRpc.RequiredAgreement providers read it, so the
+        /// span is the widest that so many of the providers that read their last range take: one provider with a low
+        /// cap or a bad moment does not narrow it for the others, and one that is not reading at all does not widen it
+        /// past what the others take (its own span says nothing while it reads nothing). When fewer than that read
+        /// their last range, the span is the narrowest any of <paramref name="providers"/> takes: the range most of
+        /// them can read.
         /// </summary>
         internal static int SpanFor(IEnumerable<string> providers)
         {
-            var spans = providers.Select(p => SpanOf(p).Span).OrderByDescending(n => n).ToList();
-            return spans.Count >= BaseRpc.RequiredAgreement ? spans[BaseRpc.RequiredAgreement - 1] : spans.DefaultIfEmpty(MaxBlockSpan).Min();
+            var states = providers.Select(SpanOf).ToList();
+            var reading = states.Where(s => s.ReadLast).Select(s => s.Span).OrderByDescending(n => n).ToList();
+            return reading.Count >= BaseRpc.RequiredAgreement ? reading[BaseRpc.RequiredAgreement - 1] : states.Select(s => s.Span).DefaultIfEmpty(MaxBlockSpan).Min();
         }
 
         private static bool _behind;
@@ -507,7 +518,8 @@ namespace VerifiedXCore.Bitcoin.Services
                 return (0, state.LastScannedBlock, "No new blocks");
 
             // Every provider final up to the range's end is asked for it (there are BaseRpc.RequiredAgreement at least).
-            var span = _span = SpanFor(providers.Where(p => p.Final.Number >= from).Select(p => p.Provider));
+            // The range is sized by the providers that are final up to the watch's head, which are asked for any range.
+            var span = _span = SpanFor(providers.Where(p => p.Final.Number >= latest).Select(p => p.Provider));
             var to = Math.Min(from + span - 1, latest);
             var asked = providers.Where(p => p.Final.Number >= to).Select(p => p.Provider).ToList();
             var contract = BaseBridgeService.VBTCbContractAddress;
@@ -572,6 +584,7 @@ namespace VerifiedXCore.Bitcoin.Services
                 var spanState = SpanOf(read.Provider);
                 if (!read.Read)
                 {
+                    spanState.ReadLast = false;
                     if (!read.ProviderAtFault)
                     {
                         rangeFaults++;
@@ -581,7 +594,8 @@ namespace VerifiedXCore.Bitcoin.Services
                         "BaseBridgeExitWatchService.PollOnceInternal");
                     continue;
                 }
-                if (read.Value.Hash == endHash) readBy++;
+                spanState.ReadLast = read.Value.Hash == endHash;
+                if (spanState.ReadLast) readBy++;
                 spanState.Span = spanState.AfterSuccess(span);
                 var ids = BurnIdsOf(read.Value.Vfx.Select(e => e.Log).Concat(read.Value.Btc.Select(e => e.Log)));
                 foreach (var ev in read.Value.Vfx)
