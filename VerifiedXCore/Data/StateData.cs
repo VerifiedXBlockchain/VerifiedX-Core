@@ -238,6 +238,8 @@ namespace VerifiedXCore.Data
                 PrivacyDbContext.PRIV_COMMITMENTS, PrivacyDbContext.PRIV_NULLIFIERS, PrivacyDbContext.PRIV_POOL_STATE, PrivacyDbContext.PRIV_MERKLE_NODES,
                 // Bridge lock and exit state and consumed burns.
                 Bitcoin.Models.VBTCBridgeLockState.CollectionName, Bitcoin.Models.VBTCBridgeBtcExitState.CollectionName, Bitcoin.Models.VBTCBridgeConsumedBurn.CollectionName,
+                // Contracts' ledgers once they have moved (Globals.VaultLedgerHeight).
+                Bitcoin.Attestation.VaultLedgerStore.CollectionName,
             };
             // Bitcoin attestation and validator bonds.
             names.UnionWith(Bitcoin.Attestation.BtcAttestStore.AllCollections);
@@ -336,6 +338,24 @@ namespace VerifiedXCore.Data
             // fails on this node is counted like a transaction that failed to apply: the block's state is reported as
             // incomplete, so the node is flagged, not left quietly holding other state than its peers.
             var blockStartFailed = false;
+            if (block.Height >= Globals.VaultLedgerHeight)
+            {
+                // The contracts' ledgers move into their own collection at the height (or at the first block after it on a
+                // state that crossed it unmoved). A move cut short is finished at the next block: each contract moves in one
+                // write, and the marker is set once all have.
+                try
+                {
+                    var moved = VerifiedXCore.Bitcoin.Attestation.VaultLedgerStore.MoveAll(block.Height);
+                    if (moved > 0)
+                        LogUtility.Log($"Block {block.Height}: the ledgers of {moved} contract(s) moved into their own collection.", "StateData.UpdateTreis() - block start");
+                }
+                catch (Exception ex)
+                {
+                    if (IsNodeLocalFault(ex)) blockStartFailed = true;
+                    NoteApplyStepFailed(block.Height, ex);
+                    ErrorLogUtility.LogError($"Block {block.Height}: moving the contracts' ledgers failed (finished at the next block): {ex}", "StateData.UpdateTreis() - block start");
+                }
+            }
             if (block.Height == Globals.BridgeFailKeepsLocksHeight)
             {
                 try { VBTCBridgeLockState.GiveBackFailBlacklisted(); } // locks blacklisted by failed exits before it
@@ -2023,6 +2043,7 @@ namespace VerifiedXCore.Data
             }
             catch (Exception ex)
             {
+                NoteApplyStepFailed(tx.Height, ex); // a fault of this node's storage is flagged, as the other applies do
                 ErrorLogUtility.LogError("Failed to deserialized TX Data for BTC ADNR", "StateData.AddNewBTCAdnr()");
             }
         }
@@ -2104,6 +2125,7 @@ namespace VerifiedXCore.Data
             }
             catch (Exception ex)
             {
+                NoteApplyStepFailed(tx.Height, ex); // a fault of this node's storage is flagged, as the other applies do
                 ErrorLogUtility.LogError($"Failed to delete BTC ADNR at state level! Error: {ex}", "StateData.DeleteBTCAdnr()");
             }
         }
@@ -2153,6 +2175,7 @@ namespace VerifiedXCore.Data
             }
             catch(Exception ex)
             {                
+                NoteApplyStepFailed(tx.Height, ex); // a fault of this node's storage is flagged, as the other applies do
                 ErrorLogUtility.LogError("Failed to add ADNR at state level!", "StateData.AddNewAdnr()");
             }
         }
@@ -2179,6 +2202,7 @@ namespace VerifiedXCore.Data
             }
             catch (Exception ex)
             {                
+                NoteApplyStepFailed(tx.Height, ex); // a fault of this node's storage is flagged, as the other applies do
                 ErrorLogUtility.LogError("Failed to delete ADNR State Level!", "StateData.DeleteAdnr()");
             }
         }
@@ -2353,6 +2377,7 @@ namespace VerifiedXCore.Data
                     }
                     catch (Exception ex)
                     {
+                        NoteApplyStepFailed(tx.Height, ex); // a fault of this node's storage is flagged, as the other applies do
                         ErrorLogUtility.LogError($"Failed to sync VBTCContractV2 owner: {ex.Message}", "StateData.TransferSmartContract()");
                     }
                 }
@@ -2568,6 +2593,7 @@ namespace VerifiedXCore.Data
             }
             catch (Exception ex)
             {
+                NoteApplyStepFailed(tx.Height, ex); // a fault of this node's storage is flagged, as the other applies do
                 ErrorLogUtility.LogError($"DeployTokenContract error: {ex.Message}. TX: {tx.Hash}", "StateData.DeployTokenContract()");
             }
         }
@@ -3025,6 +3051,7 @@ namespace VerifiedXCore.Data
             }
             catch (Exception ex)
             {
+                NoteApplyStepFailed(tx.Height, ex); // a fault of this node's storage is flagged, as the other applies do
                 ErrorLogUtility.LogError($"Failed to save TW From Arb. ERROR: {ex}", "StateData.TokenizedWithdrawalRequest()");
             }
         }
@@ -3087,6 +3114,7 @@ namespace VerifiedXCore.Data
             }
             catch (Exception ex)
             {
+                NoteApplyStepFailed(tx.Height, ex); // a fault of this node's storage is flagged, as the other applies do
                 ErrorLogUtility.LogError($"Failed to complete TW. ERROR: {ex}", "StateData.TokenizedWithdrawalComplete()");
             }
         }
@@ -4380,6 +4408,7 @@ namespace VerifiedXCore.Data
             }
             catch (Exception ex)
             {
+                NoteApplyStepFailed(tx.Height, ex); // a fault of this node's storage is flagged, as the other applies do
                 ErrorLogUtility.LogError($"ApplyVBTCBridgeExitToBTCComplete error: {ex.Message}", "StateData.ApplyVBTCBridgeExitToBTCComplete()");
             }
         }
@@ -4488,6 +4517,7 @@ namespace VerifiedXCore.Data
             }
             catch (Exception ex)
             {
+                NoteApplyStepFailed(tx.Height, ex); // a fault of this node's storage is flagged, as the other applies do
                 ErrorLogUtility.LogError($"ApplyVBTCBridgeExitToBTCFail error: {ex.Message}", "StateData.ApplyVBTCBridgeExitToBTCFail()");
             }
         }
@@ -4601,6 +4631,7 @@ namespace VerifiedXCore.Data
             }
             catch (Exception ex)
             {
+                NoteApplyStepFailed(tx.Height, ex); // a fault of this node's storage is flagged, as the other applies do
                 NoteWithdrawalStoreStepFailed(tx.Height, ex); // a fault on this node only: flagged, not left as other state than its peers' (fourth review, round 3)
                 ErrorLogUtility.LogError($"RequestVBTCV2Withdrawal error: {ex.Message}", "StateData.RequestVBTCV2Withdrawal()");
             }
@@ -4709,6 +4740,7 @@ namespace VerifiedXCore.Data
             }
             catch (Exception ex)
             {
+                NoteApplyStepFailed(tx.Height, ex); // a fault of this node's storage is flagged, as the other applies do
                 NoteWithdrawalStoreStepFailed(tx.Height, ex); // a fault on this node only: flagged, not left as other state than its peers' (fourth review, round 3)
                 ErrorLogUtility.LogError($"RequestVBTCV2WithdrawalMulti error: {ex.Message}", "StateData.RequestVBTCV2WithdrawalMulti()");
             }
@@ -4829,6 +4861,7 @@ namespace VerifiedXCore.Data
             }
             catch (Exception ex)
             {
+                NoteApplyStepFailed(tx.Height, ex); // a fault of this node's storage is flagged, as the other applies do
                 NoteWithdrawalStoreStepFailed(tx.Height, ex); // a fault on this node only (a data fault stays a no-op everywhere)
                 ErrorLogUtility.LogError($"CompleteVBTCV2Withdrawal error: {ex.Message}", "StateData.CompleteVBTCV2Withdrawal()");
             }
@@ -4934,6 +4967,7 @@ namespace VerifiedXCore.Data
             }
             catch (Exception ex)
             {
+                NoteApplyStepFailed(tx.Height, ex); // a fault of this node's storage is flagged, as the other applies do
                 NoteWithdrawalStoreStepFailed(tx.Height, ex); // a fault on this node only (a data fault stays a no-op everywhere)
                 ErrorLogUtility.LogError($"CancelVBTCV2Withdrawal error: {ex.Message}", "StateData.CancelVBTCV2Withdrawal()");
             }

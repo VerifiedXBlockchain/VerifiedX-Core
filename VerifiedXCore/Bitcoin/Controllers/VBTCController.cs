@@ -2257,9 +2257,7 @@ namespace VerifiedXCore.Bitcoin.Controllers
                 }
                 if (scState != null && VerifiedXCore.Bitcoin.Attestation.VaultLedgerStore.HasLedger(scState))
                 {
-                    var tokenTxs = VerifiedXCore.Bitcoin.Attestation.VaultLedgerStore.Rows(scState)
-                        .Where(x => x.FromAddress == payload.VFXAddress || x.ToAddress == payload.VFXAddress).ToList();
-                    var vbtcBalance = tokenTxs.Sum(x => x.Amount);
+                    var vbtcBalance = VerifiedXCore.Bitcoin.Attestation.VaultLedgerStore.Balance(scState, payload.VFXAddress);
                     if (payload.Amount > vbtcBalance)
                     {
                         return JsonConvert.SerializeObject(new { Success = false, Message = $"Insufficient vBTC balance. Available: {vbtcBalance}, Requested: {payload.Amount}" });

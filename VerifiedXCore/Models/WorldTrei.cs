@@ -16,6 +16,11 @@ namespace VerifiedXCore.Models
         /// it and a restore brings back the value that matches the restored balances (see StateData.ApplyForgedVfxBurnsAsync).
         /// </summary>
         public long ForgedVfxBurnAppliedHeight { get; set; }
+        /// <summary>
+        /// The block height at which this state's contract ledgers moved into their own collection (Globals.VaultLedgerHeight,
+        /// Bitcoin.Attestation.VaultLedgerStore.MoveAll); 0 before. Kept in the state it describes, as the forged-burn marker is.
+        /// </summary>
+        public long VaultLedgerMovedHeight { get; set; }
         public static WorldTrei GetWorldTreiRecord()
         {
             var wTrei = DbContext.DB_WorldStateTrei.GetCollection<WorldTrei>(DbContext.RSRV_WSTATE_TREI);

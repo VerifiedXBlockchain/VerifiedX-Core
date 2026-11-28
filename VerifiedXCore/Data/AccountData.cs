@@ -324,8 +324,7 @@ namespace VerifiedXCore.Data
 			var allContracts = scStateTrei.Query().ToEnumerable();
 			var contractsWithBalance = allContracts.Where(contract =>
 				VerifiedXCore.Bitcoin.Attestation.VaultLedgerStore.HasLedger(contract) &&
-				VerifiedXCore.Bitcoin.Attestation.VaultLedgerStore.Rows(contract).Any(tx =>
-					tx.ToAddress == address || tx.FromAddress == address));
+				VerifiedXCore.Bitcoin.Attestation.VaultLedgerStore.Names(contract, address));
 
 			if (contractsWithBalance.Any())
 			{

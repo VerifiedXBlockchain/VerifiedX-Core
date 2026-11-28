@@ -732,9 +732,7 @@ namespace VerifiedXCore.Services
                         var scState = SmartContractStateTrei.GetSmartContractState(scUID);
                         if (VerifiedXCore.Bitcoin.Attestation.VaultLedgerStore.HasRows(scState))
                         {
-                            var senderLedger = VerifiedXCore.Bitcoin.Attestation.VaultLedgerStore.Rows(scState)
-                                .Where(x => x.FromAddress == fromAddress || x.ToAddress == fromAddress)
-                                .Sum(x => x.Amount);
+                            var senderLedger = VerifiedXCore.Bitcoin.Attestation.VaultLedgerStore.Balance(scState, fromAddress);
                             SCLogUtility.Log($"VBTC-TRACE [2-Handler]: sender post-transfer ledger sum: {senderLedger} (informational — TX already committed)",
                                 "BlockTransactionValidatorService.ProcessIncomingTransactions()");
                         }
