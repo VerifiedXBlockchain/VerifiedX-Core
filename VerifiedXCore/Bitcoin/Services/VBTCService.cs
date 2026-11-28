@@ -3458,7 +3458,8 @@ namespace VerifiedXCore.Bitcoin.Services
             List<PoolUnlockAllocation> allocations,
             List<BtcExitWithdrawalRecord>? btcWithdrawals = null,
             IReadOnlyList<CasterConsensusVote>? casterConsensusVotes = null,
-            long minPayoutSats = 0)
+            long minPayoutSats = 0,
+            string baseBurner = "")
         {
             try
             {
@@ -3486,12 +3487,14 @@ namespace VerifiedXCore.Bitcoin.Services
                     CasterConsensusVotes = casterConsensusVotes
                 };
                 var txData = JsonConvert.SerializeObject(dataObject);
-                // The holder's least payout (Globals.ExitMinPayoutHeight), as the votes are bound to it.
-                if (minPayoutSats > 0)
+                // The holder's least payout (Globals.ExitMinPayoutHeight) and the Base address that burned
+                // (Globals.ExitPartRefundHeight), as the votes are bound to them.
+                if (minPayoutSats > 0 || !string.IsNullOrWhiteSpace(baseBurner))
                 {
-                    var withMinimum = JObject.FromObject(dataObject);
-                    withMinimum["MinPayoutSats"] = minPayoutSats;
-                    txData = withMinimum.ToString(Formatting.None);
+                    var withMore = JObject.FromObject(dataObject);
+                    if (minPayoutSats > 0) withMore["MinPayoutSats"] = minPayoutSats;
+                    if (!string.IsNullOrWhiteSpace(baseBurner)) withMore["BaseBurner"] = baseBurner.Trim().ToLowerInvariant();
+                    txData = withMore.ToString(Formatting.None);
                 }
 
                 var tx = new Transaction

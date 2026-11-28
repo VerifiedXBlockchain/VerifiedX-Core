@@ -276,6 +276,7 @@ namespace VerifiedXCore.Bitcoin.Services
                     CompletionVfxTxHash = exit.IsFailedRecord ? "" : exit.ExitTxHash,
                     AllocationsJson = exit.AllocationsJson ?? "",
                     MinPayoutSats = exit.MinPayoutSats,
+                    BurnerAddress = exit.BaseBurner ?? "",
                     DetectedAtBlock = currentHeight,
                 };
                 reloaded++;
@@ -527,7 +528,7 @@ namespace VerifiedXCore.Bitcoin.Services
             if (RefundReasonFor(r, nextHeight) != null)
                 return BridgeCasterConsensus.BuildRefundVoteMessage(r.BaseBurnTxHash, amountSats, r.BurnerAddress, timestamp);
             if (r.ExitType == BurnExitType.BtcExit)
-                return BridgeCasterConsensus.BuildExitVoteMessage(r.BaseBurnTxHash, amountSats, r.BtcDestination, r.MinPayoutSats, nextHeight, timestamp);
+                return BridgeCasterConsensus.BuildExitVoteMessage(r.BaseBurnTxHash, amountSats, r.BtcDestination, r.MinPayoutSats, nextHeight, timestamp, r.BurnerAddress);
             return BridgeCasterConsensus.BuildBoundVoteMessage(r.BaseBurnTxHash, BurnTypeString(r.ExitType), amountSats, r.VfxDestinationAddress, timestamp);
         }
 
@@ -1301,7 +1302,8 @@ namespace VerifiedXCore.Bitcoin.Services
                     allSuccessfulAllocations,
                     null, // No BTC withdrawals yet — reservation only
                     record.ConsensusVotes,
-                    minPayoutSats: VBTCService.NextBlockHeight >= Globals.ExitMinPayoutHeight ? record.MinPayoutSats : 0);
+                    minPayoutSats: VBTCService.NextBlockHeight >= Globals.ExitMinPayoutHeight ? record.MinPayoutSats : 0,
+                    baseBurner: VBTCService.NextBlockHeight >= Globals.ExitPartRefundHeight ? record.BurnerAddress : "");
 
                 if (!exitResult.Success)
                 {

@@ -25,13 +25,15 @@ namespace VerifiedXCore.Bitcoin.Services
             $"VFX_BRIDGE_BURN_V2|{baseBurnTxHash}|{burnType}|{amountSats}|{(destination ?? string.Empty).Trim()}|{timestamp}";
 
         /// <summary>
-        /// The bound vote for a Bitcoin exit judged at <paramref name="height"/>: the plain bound vote, and from
-        /// Globals.ExitMinPayoutHeight also the holder's least payout ("|min=N" before the timestamp; 0 for none), so an exit
-        /// carrying another minimum than the casters read on Base has no votes.
+        /// The bound vote for a Bitcoin exit judged at <paramref name="height"/>: the plain bound vote; from
+        /// Globals.ExitPartRefundHeight also the Base address that burned ("|burner=0x..." in lower case, empty for none), and
+        /// from Globals.ExitMinPayoutHeight the holder's least payout ("|min=N", 0 for none), both before the timestamp, so an
+        /// exit carrying another burner or minimum than the casters read on Base has no votes.
         /// </summary>
-        public static string BuildExitVoteMessage(string baseBurnTxHash, long amountSats, string destination, long minPayoutSats, long height, long timestamp)
+        public static string BuildExitVoteMessage(string baseBurnTxHash, long amountSats, string destination, long minPayoutSats, long height, long timestamp, string? burner = null)
         {
-            var extras = height >= Globals.ExitMinPayoutHeight ? $"|min={minPayoutSats}" : "";
+            var extras = height >= Globals.ExitPartRefundHeight ? $"|burner={(burner ?? string.Empty).Trim().ToLowerInvariant()}" : "";
+            if (height >= Globals.ExitMinPayoutHeight) extras += $"|min={minPayoutSats}";
             return $"VFX_BRIDGE_BURN_V2|{baseBurnTxHash}|BTC_EXIT|{amountSats}|{(destination ?? string.Empty).Trim()}{extras}|{timestamp}";
         }
 

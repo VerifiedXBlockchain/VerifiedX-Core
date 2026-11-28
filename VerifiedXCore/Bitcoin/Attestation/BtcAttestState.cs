@@ -267,6 +267,11 @@ namespace VerifiedXCore.Bitcoin.Attestation
         /// what its first transaction must pay at least and what a fee raise does not go below. 0: none.
         /// </summary>
         public long MinPayoutShareSats { get; set; }
+        /// <summary>
+        /// The block a voided bridge exit part that its vault could not pay was closed in and refunded to the burner
+        /// (Globals.ExitPartRefundHeight); 0 for any other row. Its exit counts it as done and as having paid.
+        /// </summary>
+        public long ExitRefundedAtVfxHeight { get; set; }
         public List<VaultPin> Pins { get; set; } = new();
         public string? SettledTxid { get; set; }
         public long ClosedAtVfxHeight { get; set; }

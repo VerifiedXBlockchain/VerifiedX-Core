@@ -279,7 +279,8 @@ namespace VerifiedXCore.Bitcoin.Attestation
             // the exit is then paying, and its other parts are fixed each as it can be.
             if (parts.Where(p => p.State == VaultWithdrawalState.Waiting).Count(p => ClaimRememberedPayment(p, vfxHeight, db)) > 0)
                 parts = BtcAttestStore.ExitParts(anyPart.RequestHash, anyPart.RequestVfxHeight, db).OrderBy(p => p.Ref, StringComparer.Ordinal).ToList();
-            var committed = parts.Any(p => p.State is VaultWithdrawalState.Pinned or VaultWithdrawalState.Settled);
+            // A part refunded by rule (Globals.ExitPartRefundHeight) has paid too: the exit is paying.
+            var committed = parts.Any(p => p.State is VaultWithdrawalState.Pinned or VaultWithdrawalState.Settled || RefundedByRule(p));
             if (!committed && OpenParts(parts, vfxHeight, db).Any(p => p.State != VaultWithdrawalState.Waiting)) return false;
 
             var built = new List<(VaultWithdrawalRow Row, BtcCanonicalTx? Tx, string? Reason)>();
@@ -459,6 +460,68 @@ namespace VerifiedXCore.Bitcoin.Attestation
         private static List<VaultWithdrawalRow> OpenParts(IEnumerable<VaultWithdrawalRow> parts, long vfxHeight, LiteDatabase? db) =>
             vfxHeight >= Globals.ExitPartTakeoverHeight ? parts.Where(p => !ClosedAsNeverPayable(p, vfxHeight, db)).ToList() : parts.ToList();
 
+        /// <summary>A part of an exit closed void and refunded to the burner by rule (Globals.ExitPartRefundHeight).</summary>
+        private static bool RefundedByRule(VaultWithdrawalRow part) => part.ExitRefundedAtVfxHeight > 0;
+
+        /// <summary>
+        /// From Globals.ExitPartRefundHeight, every <see cref="BtcAttestRules.TakeRetryBlocks"/> blocks: a part of an exit
+        /// that is paying (another part paid, pinned or refunded), voided and reopened, and still waiting
+        /// <see cref="BtcAttestRules.ExitPartRefundBlocks"/> Bitcoin blocks after its voiding spend is buried, is tried once
+        /// more on its vault's free coins; if they still cannot pay it, it is closed void, its locks are given back once
+        /// (<see cref="GiveBackVoided"/>), and the chain records a refund of exactly its satoshis to the exit's burner
+        /// (VBTCBridgeRefundState "{burn}#{vault}"). Its earlier transaction stays dead: a later rewind does not revive a
+        /// closed part (ReviveVoidedExitParts takes only waiting ones), as a voided withdrawal whose requester was refunded
+        /// stays closed. An exit recorded without a burner has nobody to refund and keeps waiting. A function of state and
+        /// height: every node closes the same parts at the same block.
+        /// </summary>
+        private static void RefundUnpaidExitParts(long vfxHeight, LiteDatabase? db)
+        {
+            if (vfxHeight < Globals.ExitPartRefundHeight || vfxHeight % BtcAttestRules.TakeRetryBlocks != 0) return;
+            var through = BtcAttestStore.GetMeta(db)?.EventsThroughHeight ?? 0;
+            foreach (var stranded in BtcAttestStore.WithdrawalsInState(VaultWithdrawalState.Waiting, db)
+                         .Where(r => r.IsBridgeExit && r.ReopenedAtBitcoinHeight > 0
+                             && through >= r.ReopenedAtBitcoinHeight + BtcAttestRules.ExitReopenBurialBlocks + BtcAttestRules.ExitPartRefundBlocks)
+                         .OrderBy(r => r.Ref, StringComparer.Ordinal).ToList())
+            {
+                var exit = VBTCBridgeBtcExitState.GetByBurnHash(stranded.ExitBurnHash ?? "");
+                if (exit == null || exit.IsComplete || !IsPartOf(stranded, exit) || string.IsNullOrEmpty(exit.BaseBurner)) continue;
+                var others = BtcAttestStore.ExitParts(stranded.RequestHash, stranded.RequestVfxHeight, db).Where(p => p.Ref != stranded.Ref).ToList();
+                if (!others.Any(p => p.State is VaultWithdrawalState.Settled or VaultWithdrawalState.Pinned || RefundedByRule(p))) continue;
+                TryPinExit(stranded, vfxHeight, db); // its vault's free coins, once more
+                var part = BtcAttestStore.Withdrawal(stranded.Ref, db);
+                if (part == null || part.State != VaultWithdrawalState.Waiting) continue;
+
+                var why = $"its vault could not pay it {BtcAttestRules.ExitPartRefundBlocks} Bitcoin blocks after the spend that voided its transaction was buried; refunded to {exit.BaseBurner}";
+                part.State = VaultWithdrawalState.Void;
+                part.ClosedAtVfxHeight = vfxHeight;
+                part.ExitRefundedAtVfxHeight = vfxHeight;
+                part.WaitingReason = why;
+                BtcAttestStore.SaveWithdrawal(part, db);
+                foreach (var allocation in AllocationsOf(exit).Where(a => VaultOfLock(a) == part.SmartContractUID))
+                    GiveBackVoided(allocation, vfxHeight, why);
+                VBTCBridgeRefundState.TryInsert(new VBTCBridgeRefundState
+                {
+                    RefundId = VBTCBridgeRefundState.PartRefundId(exit.BaseBurnTxHash, part.SmartContractUID),
+                    BaseBurnTxHash = exit.BaseBurnTxHash,
+                    BaseBurner = exit.BaseBurner,
+                    AmountSats = part.AmountSats,
+                    Reason = VBTCBridgeRefundState.ExitPartUnpaidReason,
+                    VfxTxHash = exit.ExitTxHash,
+                    VfxHeight = vfxHeight,
+                });
+
+                var parts = BtcAttestStore.ExitParts(part.RequestHash, part.RequestVfxHeight, db);
+                if (parts.All(p => p.State == VaultWithdrawalState.Settled || ClosedAsNeverPayable(p, vfxHeight, db) || RefundedByRule(p)))
+                {
+                    exit.IsComplete = true;
+                    exit.BtcTxHash = string.Join(",", parts.Where(p => p.State == VaultWithdrawalState.Settled).OrderBy(p => p.Ref, StringComparer.Ordinal).Select(p => p.SettledTxid));
+                    VBTCBridgeBtcExitState.Update(exit);
+                }
+                SCLogUtility.Log($"Bridge exit for burn {exit.BaseBurnTxHash}: the part on vault {part.SmartContractUID} ({part.AmountSats} sats) is closed by rule at block {vfxHeight}: {why}.",
+                    "BtcWithdrawals.RefundUnpaidExitParts()");
+            }
+        }
+
         /// <summary>A part reopened after its transactions were voided, whose voiding spend is not yet buried.</summary>
         private static bool VoidingSpendNotBuried(VaultWithdrawalRow part, LiteDatabase? db) =>
             part.ReopenedAtBitcoinHeight > 0
@@ -477,7 +540,7 @@ namespace VerifiedXCore.Bitcoin.Attestation
             var exit = VBTCBridgeBtcExitState.GetByBurnHash(row.ExitBurnHash ?? "");
             if (exit == null || exit.IsComplete || !IsPartOf(row, exit)) return;
             var parts = BtcAttestStore.ExitParts(row.RequestHash, row.RequestVfxHeight, db).OrderBy(p => p.Ref, StringComparer.Ordinal).ToList();
-            if (parts.Any(p => p.State != VaultWithdrawalState.Settled && !ClosedAsNeverPayable(p, vfxHeight, db))) return;
+            if (parts.Any(p => p.State != VaultWithdrawalState.Settled && !ClosedAsNeverPayable(p, vfxHeight, db) && !RefundedByRule(p))) return;
 
             exit.IsComplete = true;
             exit.BtcTxHash = string.Join(",", parts.Where(p => p.State == VaultWithdrawalState.Settled).Select(p => p.SettledTxid));
@@ -541,7 +604,7 @@ namespace VerifiedXCore.Bitcoin.Attestation
             // From ExitPartTakeoverHeight a part that had a transaction is reopened even when nothing else of its exit is
             // paying: its exit fails (ExpireExit) only once the voiding spend is buried, so that its signed transaction
             // cannot confirm after the exit was made again elsewhere. A rewind before then brings that transaction back.
-            var othersPaying = others.Any(p => p.State is VaultWithdrawalState.Settled or VaultWithdrawalState.Pinned);
+            var othersPaying = others.Any(p => p.State is VaultWithdrawalState.Settled or VaultWithdrawalState.Pinned || RefundedByRule(p));
             if (row.State == VaultWithdrawalState.Void && !exit.IsComplete && !neverPayable
                 && (othersPaying || (vfxHeight >= Globals.ExitPartTakeoverHeight && row.Pins.Count > 0)))
             {
@@ -561,7 +624,7 @@ namespace VerifiedXCore.Bitcoin.Attestation
             foreach (var allocation in AllocationsOf(exit).Where(a => VaultOfLock(a) == row.SmartContractUID))
                 GiveBackVoided(allocation, vfxHeight, why);
             var anyOpen = parts.Any(p => p.State == VaultWithdrawalState.Pinned);
-            var anyPaid = parts.Any(p => p.State == VaultWithdrawalState.Settled);
+            var anyPaid = parts.Any(p => p.State == VaultWithdrawalState.Settled || RefundedByRule(p));
             if (!anyOpen && !anyPaid && !exit.IsComplete)
             {
                 // A part fixed again earlier (waiting, with dead pins) goes with the exit: it is made again from other locks.
@@ -578,7 +641,7 @@ namespace VerifiedXCore.Bitcoin.Attestation
                 exit.BtcTxHash = $"{VBTCBridgeBtcExitState.FailedMarkerPrefix}void@{vfxHeight}";
                 VBTCBridgeBtcExitState.Update(exit);
             }
-            else if (neverPayable && !exit.IsComplete && parts.All(p => p.State == VaultWithdrawalState.Settled || ClosedAsNeverPayable(p, vfxHeight, db)))
+            else if (neverPayable && !exit.IsComplete && parts.All(p => p.State == VaultWithdrawalState.Settled || ClosedAsNeverPayable(p, vfxHeight, db) || RefundedByRule(p)))
             {
                 // Every other part is paid already: the exit is complete, paid in the parts that could be paid.
                 exit.IsComplete = true;

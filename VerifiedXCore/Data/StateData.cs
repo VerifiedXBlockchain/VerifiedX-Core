@@ -4376,6 +4376,10 @@ namespace VerifiedXCore.Data
                 // The holder's least payout, from Globals.ExitMinPayoutHeight (as validation read it).
                 if (tx.Height >= Globals.ExitMinPayoutHeight && jobj["MinPayoutSats"] is JValue { Type: JTokenType.Integer, Value: long minPayout })
                     exitState.MinPayoutSats = Math.Clamp(minPayout, 0, totalAmountSats.Value);
+                // The Base address that burned, from Globals.ExitPartRefundHeight (as validation read it).
+                if (tx.Height >= Globals.ExitPartRefundHeight && jobj["BaseBurner"] is JValue { Type: JTokenType.String, Value: string burner }
+                    && VerifiedXCore.Bitcoin.Services.BridgeBurnRefundRules.IsBurnerAddress(burner))
+                    exitState.BaseBurner = burner;
                 // A prior FAILED record for this burn (locks already restored) is superseded by the re-exit.
                 if (tx.Height >= Globals.BridgeIntraBlockGuardHeight)
                     VBTCBridgeBtcExitState.DeleteFailedRecord(baseBurnTxHash.Trim());

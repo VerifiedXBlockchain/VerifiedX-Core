@@ -610,6 +610,20 @@ namespace VerifiedXCore
         public const long ExitMinPayoutTestnetHeight = long.MaxValue;
 
         /// <summary>
+        /// From this height an exit records the Base address that burned (BaseBurner, bound by the exit votes and checked
+        /// against the burn at admission), and a part of an exit whose other part is paid, pinned or refunded, voided and
+        /// still waiting BtcAttestRules.ExitPartRefundBlocks Bitcoin blocks after the voiding spend is buried (its vault cannot
+        /// pay it), is closed void by rule: its locks are given back once and the chain records a refund of exactly that
+        /// part's satoshis to the burner (VBTCBridgeRefundState "{burn}#{vault}"), which the validators sign for refundBurn.
+        /// The exit completes once every part is paid, closed as never payable, or refunded. An exit recorded without a burner
+        /// keeps waiting as before. A consensus change to apply: an un-upgraded node judges the exit votes without the burner
+        /// and refuses the block. Unset (long.MaxValue) on mainnet and testnet until the release that activates it. Testnet
+        /// value in GlobalsNetworkHeights.
+        /// </summary>
+        public static long ExitPartRefundHeight = long.MaxValue;
+        public const long ExitPartRefundTestnetHeight = long.MaxValue;
+
+        /// <summary>
         /// From this height a reserve's Recover() reads each pending NFT_TX row's call as the dispatchers read it. Below it
         /// a row whose Data was not an array of objects made the recovery throw part-way, so every later row, the balance
         /// sweep, the contract re-own and the vBTC sweep never ran, and the reserve stayed under its vault key. Active from LedgerRulesBatchHeight.

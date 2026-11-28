@@ -37,6 +37,16 @@ namespace VerifiedXCore.Bitcoin.Models
         /// </summary>
         public const string MinPayoutExitFailedReason = "MIN_PAYOUT_EXIT_FAILED";
 
+        /// <summary>
+        /// A part of an exit that its vault could not pay after its transaction was voided while another part was paid
+        /// (Globals.ExitPartRefundHeight): written by the chain, not by a transaction, under "{burn}#{vault}".
+        /// </summary>
+        public const string ExitPartUnpaidReason = "EXIT_PART_UNPAID";
+
+        /// <summary>The id of the refund of one vault's part of the exit for a burn.</summary>
+        public static string PartRefundId(string burnId, string scUID) =>
+            $"{VerifiedXCore.Bitcoin.Services.BaseBridgeService.CanonicalBurnId(burnId) ?? (burnId ?? "").Trim()}#{scUID}";
+
         public static ILiteCollection<VBTCBridgeRefundState> GetCollection() =>
             DbContext.DB_VBTCWithdrawalRequests.GetCollection<VBTCBridgeRefundState>(CollectionName);
 
