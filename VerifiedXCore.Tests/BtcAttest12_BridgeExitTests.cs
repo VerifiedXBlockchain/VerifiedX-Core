@@ -2349,6 +2349,39 @@ namespace VerifiedXCore.Tests
         }
 
         /// <summary>
+        /// A vault whose Bitcoin key had fewer holders that count than it needs to sign keeps its bridge locks, but no
+        /// plan draws on them: an exit part there is never paid, and vBTC unlocked there can be neither withdrawn nor
+        /// bridged (consensus side: BridgeAllocationsSignableTests).
+        /// </summary>
+        [Fact]
+        public async Task AVaultWhoseKeyCannotSign_IsLeftOutOfExitAndUnlockPlans()
+        {
+            await Start();
+            var weak = await CreateVault(H1 + 1);
+            var sound = await CreateVault(H1 + 2);
+            await Deposit(weak.Script, 1_000_000);
+            await Deposit(sound.Script, 1_000_000);
+            var weakLock = await Lock(weak.Uid, 0.005M);
+            var soundLock = await Lock(sound.Uid, 0.005M);
+            var at = VBTCBridgeLockState.GetByLockId(weakLock)!.LockTimestamp;
+            var sr = VBTCBridgeLockState.GetByLockId(soundLock)!;
+            sr.LockTimestamp = at + 1; VBTCBridgeLockState.GetCollection().Update(sr);                    // weak, then sound
+            Assert.Equal(weakLock, Assert.Single(BridgePoolUnlockService.ComputeExitAllocationPlan(0.002M, null, Tip + 1)!).LockId);
+
+            // Fewer holders than it needs, as BtcVaultKeys.CheckHealth records at an epoch (driven in BtcAttest21).
+            var key = BtcAttestStore.ScriptRowForVault(weak.Uid)!;
+            key.HealthyHolders = BtcVaultKeys.MinSigners(key) - 1;
+            BtcAttestStore.SaveScript(key);
+            Assert.NotNull(BtcVaultKeys.CannotSignRefusal(weak.Uid));
+
+            Assert.Equal(soundLock, Assert.Single(BridgePoolUnlockService.ComputeExitAllocationPlan(0.002M, null, Tip + 1)!).LockId);
+            Assert.Equal(soundLock, Assert.Single(BridgePoolUnlockService.ComputeUnlockAllocationPlan(0.002M, Tip + 1)!).LockId);
+            Assert.Equal(soundLock, Assert.Single(BridgePoolUnlockService.ComputeUnlockAllocationPlan(0.002M, Tip + 1, _holder.Address)!).LockId);
+            Assert.Null(BridgePoolUnlockService.ComputeExitAllocationPlan(0.006M, null, Tip + 1));         // more than the sound vault holds
+
+        }
+
+        /// <summary>
         /// An exit paying a vault it draws on is refused, and the plan never looked at the destination: a burn to a watched
         /// vault's deposit address was refused at every attempt and never paid (fifth review, round 23).
         /// </summary>
