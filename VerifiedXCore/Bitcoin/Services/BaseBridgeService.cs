@@ -277,12 +277,13 @@ namespace VerifiedXCore.Bitcoin.Services
             });
 
         /// <summary>The contract's pending proposeRemoval: the validators and casters it names, and when it can run (0: none).</summary>
-        public sealed record PendingRemoval(IReadOnlyList<string> Validators, IReadOnlyList<string> Casters, BigInteger Eta);
+        public sealed record PendingRemoval(IReadOnlyList<string> Validators, IReadOnlyList<string> Casters, BigInteger Eta, BigInteger? VfxBlockHeight = null);
 
         private const string PENDING_REMOVAL_ABI = @"[
             {""inputs"":[],""name"":""getPendingRemovals"",""outputs"":[{""internalType"":""address[]"",""name"":"""",""type"":""address[]""}],""stateMutability"":""view"",""type"":""function""},
             {""inputs"":[],""name"":""getPendingCasterRemovals"",""outputs"":[{""internalType"":""address[]"",""name"":"""",""type"":""address[]""}],""stateMutability"":""view"",""type"":""function""},
-            {""inputs"":[],""name"":""pendingRemovalEta"",""outputs"":[{""internalType"":""uint256"",""name"":"""",""type"":""uint256""}],""stateMutability"":""view"",""type"":""function""}
+            {""inputs"":[],""name"":""pendingRemovalEta"",""outputs"":[{""internalType"":""uint256"",""name"":"""",""type"":""uint256""}],""stateMutability"":""view"",""type"":""function""},
+            {""inputs"":[],""name"":""pendingRemovalHeight"",""outputs"":[{""internalType"":""uint256"",""name"":"""",""type"":""uint256""}],""stateMutability"":""view"",""type"":""function""}
         ]";
 
         /// <summary>Stands in for the Base RPC in tests.</summary>
@@ -300,7 +301,9 @@ namespace VerifiedXCore.Bitcoin.Services
                 if (eta == 0) return new PendingRemoval(Array.Empty<string>(), Array.Empty<string>(), 0);
                 var validators = await c.GetFunction("getPendingRemovals").CallAsync<List<string>>(at);
                 var casters = await c.GetFunction("getPendingCasterRemovals").CallAsync<List<string>>(at);
-                return new PendingRemoval(validators, casters, eta);
+                // The VFX block height it was proposed with: part of what tells this proposal from another (BaseRemovalOverride).
+                var height = await c.GetFunction("pendingRemovalHeight").CallAsync<BigInteger>(at);
+                return new PendingRemoval(validators, casters, eta, height);
             });
             return pending.Answered ? pending.Value : null;
         }

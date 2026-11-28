@@ -33,6 +33,13 @@ namespace VerifiedXCore.Bitcoin.Services
             [VerifiedXCore.Utilities.JsonBound(VerifiedXCore.Utilities.ListSize.Validators)] public string[]? Validators { get; set; }
             public string[]? Casters { get; set; }
             public long? VfxBlockHeight { get; set; }
+            /// <summary>
+            /// PROPOSE_REMOVAL only: validators among <see cref="Validators"/> that the operator names as still running on
+            /// VFX but not signing on Base. The node signs the proposal although it sees them live, and does not veto
+            /// that proposal on their account while it is pending (BaseRemovalOverride). Every other target is judged as
+            /// without it.
+            /// </summary>
+            [VerifiedXCore.Utilities.JsonBound(VerifiedXCore.Utilities.ListSize.Validators)] public string[]? NotSigningOnBase { get; set; }
         }
 
         public sealed class Result
@@ -71,6 +78,7 @@ namespace VerifiedXCore.Bitcoin.Services
             var contract = BaseBridgeService.ContractAddress;
             string? codeHash = null;
             byte[] digest;
+            Action? beforeSigning = null;
             switch (action)
             {
                 case Upgrade:
@@ -102,12 +110,26 @@ namespace VerifiedXCore.Bitcoin.Services
                     // The way out for validators and casters that went dark: not for one that still runs as a vBTC
                     // validator, or that still sits in the caster committee. Judged by the rule the members' veto of a
                     // pending removal is judged by, at this node's tip, so what is signed here is not what it cancels.
+                    // A validator the operator names as not signing on Base is not held back by being seen on VFX: that
+                    // is the very case, and only the operator can say it (this route answers the node's own operator only).
+                    var notSigning = (req.NotSigningOnBase ?? Array.Empty<string>()).Select(t => t?.Trim() ?? "").ToArray();
+                    if (notSigning.Any(t => !targets.Contains(t, StringComparer.OrdinalIgnoreCase)))
+                        return Fail("NotSigningOnBase names only validators the proposal removes");
                     var stillLive = BaseSignerSetPolicy.LiveForRemovalAt(Globals.LastBlock?.Height ?? -1);
-                    if (stillLive.LiveValidator(targets) is { } live)
+                    if (stillLive.LiveValidator(targets.Where(t => !notSigning.Contains(t, StringComparer.OrdinalIgnoreCase))) is { } live)
                         return Fail($"{live} is still a registered vBTC validator (seen on VFX in the last {BaseSignerSetPolicy.RemovalLiveBlocks} blocks)");
                     if (stillLive.LiveCaster(casterTargets) is { } sitting) return Fail($"{sitting} is still in the caster committee");
                     if (req.VfxBlockHeight is not long height || height < 0) return Fail("VfxBlockHeight required");
                     digest = VbtcbTypedData.ProposeRemovalDigest(targets, casterTargets, height, view.AdminNonce, chainId, contract);
+                    if (notSigning.Length > 0)
+                    {
+                        // Recorded under the digest signed and the nonce it is good at, with the removal pending now (if
+                        // any): that one is not the proposal this signature makes.
+                        var pendingNow = await BaseBridgeService.ReadPendingRemovalAsync();
+                        if (pendingNow == null) return Fail("Could not read the Base contract's pending removal");
+                        var (signedDigest, signedAt) = (digest, view.AdminNonce);
+                        beforeSigning = () => VerifiedXCore.Bitcoin.Models.BaseRemovalOverride.Save(contract, signedDigest, signedAt, notSigning, pendingNow);
+                    }
                     break;
                 default:
                     digest = VbtcbTypedData.CancelPendingDigest(view.AdminNonce, chainId, contract);
@@ -119,8 +141,11 @@ namespace VerifiedXCore.Bitcoin.Services
             var privHex = account.GetKey;
             if (privHex.Length % 2 != 0) privHex = "0" + privHex;
             var priv = HexByteUtility.HexToByte(privHex);
+            // Written before the signature is made: a proposal signed for must not be one this node then vetoes.
+            beforeSigning?.Invoke();
             var signature = v3 ? ValidatorEthKeyService.EthSignMessageHex(digest, priv) : ValidatorEthKeyService.SignDigestHex(digest, priv);
-            LogUtility.Log($"[BaseAdminSign] Signed {action} at admin nonce {view.AdminNonce} on {contract}" + (codeHash != null ? $" for {req.Implementation} (code hash {codeHash})" : ""), "BaseAdminSigningService");
+            LogUtility.Log($"[BaseAdminSign] Signed {action} at admin nonce {view.AdminNonce} on {contract}" + (codeHash != null ? $" for {req.Implementation} (code hash {codeHash})" : "")
+                + (beforeSigning != null ? $", naming {string.Join(", ", req.NotSigningOnBase!)} as not signing on Base" : ""), "BaseAdminSigningService");
 
             return new Result
             {
