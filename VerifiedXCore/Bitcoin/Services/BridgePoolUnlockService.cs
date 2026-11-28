@@ -199,7 +199,8 @@ namespace VerifiedXCore.Bitcoin.Services
 
         /// <summary>
         /// The allocation plan for an unlock back to VFX. From the enforcement height it leaves out the locks of frozen
-        /// vaults: consensus refuses them, and vBTC handed out on a frozen vault could never be moved. It also leaves out
+        /// vaults: consensus refuses them, and vBTC handed out on a frozen vault could never be moved. It leaves out a vault
+        /// whose key cannot sign (BtcVaultKeys.CannotSignRefusal): vBTC handed out there could not be withdrawn or bridged. It also leaves out
         /// a watched vault whose ledger is full and does not name the destination: consensus refuses that credit
         /// (BtcVaultLedger.CreditRefusal, fourth review round 6). From Globals.VaultMinimumPositionHeight a watched vault
         /// whose share would leave the destination less than the vault's smallest position is left out too, and the plan
@@ -212,7 +213,8 @@ namespace VerifiedXCore.Bitcoin.Services
             var vaults = pool.Select(l => l.SmartContractUID).Distinct(StringComparer.Ordinal).ToList();
             var leftOut = vaults
                 .Where(c => Attestation.BtcLegacyFreeze.Active(height) && Attestation.BtcLegacyFreeze.IsLegacyVault(c)
-                    || destination != null && Attestation.BtcVaultLedger.CreditRefusal(SmartContractStateTrei.GetSmartContractState(c), destination) != null)
+                    || destination != null && Attestation.BtcVaultLedger.CreditRefusal(SmartContractStateTrei.GetSmartContractState(c), destination) != null
+                    || Attestation.BtcVaultKeys.CannotSignRefusal(c) != null)
                 .ToHashSet(StringComparer.Ordinal);
             if (destination == null || height < Globals.VaultMinimumPositionHeight)
                 return FewVaultCandidates(amountBtc, leftOut, pool, _ => 0M).FirstOrDefault(p => p != null)
@@ -268,8 +270,11 @@ namespace VerifiedXCore.Bitcoin.Services
                 foreach (var vault in watched)
                     if (Attestation.BtcAttestStore.ScriptRowsForVault(vault).Any(k => k.ScriptHex == script))
                         paidTo.Add(vault);
+            // A vault whose key cannot sign is left out: its part could never be paid, and the exit would wait out its
+            // window and fail (and from BridgeAllocationsSignableHeight consensus refuses it).
+            var cannotSign = watched.Where(c => Attestation.BtcVaultKeys.CannotSignRefusal(c) != null);
             HashSet<string> Without(HashSet<string> kind) =>
-                new HashSet<string>((excludeContractUIDs ?? new HashSet<string>()).Concat(kind).Concat(paidTo), StringComparer.Ordinal);
+                new HashSet<string>((excludeContractUIDs ?? new HashSet<string>()).Concat(kind).Concat(paidTo).Concat(cannotSign), StringComparer.Ordinal);
 
             if (!Attestation.BtcLegacyFreeze.Active(height))
             {
