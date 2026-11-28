@@ -602,7 +602,14 @@ namespace VerifiedXCore.Bitcoin.FROST.Models
         /// </summary>
         public const int MAX_SIGNING_SESSIONS = 500;
 
-        /// <summary>Signing sessions kept here at all, finished ones included (a finished session holds no place, but is kept for its ten minutes).</summary>
+        /// <summary>
+        /// Finished signing sessions kept here (a finished session holds no place, but is kept for its ten minutes). A
+        /// number of their own, beside the rooms and not over them: the oldest make way for a new start
+        /// (<see cref="DropFinishedForRoom"/>), and a session that holds a place is counted in its room and nowhere else.
+        /// Counted together with the open sessions, the sessions of rooms that between them hold more than this number
+        /// reached it before either room was full, and every start was refused with places to spare. What a validator
+        /// keeps is then at most its rooms' places and this many more.
+        /// </summary>
         public const int MAX_SIGNING_SESSIONS_HELD = 2_000;
 
         /// <summary>A signing session whose share was given is dropped this long after it was started.</summary>
@@ -738,37 +745,39 @@ namespace VerifiedXCore.Bitcoin.FROST.Models
 
         /// <summary>
         /// Makes room under <see cref="MAX_SIGNING_SESSIONS_HELD"/> by dropping the oldest finished sessions (their share
-        /// given). Finished sessions are kept ten minutes and counted against the validator's total, though no per-leader
-        /// cap counts them: one leader starting, finishing and starting again (the same start may be sent again) filled
-        /// the total and every start here, the vault's holders' and the casters' included, was refused (fifth review,
-        /// round 35). Open sessions are never dropped.
+        /// given). Finished sessions are kept ten minutes and counted against that number, though no per-leader cap
+        /// counts them: one leader starting, finishing and starting again (the same start may be sent again) filled it
+        /// and every start here, the vault's holders' and the casters' included, was refused (fifth review, round 35).
+        /// Only the finished ones are counted, and only they are dropped: open sessions are their rooms' matter.
         /// </summary>
         public static void DropFinishedForRoom()
         {
-            var over = SigningSessions.Count - MAX_SIGNING_SESSIONS_HELD + 1;
+            var finished = SigningSessions.Where(kv => kv.Value.NonceConsumed).ToList();
+            var over = finished.Count - MAX_SIGNING_SESSIONS_HELD + 1;
             if (over <= 0) return;
-            foreach (var finished in SigningSessions.Where(kv => kv.Value.NonceConsumed).OrderBy(kv => kv.Value.StartTimestamp).Take(over).Select(kv => kv.Key).ToList())
-                SigningSessions.TryRemove(finished, out _);
+            foreach (var oldest in finished.OrderBy(kv => kv.Value.StartTimestamp).Take(over).Select(kv => kv.Key).ToList())
+                SigningSessions.TryRemove(oldest, out _);
         }
 
         /// <summary>
         /// Why a new signing session is refused for want of room; null when there is room. Counted over the sessions
         /// given (the ones kept), so the rule can be tested without the store. With no leader given only what can be
-        /// judged before the leader's signature has been checked is judged: the sessions kept, and whether every room is
-        /// full.
+        /// judged before the leader's signature has been checked is judged: the finished sessions kept, and whether every
+        /// room is full.
         /// </summary>
         /// <remarks>
         /// There are two rooms (<see cref="SigningRooms"/>), and a session takes a place in one of them only. One led by a
         /// holder of the key or by a caster is counted against its leader, in a room that follows the validator set
         /// (<paramref name="validators"/>; this node's count when not given). One led by a requester
         /// (<paramref name="ledByRequester"/>) is counted against its vault (<paramref name="vaultUid"/>) as well. Neither
-        /// room is refused for what the other holds.
+        /// room is refused for what the other holds, and no number over both rooms refuses a start that has a place in
+        /// its own: the finished sessions kept have theirs (<see cref="MAX_SIGNING_SESSIONS_HELD"/>).
         /// </remarks>
         public static string? SigningStartRefusal(IEnumerable<SigningSession> open, string? leaderAddress, string? messageHash, bool ledByRequester = false,
             string? vaultUid = null, long? nowSeconds = null, int? validators = null)
         {
             var held = open as ICollection<SigningSession> ?? open.ToList();
-            if (held.Count >= MAX_SIGNING_SESSIONS_HELD)
+            if (held.Count(x => x.NonceConsumed) >= MAX_SIGNING_SESSIONS_HELD)
                 return "Maximum concurrent signing sessions reached. Try again later.";
             // A session whose share this validator has given is done here: it no longer holds a place. It held one for
             // its full ten minutes, and a leader that had signed one 50-input transaction was refused for the next

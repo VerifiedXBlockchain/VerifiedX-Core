@@ -253,6 +253,30 @@ namespace VerifiedXCore.Tests
         private static void Age(FrostSigningStartRequest start, int seconds) =>
             FrostSessionStorage.SigningSessions[start.SessionId].StartTimestamp -= seconds;
 
+        /// <summary>
+        /// Other parties' sessions, put in the store as the route leaves them: open ones led by holders (eight a leader)
+        /// or by requesters (eight a vault), or finished ones. Returns their ids.
+        /// </summary>
+        private static List<string> OthersSessions(string tag, int count, bool requesters = false, bool finished = false)
+        {
+            var ids = new List<string>();
+            for (var n = 0; n < count; n++)
+            {
+                var id = $"{tag}-{n}-{Guid.NewGuid():N}";
+                var session = new SigningSession
+                {
+                    SessionId = id, LeaderAddress = $"{tag}-leader{(requesters ? n : n / FrostSessionStorage.MAX_SIGNING_SESSIONS_PER_LEADER)}", LedByRequester = requesters,
+                    SmartContractUID = $"{tag}-vault{n / FrostSessionStorage.MAX_REQUESTER_LED_SIGNING_SESSIONS_PER_VAULT}",
+                    VaultUID = $"{tag}-vault{n / FrostSessionStorage.MAX_REQUESTER_LED_SIGNING_SESSIONS_PER_VAULT}",
+                    MessageHash = $"{tag}-hash{n}", StartTimestamp = Now, LeaderStartTimestamp = Now, NonceSecret = "n",
+                };
+                if (finished) Assert.True(session.TryConsumeNonceSecret(out _));
+                FrostSessionStorage.SigningSessions[id] = session;
+                ids.Add(id);
+            }
+            return ids;
+        }
+
         // ── The tests ───────────────────────────────────────────────────────────────────────────────────────
 
         /// <summary>
@@ -577,11 +601,82 @@ namespace VerifiedXCore.Tests
         }
 
         /// <summary>
+        /// With a large validator set the two rooms hold more sessions between them than the number of finished sessions
+        /// a validator keeps. Every room one place short of full at once, and the finished sessions one short of theirs:
+        /// each room still gives its last place. Full, each refuses its own starts, and gives a place again as soon as one
+        /// of its own is given up, whatever the other room holds. Nothing counted over both rooms refuses a start.
+        /// (The other parties' sessions are put in the store here as the route leaves them.)
+        /// </summary>
+        [Fact]
+        public async Task WithEveryRoomFullAtOnce_AStartIsRefusedForItsOwnRoomOnly()
+        {
+            var validators = Enumerable.Range(0, FrostSessionStorage.PlannedMaxValidators).Select(_ => NewKey()).ToList();
+            BlockchainData.GetBlocks().InsertSafe(new VfxBlock
+            {
+                Height = 20, Hash = $"h20-{Guid.NewGuid():N}",
+                Transactions = validators.Select((v, i) => new VfxTx
+                {
+                    TransactionType = TransactionType.VBTC_V2_VALIDATOR_REGISTER, FromAddress = v.Address, ToAddress = v.Address, Hash = "r20-" + i,
+                    Data = JsonConvert.SerializeObject(new { ValidatorAddress = v.Address, IPAddress = "10.0.0.1", FrostPublicKey = v.Pub, IsS3C = false }),
+                }).ToList(),
+            });
+            await Start();
+            var vault = await CreateVault(Tip + 1, keyHolders: validators.Take(3));
+            await Deposit(vault.Script, coins: 2, sats: 20_000);
+            var (request, pinned) = await Withdraw(vault.Uid, 0.0004M);
+            Assert.Equal(2, pinned.Inputs.Count);
+            HoldShare(vault.Uid);
+            Serve();
+            var holdersRoom = FrostSessionStorage.SigningRoomForValidators(VBTCValidatorRegistry.GetActiveValidatorCount());
+            const int requestersRoom = FrostSessionStorage.MAX_REQUESTER_LED_SIGNING_SESSIONS;
+            Assert.True(holdersRoom > FrostSessionStorage.MAX_SIGNING_SESSIONS_HELD, "the validator set here is large enough for the holders' room alone to pass the finished sessions kept");
+            FrostSigningStartRequest ByHolder(int which) => StartOf(vault.Uid, vault.Script, request.Hash, pinned, validators[which]);
+            FrostSigningStartRequest ByRequester(int input) => StartOf(vault.Uid, vault.Script, request.Hash, pinned, Minter, input);
+            int Held(bool byRequesters) => Places().Count(s => s.LedByRequester == byRequesters);
+
+            var holders = OthersSessions("holders", holdersRoom - 1);
+            var requesters = OthersSessions("requesters", requestersRoom - 1, requesters: true);
+            OthersSessions("finished", FrostSessionStorage.MAX_SIGNING_SESSIONS_HELD - 1, finished: true);
+
+            // The last place of each room is given.
+            await Taken(ByHolder(0));
+            await Taken(ByRequester(0));
+            Assert.Equal(holdersRoom, Held(byRequesters: false));
+            Assert.Equal(requestersRoom, Held(byRequesters: true));
+
+            // Both full: each refuses its own, and before a start's leader is known it is refused only now.
+            Assert.Equal(HttpStatusCode.TooManyRequests, (await Post(ByHolder(1))).Code);
+            Assert.Equal(HttpStatusCode.TooManyRequests, (await Post(ByRequester(1))).Code);
+            var unsigned = ByHolder(2);
+            unsigned.LeaderSignature = null;
+            Assert.Equal(HttpStatusCode.TooManyRequests, (await Post(unsigned)).Code);
+
+            // A holder's place given up: a holder has it, and the requesters' room, still full, changes nothing for it.
+            FrostSessionStorage.SigningSessions.TryRemove(holders[0], out _);
+            Assert.Equal(HttpStatusCode.BadRequest, (await Post(unsigned)).Code);                  // judged on its signature now, which it lacks
+            var refused = await Post(ByRequester(1));
+            Assert.Equal(HttpStatusCode.TooManyRequests, refused.Code);
+            Assert.Contains($"{requestersRoom} requester-led signing sessions are open here", refused.Body);   // its own room's answer
+            await Taken(ByHolder(1));
+            Assert.Equal(HttpStatusCode.TooManyRequests, (await Post(ByHolder(2))).Code);
+
+            // And a requester's place given up: a requester has it, with the holders' room full.
+            FrostSessionStorage.SigningSessions.TryRemove(requesters[0], out _);
+            Assert.Equal(HttpStatusCode.TooManyRequests, (await Post(ByHolder(2))).Code);
+            await Taken(ByRequester(1));
+            Assert.Equal(holdersRoom, Held(byRequesters: false));
+            Assert.Equal(requestersRoom, Held(byRequesters: true));
+            Assert.Equal(FrostSessionStorage.MAX_SIGNING_SESSIONS_HELD - 1, FrostSessionStorage.SigningSessions.Values.Count(s => s.NonceConsumed));   // none dropped: they had their room
+        }
+
+        /// <summary>
         /// The rule that keeps the next room from being one a few parties fill: over the rooms declared for signing
         /// (<see cref="FrostSessionStorage.SigningRooms"/>), no party of fewer than fifty, each at its limit, reaches a
         /// room, whatever the size of the validator set; the room of the keys' holders takes every validator at its
-        /// limit; and the rule the route applies gives a further party its place beside such a party. It covers the rooms
-        /// of signing sessions, the ones declared so far.
+        /// limit; and the rule the route applies gives a further party its place beside such a party. Nor is any number
+        /// counted over the rooms smaller than what they hold together: with every room full at once, for every size of
+        /// validator set, each room gives its last place and refuses for itself alone. It covers the rooms of signing
+        /// sessions, the ones declared so far.
         /// </summary>
         [Fact]
         public void NoSigningRoom_IsFilledByAFewPartiesAtTheirLimits()
@@ -624,6 +719,46 @@ namespace VerifiedXCore.Tests
             Assert.Null(FrostSessionStorage.SigningStartRefusal(open, "another-leader", "x", false, "another-vault", now, 0));
             Assert.Null(FrostSessionStorage.SigningStartRefusal(open, "another-requester", "x", true, "another-vault", now, 0));
             Assert.Null(FrostSessionStorage.SigningStartRefusal(open, null, null, nowSeconds: now, validators: 0));
+
+            // Every room at once, for every size of validator set: all one place short of full, then full, then one place
+            // of each given up in turn. First with no finished session kept, then with one short of all that are kept.
+            foreach (var finishedKept in new[] { 0, FrostSessionStorage.MAX_SIGNING_SESSIONS_HELD - 1 })
+            foreach (var validators in new[] { 0, 62, 63, 126, 160, FrostSessionStorage.PlannedMaxValidators, FrostDkgAttestation.MaxParticipants, 5_000 })
+            {
+                string? Refusal(List<SigningSession> kept, bool byRequester) =>
+                    FrostSessionStorage.SigningStartRefusal(kept, byRequester ? "a-requester" : "a-leader", "x", byRequester, "a-vault", now, validators);
+                var kept = new List<SigningSession>();
+                for (var n = 0; n < rooms[0].Places(validators) - 1; n++)
+                    kept.Add(Open("leader" + n / rooms[0].PerParty, "vault", false, n));
+                for (var n = 0; n < rooms[1].Places(validators) - 1; n++)
+                    kept.Add(Open("requester" + n, "vault" + n / rooms[1].PerParty, true, n));
+                for (var n = 0; n < finishedKept; n++)
+                {
+                    var done = Open("done" + n, "vault", false, n);
+                    done.NonceSecret = "n";
+                    Assert.True(done.TryConsumeNonceSecret(out _));
+                    kept.Add(done);
+                }
+                Assert.True(Refusal(kept, false) == null, $"with {validators} validators and {finishedKept} finished sessions kept, the last place of the holders' room is refused");
+                Assert.True(Refusal(kept, true) == null, $"with {validators} validators and {finishedKept} finished sessions kept, the last place of the requesters' room is refused");
+
+                var lastHolder = Open("last-leader", "vault", false, 0);
+                var lastRequester = Open("last-requester", "last-vault", true, 0);
+                kept.Add(lastHolder);
+                kept.Add(lastRequester);
+                Assert.NotNull(Refusal(kept, false));
+                Assert.Contains("requester-led signing sessions are open here", Refusal(kept, true));
+                Assert.NotNull(FrostSessionStorage.SigningStartRefusal(kept, null, null, nowSeconds: now, validators: validators));
+
+                kept.Remove(lastHolder);
+                Assert.Null(Refusal(kept, false));
+                Assert.NotNull(Refusal(kept, true));
+                Assert.Null(FrostSessionStorage.SigningStartRefusal(kept, null, null, nowSeconds: now, validators: validators));
+                kept.Add(lastHolder);
+                kept.Remove(lastRequester);
+                Assert.NotNull(Refusal(kept, false));
+                Assert.Null(Refusal(kept, true));
+            }
         }
     }
 }
