@@ -139,12 +139,18 @@ namespace VerifiedXCore.Bitcoin.Services
             return h.Length == 64 && h.All(Uri.IsHexDigit);
         }
 
+        /// <summary>Why a bridge transaction was refused: no committee could be read for the height.</summary>
+        public const string CommitteeUnavailableReason = "Caster committee unavailable for this height.";
+
+        /// <summary>Why a bridge transaction was refused: its sender is not in the committee this node holds for the height.</summary>
+        public const string SubmitterNotInCommitteeReason = "Bridge transaction must be submitted by a committee caster.";
+
         /// <summary>Bridge unlock / exit transactions are broadcast by the elected handler caster only.</summary>
         public static (bool Ok, string Reason) CheckSubmitter(string? fromAddress, HashSet<string> committee)
         {
             if (string.IsNullOrEmpty(fromAddress)) return (false, "Bridge transaction has no sender.");
-            if (committee == null || committee.Count == 0) return (false, "Caster committee unavailable for this height.");
-            if (!committee.Contains(fromAddress)) return (false, "Bridge transaction must be submitted by a committee caster.");
+            if (committee == null || committee.Count == 0) return (false, CommitteeUnavailableReason);
+            if (!committee.Contains(fromAddress)) return (false, SubmitterNotInCommitteeReason);
             return (true, "");
         }
     }

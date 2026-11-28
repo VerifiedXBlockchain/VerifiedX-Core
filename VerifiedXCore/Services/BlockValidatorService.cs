@@ -46,6 +46,8 @@ namespace VerifiedXCore.Services
         /// is corrupted, blocks at different heights interleave (6610256, 6610258, 6610259...) and
         /// a per-height counter would never reach the threshold.</summary>
         private static int _txFailCount = 0;
+        /// <summary>The consecutive transaction refusals counted towards a state restore so far.</summary>
+        internal static int ConsecutiveTxFailures => _txFailCount;
         /// <summary>After this many consecutive TX-validation failures (any height), trigger full state rebuild.</summary>
         public const int TX_FAIL_RECOVERY_THRESHOLD = 10;
         /// <summary>Height of the last TX-fail-triggered snapshot restore. A repeat trigger near the
@@ -158,6 +160,11 @@ namespace VerifiedXCore.Services
             if (reason == Privacy.PlonkProofVerifier.VerifierUnavailableReason
                 || reason.StartsWith(Privacy.PlonkProofVerifier.MissingProofReason, StringComparison.Ordinal)
                 || reason.StartsWith(Privacy.PlonkProofVerifier.FailedProofPrefix, StringComparison.Ordinal))
+                return false;
+            // A bridge transaction refused on the caster committee (its sender is not a member, too few members' votes
+            // count) was judged by the transaction and this node's membership record alone. The record is in no snapshot,
+            // so a restore refuses the block the same way; what changes the verdict is a newer record, which is asked for.
+            if (Bitcoin.Services.BridgeCasterConsensus.IsCommitteeRefusalApartFromState(reason))
                 return false;
             return true;
         }
@@ -612,7 +619,58 @@ namespace VerifiedXCore.Services
         public static bool WasRefusedForItsContents(long height, string? hash) =>
             !string.IsNullOrEmpty(hash) && _refusedForItsContents.TryGetValue(hash, out var at) && at == height;
 
+        /// <summary>Set by one validation of a block when it refused the block on the committee in this node's membership record.</summary>
+        private sealed class CommitteeRefusal
+        {
+            public bool Noted;
+        }
+
+        /// <summary>
+        /// A block refused on the caster committee (its certificate, or a bridge transaction's votes or sender) was judged
+        /// by the membership record this node holds, and records reach a node apart from the blocks: when its peers hold a
+        /// newer one, they judged the block by another committee. The next pull of the record is brought forward, as it
+        /// is for a node with no record.
+        /// </summary>
+        private static void NoteCommitteeRefusal(CommitteeRefusal? refusal)
+        {
+            ValidatorMembershipPull.RequestSoon();
+            if (refusal != null) refusal.Noted = true;
+        }
+
+        /// <summary>The membership record this node holds: its sequence and hash, or empty without one.</summary>
+        private static string HeldRecord()
+        {
+            try { return CasterMembershipStore.GetCurrent() is { } head ? $"{head.RecordSeq}:{head.RecordHash}" : ""; }
+            catch { return ""; }
+        }
+
+        /// <summary>
+        /// Validates a block and, when it is taken, commits it. A block refused on the caster committee is judged once
+        /// more when the pull that refusal asked for brought this node a newer membership record: a node that missed a
+        /// record refused the block its peers took, and stayed at it until its next minute pull. Only a record this node
+        /// adopted (signed by its predecessor's committee, as every record is) gets the block a second look. What peers
+        /// say they hold does not, and nothing here holds a block back: with no newer record the refusal stands as it did.
+        /// </summary>
         public static async Task<bool> ValidateBlock(Block block, bool ignoreAdjSignatures, bool blockDownloads = false, bool validateOnly = false, bool updateCLI = false, bool skipCasterCheck = false, string? source = null)
+        {
+            var refusal = new CommitteeRefusal();
+            var result = await ValidateBlockOnce(block, ignoreAdjSignatures, blockDownloads, validateOnly, updateCLI, skipCasterCheck, source, refusal);
+            if (result || !refusal.Noted || validateOnly)
+                return result;
+
+            var held = HeldRecord();
+            await ValidatorMembershipPull.PullForRefusedBlockAsync();
+            if (HeldRecord() == held)
+                return false;
+
+            // The first verdict was reached under a record this node has since replaced: it says nothing about the block's
+            // contents. The second is noted again if it is a fault of the block's own.
+            if (!string.IsNullOrEmpty(block?.Hash))
+                _refusedForItsContents.TryRemove(block.Hash, out _);
+            return await ValidateBlockOnce(block!, ignoreAdjSignatures, blockDownloads, validateOnly, updateCLI, skipCasterCheck, source, null);
+        }
+
+        private static async Task<bool> ValidateBlockOnce(Block block, bool ignoreAdjSignatures, bool blockDownloads, bool validateOnly, bool updateCLI, bool skipCasterCheck, string? source, CommitteeRefusal? committeeRefusal)
         {
             // ═══════════════════════════════════════════════════════════════
             // RECOVERY GUARD: Silently drop ALL incoming blocks when a recovery
@@ -832,6 +890,10 @@ namespace VerifiedXCore.Services
                 // A block carrying an election record has no such exemption: it is the record's first block, and its certificate is what ties the two.
                 if (!validateOnly && (!blockDownloads || AtSyncedTip(block) || block.MembershipRecord != null) && !ConsensusCertificateVerifier.VerifyOrNotRequired(block))
                 {
+                    // The next block's certificate, refused on who may attest or how many must: the committee is this
+                    // node's record's. A missing certificate, or one for another block, is refused under any record.
+                    if (block.Height == Globals.LastBlock.Height + 1 && ConsensusCertificateVerifier.RefusalDependsOnCommittee(block))
+                        NoteCommitteeRefusal(committeeRefusal);
                     DbContext.Rollback("BlockValidatorService.ValidateBlock()-cert");
                     return result;
                 }
@@ -1658,6 +1720,9 @@ namespace VerifiedXCore.Services
 
                         if (rejectBlock)
                         {
+                            if (Bitcoin.Services.BridgeCasterConsensus.IsCommitteeRefusal(rejectBlockReason))
+                                NoteCommitteeRefusal(committeeRefusal);
+
                             // FORK-FIX: Track consecutive TX-validation failures across ALL heights.
                             // When the state trie is corrupted/wiped, EVERY block fails TX validation
                             // with "new account with no balance". Blocks at different heights interleave
