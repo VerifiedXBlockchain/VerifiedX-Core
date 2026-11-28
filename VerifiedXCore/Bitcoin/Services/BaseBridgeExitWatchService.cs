@@ -24,7 +24,7 @@ namespace VerifiedXCore.Bitcoin.Services
         // row is passed over and logged for an operator's rescan.
         private static int _span = MaxBlockSpan;
         private static int _singleBlockFailures;
-        private const int SingleBlockFailuresBeforeSkip = 20;
+        internal const int SingleBlockFailuresBeforeSkip = 20;
 
         // The widest span read without error and the narrowest one refused above it (a provider's range cap: 200 blocks
         // on sepolia.base.org). The span settles between them: doubled into the cap and cut to a quarter on every refusal,
@@ -248,7 +248,7 @@ namespace VerifiedXCore.Bitcoin.Services
             return await PollOnceInternal();
         }
 
-        private static async Task<bool> CanReadLogs(Web3 web3, string? contract, long block, long latest)
+        private static async Task<bool> CanReadLogs(string? contract, long block, long latest)
         {
             if (block > latest || string.IsNullOrEmpty(contract)) return false;
             try
@@ -259,7 +259,7 @@ namespace VerifiedXCore.Bitcoin.Services
                     ToBlock = new BlockParameter(new HexBigInteger(block)),
                     Address = new[] { contract },
                 };
-                await web3.Eth.Filters.GetLogs.SendRequestAsync(probe);
+                await BaseRpc.AuthorizingPrimaryAsync((web3, _) => web3.Eth.Filters.GetLogs.SendRequestAsync(probe));
                 return true;
             }
             catch { return false; }
@@ -374,8 +374,8 @@ namespace VerifiedXCore.Bitcoin.Services
 
         private static async Task<(int Processed, long ScannedToBlock, string Message)> PollOnceInternal()
         {
-            var web3 = new Web3(BaseBridgeService.BaseRpcUrl);
-            var latestHex = await web3.Eth.Blocks.GetBlockNumber.SendRequestAsync();
+            // The burns read here start an exit: authorizing reads, of the first configured provider.
+            var latestHex = await BaseRpc.AuthorizingPrimaryAsync((web3, _) => web3.Eth.Blocks.GetBlockNumber.SendRequestAsync());
             var latest = (long)latestHex.Value;
             _behind = false;
 
@@ -428,6 +428,9 @@ namespace VerifiedXCore.Bitcoin.Services
 
             var processed = 0;
             var scanFailed = false;
+            // Whether the range could not be read because of the provider (BaseProviderException), not because of the
+            // range: such a read says nothing about the block, so it never counts toward passing a block over.
+            var providerAtFault = false;
 
             // Both kinds of burn are read before either is handled: a burn's id counts every bridge burn of its transaction
             // (BaseBridgeService.BurnId). A range one kind of which could not be read is read again, both kinds.
@@ -440,19 +443,31 @@ namespace VerifiedXCore.Bitcoin.Services
             {
                 if (!string.IsNullOrEmpty(v3Contract))
                 {
-                    var vfxExitHandler = web3.Eth.GetEvent<VfxExitBurnedEventDTO>(v3Contract);
-                    vfxExitLogs = await vfxExitHandler.GetAllChangesAsync(vfxExitHandler.CreateFilterInput(
+                    vfxExitLogs = await BaseRpc.AuthorizingPrimaryAsync((web3, _) =>
+                    {
+                        var vfxExitHandler = web3.Eth.GetEvent<VfxExitBurnedEventDTO>(v3Contract);
+                        return vfxExitHandler.GetAllChangesAsync(vfxExitHandler.CreateFilterInput(
+                            new BlockParameter(new HexBigInteger(from)),
+                            new BlockParameter(new HexBigInteger(to))));
+                    });
+                }
+                btcLogs = await BaseRpc.AuthorizingPrimaryAsync((web3, _) =>
+                {
+                    var btcEventHandler = web3.Eth.GetEvent<BTCExitBurnedEventDTO>(btcExitContract);
+                    return btcEventHandler.GetAllChangesAsync(btcEventHandler.CreateFilterInput(
                         new BlockParameter(new HexBigInteger(from)),
                         new BlockParameter(new HexBigInteger(to))));
-                }
-                var btcEventHandler = web3.Eth.GetEvent<BTCExitBurnedEventDTO>(btcExitContract);
-                btcLogs = await btcEventHandler.GetAllChangesAsync(btcEventHandler.CreateFilterInput(
-                    new BlockParameter(new HexBigInteger(from)),
-                    new BlockParameter(new HexBigInteger(to))));
+                });
+                // The contract writes its own chain's id into every burn: a log that names another chain is not Base's,
+                // and the range is read again like one that could not be read.
+                if (vfxExitLogs.Any(e => e.Event != null && !BaseRpc.IsExpectedChain(e.Event.ChainId))
+                    || btcLogs.Any(e => e.Event != null && !BaseRpc.IsExpectedChain(e.Event.ChainId)))
+                    throw new BaseProviderException(BaseBridgeService.BurnOnAnotherChain);
             }
             catch (Exception readEx)
             {
                 scanFailed = true;
+                providerAtFault = readEx is BaseProviderException;
                 vfxExitLogs.Clear();
                 btcLogs.Clear();
                 LogUtility.Log($"[BaseBridgeExit] Burn log query error: {readEx.Message}",
@@ -575,11 +590,17 @@ namespace VerifiedXCore.Bitcoin.Services
                     _span = SpanAfterFailure(_span);
                     return (processed, state.LastScannedBlock, $"Base log query failed; the range is read again next poll, {_span} block(s) at a time");
                 }
+                // A block is passed over for failures of its own (a block the provider cannot serve while it serves the
+                // next). A provider that is not on Base, or whose logs are not Base's, has not read the block at all:
+                // however often that repeats, the block waits, and is read once a provider that is right answers. Passed
+                // over, every burn in the block was lost with it, and setting the provider right did not bring them back.
+                if (providerAtFault)
+                    return (processed, state.LastScannedBlock, "The Base provider's answer is not Base's; the block is read again, not passed over");
                 if (++_singleBlockFailures < SingleBlockFailuresBeforeSkip)
                     return (processed, state.LastScannedBlock, "Base log query failed for one block; read again next poll");
                 // Passed over only when the provider reads the next block: during an outage nothing is skipped, the
                 // watcher waits (round 22).
-                if (!await CanReadLogs(web3, contract, from + 1, latest))
+                if (!await CanReadLogs(contract, from + 1, latest))
                 {
                     _singleBlockFailures = SingleBlockFailuresBeforeSkip - 1;
                     return (processed, state.LastScannedBlock, "Base log queries are failing; waiting for the provider");

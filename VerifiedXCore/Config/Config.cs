@@ -607,8 +607,10 @@ namespace VerifiedXCore.Config
 			Bitcoin.Services.BaseBridgeService.BaseRpcUrl3 = config.BaseBridgeRpcUrl3.Trim();
 		if (!string.IsNullOrWhiteSpace(config.BaseBridgeContract))
 			Bitcoin.Services.BaseBridgeService.ContractAddress = config.BaseBridgeContract.Trim();
+		// The network decides which Base chain its bridge is on: a configured id that differs is refused.
 		if (config.BaseBridgeChainId > 0)
-			Bitcoin.Services.BaseBridgeService.BaseChainId = config.BaseBridgeChainId;
+			Bitcoin.Services.BaseBridgeService.BaseChainId = Bitcoin.Services.BaseRpc.AcceptsConfiguredChainId(config.BaseBridgeChainId)
+				? config.BaseBridgeChainId : (int)Globals.BaseEvmChainId;
         }
         public static void ProcessABL()
         {
