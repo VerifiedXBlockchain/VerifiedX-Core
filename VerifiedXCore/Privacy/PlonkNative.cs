@@ -60,6 +60,14 @@ namespace VerifiedXCore.Privacy
         /// file's keys.
         /// </summary>
         public const uint CapBoundHashCapacity = 256;
+        /// <summary>
+        /// Bit 9: <see cref="plonk_verify3"/> judges proofs under the key-bound rules: the current rules, with the circuit's
+        /// whole verifier key (every selector, permutation and lookup commitment, and the circuit size) absorbed into the
+        /// transcript before the public inputs, so every challenge depends on the key the proof is checked against.
+        /// <see cref="plonk_prove_shield3"/>, <see cref="plonk_prove_transfer3"/>, <see cref="plonk_prove_unshield3"/> and
+        /// <see cref="plonk_prove_fee3"/> make them. The earlier verifiers and provers are unchanged.
+        /// </summary>
+        public const uint CapVerify3 = 512;
 
         /// <summary>Tree depth used by the v1 circuits (Merkle path = 32 sibling hashes).</summary>
         public const int TreeDepth = 32;
@@ -137,6 +145,10 @@ namespace VerifiedXCore.Privacy
         [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
         public static extern int plonk_verify2(byte circuitType, byte[] proof, nuint proofLen, byte[] publicInputs, nuint publicInputsLen);
 
+        /// <summary><see cref="plonk_verify"/> under the key-bound rules (<see cref="CapVerify3"/>).</summary>
+        [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
+        public static extern int plonk_verify3(byte circuitType, byte[] proof, nuint proofLen, byte[] publicInputs, nuint publicInputsLen);
+
         /// <summary>v0 prove: <paramref name="proofOut"/> must hold at least <paramref name="proofOutLen"/> bytes (in/out; grows if <see cref="ErrParam"/>).</summary>
         [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
         public static extern int plonk_prove_v0(byte circuitType, byte[] publicInputs, nuint publicInputsLen, byte[] proofOut, ref nuint proofOutLen);
@@ -187,6 +199,36 @@ namespace VerifiedXCore.Privacy
         /// </summary>
         [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
         public static extern int plonk_prove_fee(
+            byte[] witnessData, nuint witnessDataLen,
+            byte[] proofOut, ref nuint proofOutLen,
+            byte[] piOut, ref nuint piOutLen);
+
+        /// <summary><see cref="plonk_prove_shield"/> under the key-bound rules (<see cref="CapVerify3"/>): same arguments and witness.</summary>
+        [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
+        public static extern int plonk_prove_shield3(
+            ulong amountScaled,
+            byte[] randomness,
+            byte[] ownerPk,
+            byte[] proofOut, ref nuint proofOutLen,
+            byte[] piOut, ref nuint piOutLen);
+
+        /// <summary><see cref="plonk_prove_transfer"/> under the key-bound rules (<see cref="CapVerify3"/>): same arguments and witness.</summary>
+        [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
+        public static extern int plonk_prove_transfer3(
+            byte[] witnessData, nuint witnessDataLen,
+            byte[] proofOut, ref nuint proofOutLen,
+            byte[] piOut, ref nuint piOutLen);
+
+        /// <summary><see cref="plonk_prove_unshield"/> under the key-bound rules (<see cref="CapVerify3"/>): same arguments and witness.</summary>
+        [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
+        public static extern int plonk_prove_unshield3(
+            byte[] witnessData, nuint witnessDataLen,
+            byte[] proofOut, ref nuint proofOutLen,
+            byte[] piOut, ref nuint piOutLen);
+
+        /// <summary><see cref="plonk_prove_fee"/> under the key-bound rules (<see cref="CapVerify3"/>): same arguments and witness.</summary>
+        [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
+        public static extern int plonk_prove_fee3(
             byte[] witnessData, nuint witnessDataLen,
             byte[] proofOut, ref nuint proofOutLen,
             byte[] piOut, ref nuint piOutLen);

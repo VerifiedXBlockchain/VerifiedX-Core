@@ -17,17 +17,18 @@ namespace VerifiedXCore.Privacy
         private static int _circuitPinnedProbe = -1;
         private static int _verify2Probe = -1;
         private static int _boundHashCapacityProbe = -1;
+        private static int _verify3Probe = -1;
         private static uint _lastReportedUnpinnedCaps;
 
         /// <summary>
-        /// Every capability bit this build knows (<see cref="PlonkNative"/>, bits 0–8). The verifier keys come from the
+        /// Every capability bit this build knows (<see cref="PlonkNative"/>, bits 0–9). The verifier keys come from the
         /// SHA-256-pinned params file, but the verify logic and public-input layout come from the library; a library that
         /// reports a bit outside this set is a later circuit generation than the one this build pins, and this node does
         /// not verify proofs with it (<see cref="IsCircuitVersionPinned"/>).
         /// </summary>
         public const uint KnownCapabilities = PlonkNative.CapVerifyV1 | PlonkNative.CapParsePublicInputsV1 | PlonkNative.CapProveV1
             | PlonkNative.CapV1Circuits | PlonkNative.CapV1Prove | PlonkNative.CapVfxPi2Verify | PlonkNative.CapV2Circuits
-            | PlonkNative.CapVerify2 | PlonkNative.CapBoundHashCapacity;
+            | PlonkNative.CapVerify2 | PlonkNative.CapBoundHashCapacity | PlonkNative.CapVerify3;
 
         /// <summary>Replaceable for tests: the native library's capability bits.</summary>
         internal static Func<uint> Capabilities = () => PlonkNative.plonk_capabilities();
@@ -52,6 +53,9 @@ namespace VerifiedXCore.Privacy
 
         /// <summary>Whether the loaded library's current rules use the circuits with a fixed hash capacity (<see cref="PlonkNative.CapBoundHashCapacity"/>).</summary>
         public static bool IsBoundHashCapacityAvailable => _boundHashCapacityProbe == 1;
+
+        /// <summary>Whether the loaded library judges and makes proofs under the key-bound rules (<see cref="PlonkNative.CapVerify3"/>).</summary>
+        public static bool IsVerify3Available => _verify3Probe == 1;
 
         /// <summary>
         /// Whether the loaded library verifies v1 proofs against VFXPI1 version-2 public inputs (<see cref="PlonkNative.CapVfxPi2Verify"/>).
@@ -87,6 +91,7 @@ namespace VerifiedXCore.Privacy
                 _v2CircuitsProbe = (caps & PlonkNative.CapV2Circuits) != 0 ? 1 : 0;
                 _verify2Probe = (caps & PlonkNative.CapVerify2) != 0 ? 1 : 0;
                 _boundHashCapacityProbe = (caps & PlonkNative.CapBoundHashCapacity) != 0 ? 1 : 0;
+                _verify3Probe = (caps & PlonkNative.CapVerify3) != 0 ? 1 : 0;
             }
             catch
             {
@@ -99,6 +104,7 @@ namespace VerifiedXCore.Privacy
                 _v2CircuitsProbe = 0;
                 _verify2Probe = 0;
                 _boundHashCapacityProbe = 0;
+                _verify3Probe = 0;
             }
         }
 
