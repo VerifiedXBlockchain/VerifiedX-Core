@@ -35,6 +35,19 @@ namespace VerifiedXCore.Bitcoin.Models
         public int MessageVersion { get; set; }
     }
 
+    /// <summary>A request to sign the vBTCb contract's Refund(to, amount, burnId) for a refund VFX recorded (VBTCBridgeRefundState).</summary>
+    public class RefundAttestationRequest
+    {
+        /// <summary>The refund's id exactly as recorded: the contract refunds once by these bytes.</summary>
+        public string RefundId { get; set; } = string.Empty;
+        public string To { get; set; } = string.Empty;
+        public long AmountSats { get; set; }
+        public long ChainId { get; set; }
+        public string ContractAddress { get; set; } = string.Empty;
+        /// <summary>The contract's MESSAGE_VERSION(): only 4 (EIP-712) has a refund.</summary>
+        public int MessageVersion { get; set; }
+    }
+
     public class ValidatorUpdateSigningRequest
     {
         public string UpdateType { get; set; } = string.Empty;

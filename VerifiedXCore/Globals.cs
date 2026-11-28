@@ -572,6 +572,58 @@ namespace VerifiedXCore
         public const long BridgeAllocationsArrayTestnetHeight = long.MaxValue;
 
         /// <summary>
+        /// From this height a pinned bridge exit part whose Bitcoin fee the rule can raise no further (the next doubling
+        /// leaves too little to pay, passes the highest fee rate, or the part has its most transactions) and whose newest
+        /// transaction has been unconfirmed for BtcAttestRules.StuckPinBlocks no longer keeps its coins to itself: a
+        /// withdrawal that pays a higher fee rate may be fixed on them, as on a stuck withdrawal's. Whichever confirms is
+        /// paid; a voided part's exit is failed and its locks restored only once the voiding spend is buried
+        /// (BtcAttestRules.ExitReopenBurialBlocks), so its signed transaction cannot also confirm after a reorganisation.
+        /// Below it an exit part is never taken and a voided part with no other part paying fails its exit at once. A
+        /// consensus change to apply: every validator runs it from the same height. Unset (long.MaxValue) on mainnet and
+        /// testnet until the release that activates it. Testnet value in GlobalsNetworkHeights.
+        /// </summary>
+        public static long ExitPartTakeoverHeight = long.MaxValue;
+        public const long ExitPartTakeoverTestnetHeight = long.MaxValue;
+
+        /// <summary>
+        /// From this height a Base burn for a Bitcoin exit that VFX cannot pay (below BtcWithdrawals.MinExitPartSats) is
+        /// refunded instead of left unpaid: the caster committee agrees on it and sends a VBTC_V2_BRIDGE_BURN_REFUND, whose
+        /// apply records a VBTCBridgeRefundState and consumes the burn, and the validators sign that record for the vBTCb
+        /// contract's refundBurn. Below it the type is not accepted. A consensus change to apply: an un-upgraded node refuses
+        /// the block that carries one. Unset (long.MaxValue) on mainnet and testnet until the release that activates it.
+        /// Testnet value in GlobalsNetworkHeights.
+        /// </summary>
+        public static long BridgeBurnRefundHeight = long.MaxValue;
+        public const long BridgeBurnRefundTestnetHeight = long.MaxValue;
+
+        /// <summary>
+        /// From this height the least payout a holder names on Base (burnForBTCExitWithMinPayout's BTCExitMinPayout) is part
+        /// of the exit: the exit transaction carries it (MinPayoutSats), the exit votes are bound to it, it is checked against
+        /// the burn at admission and recorded with the exit; each part of the exit is first pinned only on a transaction that
+        /// pays it at least its share (rounded up), and its fee is not raised past that share. An exit with a minimum that is
+        /// failed by rule may be refunded (VBTC_V2_BRIDGE_BURN_REFUND) instead of made again. Below it the minimum is ignored.
+        /// A consensus change to apply: an un-upgraded node judges the exit's votes on the message without the minimum and
+        /// refuses the block. Unset (long.MaxValue) on mainnet and testnet until the release that activates it. Testnet value in
+        /// GlobalsNetworkHeights.
+        /// </summary>
+        public static long ExitMinPayoutHeight = long.MaxValue;
+        public const long ExitMinPayoutTestnetHeight = long.MaxValue;
+
+        /// <summary>
+        /// From this height an exit records the Base address that burned (BaseBurner, bound by the exit votes and checked
+        /// against the burn at admission), and a part of an exit whose other part is paid, pinned or refunded, voided and
+        /// still waiting BtcAttestRules.ExitPartRefundBlocks Bitcoin blocks after the voiding spend is buried (its vault cannot
+        /// pay it), is closed void by rule: its locks are given back once and the chain records a refund of exactly that
+        /// part's satoshis to the burner (VBTCBridgeRefundState "{burn}#{vault}"), which the validators sign for refundBurn.
+        /// The exit completes once every part is paid, closed as never payable, or refunded. An exit recorded without a burner
+        /// keeps waiting as before. A consensus change to apply: an un-upgraded node judges the exit votes without the burner
+        /// and refuses the block. Unset (long.MaxValue) on mainnet and testnet until the release that activates it. Testnet
+        /// value in GlobalsNetworkHeights.
+        /// </summary>
+        public static long ExitPartRefundHeight = long.MaxValue;
+        public const long ExitPartRefundTestnetHeight = long.MaxValue;
+
+        /// <summary>
         /// From this height a reserve's Recover() reads each pending NFT_TX row's call as the dispatchers read it. Below it
         /// a row whose Data was not an array of objects made the recovery throw part-way, so every later row, the balance
         /// sweep, the contract re-own and the vBTC sweep never ran, and the reserve stayed under its vault key. Active from LedgerRulesBatchHeight.

@@ -238,6 +238,7 @@ namespace VerifiedXCore.Data
                 PrivacyDbContext.PRIV_COMMITMENTS, PrivacyDbContext.PRIV_NULLIFIERS, PrivacyDbContext.PRIV_POOL_STATE, PrivacyDbContext.PRIV_MERKLE_NODES,
                 // Bridge lock and exit state and consumed burns.
                 Bitcoin.Models.VBTCBridgeLockState.CollectionName, Bitcoin.Models.VBTCBridgeBtcExitState.CollectionName, Bitcoin.Models.VBTCBridgeConsumedBurn.CollectionName,
+                Bitcoin.Models.VBTCBridgeRefundState.CollectionName,
                 // Contracts' ledgers once they have moved (Globals.VaultLedgerHeight).
                 Bitcoin.Attestation.VaultLedgerStore.CollectionName,
             };
@@ -930,6 +931,11 @@ namespace VerifiedXCore.Data
                         if (tx.TransactionType == TransactionType.VBTC_V2_BRIDGE_EXIT_TO_BTC_FAIL)
                         {
                             ApplyVBTCBridgeExitToBTCFail(tx, block.Height);
+                        }
+
+                        if (tx.TransactionType == TransactionType.VBTC_V2_BRIDGE_BURN_REFUND && block.Height >= Globals.BridgeBurnRefundHeight)
+                        {
+                            ApplyVBTCBridgeBurnRefund(tx, block.Height);
                         }
 
                         if(tx.TransactionType == TransactionType.RESERVE)
@@ -4367,6 +4373,13 @@ namespace VerifiedXCore.Data
                 };
                 if (VerifiedXCore.Bitcoin.Attestation.BtcAttestRules.Recording(tx.Height))
                     exitState.ExitVfxHeight = tx.Height;
+                // The holder's least payout, from Globals.ExitMinPayoutHeight (as validation read it).
+                if (tx.Height >= Globals.ExitMinPayoutHeight && jobj["MinPayoutSats"] is JValue { Type: JTokenType.Integer, Value: long minPayout })
+                    exitState.MinPayoutSats = Math.Clamp(minPayout, 0, totalAmountSats.Value);
+                // The Base address that burned, from Globals.ExitPartRefundHeight (as validation read it).
+                if (tx.Height >= Globals.ExitPartRefundHeight && jobj["BaseBurner"] is JValue { Type: JTokenType.String, Value: string burner }
+                    && VerifiedXCore.Bitcoin.Services.BridgeBurnRefundRules.IsBurnerAddress(burner))
+                    exitState.BaseBurner = burner;
                 // A prior FAILED record for this burn (locks already restored) is superseded by the re-exit.
                 if (tx.Height >= Globals.BridgeIntraBlockGuardHeight)
                     VBTCBridgeBtcExitState.DeleteFailedRecord(baseBurnTxHash.Trim());
@@ -4383,6 +4396,45 @@ namespace VerifiedXCore.Data
             {
                 NoteApplyStepFailed(tx.Height, ex); // a fault of this node's storage is flagged (fourth review, round 8)
                 ErrorLogUtility.LogError($"ApplyVBTCBridgeExitToBTC error: {ex.Message}", "StateData.ApplyVBTCBridgeExitToBTC()");
+            }
+        }
+
+        /// <summary>
+        /// A refund of a Base burn VFX cannot pay (Globals.BridgeBurnRefundHeight): the refund is recorded under the burn's id
+        /// for the validators to sign, and the burn is consumed, so no exit or second refund of it can follow.
+        /// </summary>
+        private static void ApplyVBTCBridgeBurnRefund(Transaction tx, long height)
+        {
+            try
+            {
+                var (refund, refusal) = VerifiedXCore.Bitcoin.Services.BridgeBurnRefundRules.Read(tx, height);
+                if (refund == null)
+                {
+                    ErrorLogUtility.LogError($"ApplyVBTCBridgeBurnRefund: {refusal} (tx {tx.Hash})", "StateData.ApplyVBTCBridgeBurnRefund()");
+                    return;
+                }
+                if (VBTCBridgeConsumedBurn.IsBurnUsedAnywhere(refund.BurnId) || VBTCBridgeRefundState.IsBurnRefunded(refund.BurnId))
+                {
+                    ErrorLogUtility.LogError($"ApplyVBTCBridgeBurnRefund: burn {refund.BurnId} is already redeemed or refunded; nothing recorded (tx {tx.Hash})", "StateData.ApplyVBTCBridgeBurnRefund()");
+                    return;
+                }
+                if (!VBTCBridgeRefundState.TryInsert(new VBTCBridgeRefundState
+                {
+                    RefundId = refund.BurnId,
+                    BaseBurnTxHash = refund.BurnId,
+                    BaseBurner = refund.Burner,
+                    AmountSats = refund.AmountSats,
+                    Reason = refund.Reason,
+                    VfxTxHash = tx.Hash,
+                    VfxHeight = height,
+                }))
+                    return;
+                VBTCBridgeConsumedBurn.TryMarkConsumed(refund.BurnId, "BRIDGE_REFUND", tx.Hash, height);
+            }
+            catch (Exception ex)
+            {
+                NoteApplyStepFailed(height, ex);
+                ErrorLogUtility.LogError($"ApplyVBTCBridgeBurnRefund error: {ex.Message}", "StateData.ApplyVBTCBridgeBurnRefund()");
             }
         }
 

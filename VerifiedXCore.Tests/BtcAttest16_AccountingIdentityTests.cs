@@ -532,7 +532,7 @@ namespace VerifiedXCore.Tests
             Add("attestation", DbContext.DB_BtcAttest, BtcAttestStore.AllCollections);
             Add("withdrawals and bridge", DbContext.DB_VBTCWithdrawalRequests, new[]
             {
-                DbContext.RSRV_VBTC_WITHDRAWAL_REQUESTS, VBTCBridgeLockState.CollectionName, VBTCBridgeBtcExitState.CollectionName,
+                DbContext.RSRV_VBTC_WITHDRAWAL_REQUESTS, VBTCBridgeLockState.CollectionName, VBTCBridgeBtcExitState.CollectionName, VBTCBridgeRefundState.CollectionName,
             }, numbered: true);
             Add("withdrawals and bridge", DbContext.DB_VBTCWithdrawalRequests, new[] { VBTCBridgeConsumedBurn.CollectionName }, numbered: true, "Timestamp");
             Add("contract state", DbContext.DB_SmartContractStateTrei, DbContext.DB_SmartContractStateTrei.GetCollectionNames(), numbered: true);

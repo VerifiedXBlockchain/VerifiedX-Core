@@ -40,6 +40,16 @@ namespace VerifiedXCore.Bitcoin.Models
         /// </summary>
         public string? DrawnAllocationsJson { get; set; }
         public string? BtcTxHash { get; set; }
+        /// <summary>
+        /// The least payout the holder named on Base, recorded from Globals.ExitMinPayoutHeight (0: none). Each part is first
+        /// pinned only on a transaction that pays it at least its share of this (VaultWithdrawalRow.MinPayoutShareSats).
+        /// </summary>
+        public long MinPayoutSats { get; set; }
+        /// <summary>
+        /// The Base address that burned, in lower case, recorded from Globals.ExitPartRefundHeight (null before, or when the exit
+        /// did not carry it): the recipient of a refund of a part its vault cannot pay. An exit without one keeps waiting.
+        /// </summary>
+        public string? BaseBurner { get; set; }
 
         public const string CollectionName = "rsrv_vbtc_bridge_btc_exits";
 
