@@ -26,7 +26,7 @@ namespace VerifiedXCore.Tests
             {
                 PlonkProofVerifier.ClearVerifiedProofCache();
                 PlonkProofVerifier.NativeVerify = (_, _, _, _) => code;
-                Assert.Equal(PlonkVerifyResult.Invalid, PlonkProofVerifier.VerifyRaw(PlonkCircuitType.Shield, new byte[] { 1, 2, 3 }, new byte[] { 4 }, currentRules: true));
+                Assert.Equal(PlonkVerifyResult.Invalid, PlonkProofVerifier.VerifyRaw(PlonkCircuitType.Shield, new byte[] { 1, 2, 3 }, new byte[] { 4 }, PlonkRules.Current));
                 Assert.False(BlockValidatorService.IsStateCorruptionSignal($"{PlonkProofVerifier.FailedProofPrefix} (primary circuit)."));
             }
             finally { PlonkProofVerifier.NativeVerify = prior; }

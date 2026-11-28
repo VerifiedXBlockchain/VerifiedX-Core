@@ -80,7 +80,7 @@ namespace VerifiedXCore.Tests
             Assert.Equal(401, Globals.CustomTestNetRulesHeight);
             // Rules added after Marigold was already running start at CustomTestNetInputRulesHeight instead (a past
             // height would judge blocks produced under the old rules); every other rule is active by 401.
-            var addedWhileRunning = new[] { nameof(Globals.CanonicalInputHeight), nameof(Globals.RawDataVerbatimHeight), nameof(Globals.StrictDataReaderHeight), nameof(Globals.ContractBodyKeySpellingHeight), nameof(Globals.ContractRunLimitsHeight), nameof(Globals.VrfMixHeight), nameof(Globals.BridgeLockMinimumHeight), nameof(Globals.BridgeAllocationsArrayHeight), nameof(Globals.PoolUnlockCreditsAddressHeight), nameof(Globals.BridgeAllocationsSignableHeight) };
+            var addedWhileRunning = new[] { nameof(Globals.CanonicalInputHeight), nameof(Globals.RawDataVerbatimHeight), nameof(Globals.StrictDataReaderHeight), nameof(Globals.ContractBodyKeySpellingHeight), nameof(Globals.ContractRunLimitsHeight), nameof(Globals.VrfMixHeight), nameof(Globals.BridgeLockMinimumHeight), nameof(Globals.BridgeAllocationsArrayHeight), nameof(Globals.PoolUnlockCreditsAddressHeight), nameof(Globals.BridgeLockEvmAddressHeight), nameof(Globals.WithdrawalOwnScriptAttributionHeight), nameof(Globals.VaultLedgerHeight), nameof(Globals.PlonkKeyBoundRulesHeight), nameof(Globals.BridgeVotesBoundToAttemptHeight), nameof(Globals.BridgeAllocationsSignableHeight) };
             var late = RuleHeights()
                 .Where(f => !addedWhileRunning.Contains(f.Name))
                 .Select(f => (f.Name, Value: (long)f.GetValue(null)!))
@@ -107,11 +107,17 @@ namespace VerifiedXCore.Tests
             Assert.Equal(Globals.CustomTestNetInputRulesHeight, Globals.ContractBodyKeySpellingHeight);
             Assert.Equal(Globals.CustomTestNetInputRulesHeight, Globals.ContractRunLimitsHeight);
             Assert.Equal(Globals.CustomTestNetInputRulesHeight, Globals.VrfMixHeight);
-            Assert.Equal(Globals.CustomTestNetInputRulesHeight, Globals.BridgeLockMinimumHeight);
-            Assert.Equal(Globals.CustomTestNetInputRulesHeight, Globals.BridgeAllocationsArrayHeight);
-            Assert.Equal(Globals.CustomTestNetInputRulesHeight, Globals.PoolUnlockCreditsAddressHeight);
-            Assert.Equal(Globals.CustomTestNetInputRulesHeight, Globals.BridgeAllocationsSignableHeight);
+            Assert.Equal(Globals.CustomTestNetLateRulesHeight, Globals.BridgeLockMinimumHeight);
+            Assert.Equal(Globals.CustomTestNetLateRulesHeight, Globals.BridgeAllocationsArrayHeight);
+            Assert.Equal(Globals.CustomTestNetLateRulesHeight, Globals.PoolUnlockCreditsAddressHeight);
+            Assert.Equal(Globals.CustomTestNetLateRulesHeight, Globals.BridgeLockEvmAddressHeight);
+            Assert.Equal(Globals.CustomTestNetLateRulesHeight, Globals.WithdrawalOwnScriptAttributionHeight);
+            Assert.Equal(Globals.CustomTestNetLateRulesHeight, Globals.VaultLedgerHeight);
+            Assert.Equal(Globals.CustomTestNetLateRulesHeight, Globals.PlonkKeyBoundRulesHeight);
+            Assert.Equal(Globals.CustomTestNetLateRulesHeight, Globals.BridgeVotesBoundToAttemptHeight);
+            Assert.Equal(Globals.CustomTestNetLateRulesHeight, Globals.BridgeAllocationsSignableHeight);
             Assert.True(Globals.CustomTestNetInputRulesHeight > Globals.CustomTestNetRulesHeight, "rules added while Marigold runs start after its tip, not at 401");
+            Assert.True(Globals.CustomTestNetLateRulesHeight > Globals.CustomTestNetInputRulesHeight, "rules added after Marigold passed 8,500 start after its tip then");
         }
 
         [Fact]
@@ -123,6 +129,10 @@ namespace VerifiedXCore.Tests
             Assert.Equal(long.MaxValue, Globals.RawDataVerbatimHeight);
             Assert.Equal(long.MaxValue, Globals.BridgeAllocationsArrayHeight);
             Assert.Equal(long.MaxValue, Globals.PoolUnlockCreditsAddressHeight);
+            Assert.Equal(long.MaxValue, Globals.BridgeLockEvmAddressHeight);
+            Assert.Equal(long.MaxValue, Globals.WithdrawalOwnScriptAttributionHeight);
+            Assert.Equal(long.MaxValue, Globals.PlonkKeyBoundRulesHeight);
+            Assert.Equal(long.MaxValue, Globals.BridgeVotesBoundToAttemptHeight);
             Assert.Equal(long.MaxValue, Globals.BridgeAllocationsSignableHeight);
 
             StartTestnetNode(new Config.Config { TestNet = true });
@@ -136,6 +146,10 @@ namespace VerifiedXCore.Tests
             Assert.Equal(Globals.ReleaseRulesTestnetHeight, Globals.StrictDataReaderHeight);
             Assert.Equal(long.MaxValue, Globals.BridgeAllocationsArrayHeight); // not in that release
             Assert.Equal(long.MaxValue, Globals.PoolUnlockCreditsAddressHeight); // not in that release
+            Assert.Equal(long.MaxValue, Globals.BridgeLockEvmAddressHeight); // not in that release
+            Assert.Equal(long.MaxValue, Globals.WithdrawalOwnScriptAttributionHeight); // not in that release
+            Assert.Equal(Globals.PlonkKeyBoundRulesTestnetHeight, Globals.PlonkKeyBoundRulesHeight); // not in that release
+            Assert.Equal(long.MaxValue, Globals.BridgeVotesBoundToAttemptHeight); // not in that release
             Assert.Equal(long.MaxValue, Globals.BridgeAllocationsSignableHeight); // not in that release
         }
 
@@ -152,6 +166,29 @@ namespace VerifiedXCore.Tests
             Assert.Equal(Globals.PlonkCurrentRulesTestnetHeight, Globals.PlonkCurrentRulesHeight);
             Assert.Equal(rule3, Globals.TXHeightRule3);
             Assert.Equal(Globals.ReleaseRulesTestnetHeight, Globals.CanonicalInputHeight);
+        }
+
+        /// <summary>
+        /// A payment to a withdrawal's own vault stops settling it at WithdrawalOwnScriptAttributionHeight; such a withdrawal
+        /// stops being fixed on coins at WithdrawalDestinationRecheckHeight. The first must never come before the second, on
+        /// any network: between the two, a bridge exit's part to its own vault would be voided by its own payment, fixed
+        /// again, paid to the vault again, and so on, at a Bitcoin fee each time.
+        /// </summary>
+        [Fact]
+        public void OwnScriptAttribution_StartsNoEarlierThanTheDestinationRecheck_OnEveryNetwork()
+        {
+            Globals.IsTestNet = false;
+            Globals.IsCustomTestNet = false;
+            Globals.ApplyNetworkHeights();
+            Assert.True(Globals.WithdrawalOwnScriptAttributionHeight >= Globals.WithdrawalDestinationRecheckHeight, "mainnet");
+
+            StartTestnetNode(new Config.Config { TestNet = true });
+            Assert.False(Globals.IsCustomTestNet);
+            Assert.True(Globals.WithdrawalOwnScriptAttributionHeight >= Globals.WithdrawalDestinationRecheckHeight, "testnet");
+
+            StartTestnetNode(new Config.Config { TestNet = true, TestNetName = "marigold" });
+            Assert.True(Globals.IsCustomTestNet);
+            Assert.True(Globals.WithdrawalOwnScriptAttributionHeight >= Globals.WithdrawalDestinationRecheckHeight, "custom testnet");
         }
 
         [Fact]

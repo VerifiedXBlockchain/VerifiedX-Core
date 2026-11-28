@@ -58,11 +58,75 @@ namespace VerifiedXCore.Bitcoin.Services
         /// The plans tried, in order: dust passed over; every lock in order; the largest first (more locks at the front
         /// than one plan names, each just above the dust line, say: round 28).
         /// </summary>
-        private static IEnumerable<List<PoolUnlockAllocation>?> PlanCandidates(decimal exitAmountBtc, HashSet<string>? excludeContractUIDs)
+        private static IEnumerable<List<PoolUnlockAllocation>?> PlanCandidates(decimal exitAmountBtc, HashSet<string>? excludeContractUIDs, List<VBTCBridgeLockState>? pool = null)
         {
-            yield return Fitting(ComputeAllocationPlan(exitAmountBtc, excludeContractUIDs, passOverDust: true, largestFirst: false));
-            yield return Fitting(ComputeAllocationPlan(exitAmountBtc, excludeContractUIDs, passOverDust: false, largestFirst: false));
-            yield return Fitting(ComputeAllocationPlan(exitAmountBtc, excludeContractUIDs, passOverDust: false, largestFirst: true));
+            yield return Fitting(ComputeAllocationPlan(exitAmountBtc, excludeContractUIDs, passOverDust: true, largestFirst: false, pool));
+            yield return Fitting(ComputeAllocationPlan(exitAmountBtc, excludeContractUIDs, passOverDust: false, largestFirst: false, pool));
+            yield return Fitting(ComputeAllocationPlan(exitAmountBtc, excludeContractUIDs, passOverDust: false, largestFirst: true, pool));
+        }
+
+        /// <summary>Pairs of vaults one search tries at most before it plans on more vaults (each pair is three plans in memory).</summary>
+        private const int MaxPairsTried = 16;
+
+        /// <summary>The locks a plan may draw on, oldest first, read once for every plan one search tries.</summary>
+        private static List<VBTCBridgeLockState> Pool() => VBTCBridgeLockState.GetAvailableLocksFIFO() ?? new List<VBTCBridgeLockState>();
+
+        /// <summary>
+        /// What each vault's locks hold for a plan (locks a plan can name, in whole satoshis), vaults in the order of their
+        /// oldest lock, leaving out <paramref name="leftOut"/>.
+        /// </summary>
+        private static List<(string Vault, decimal Total)> VaultTotals(HashSet<string> leftOut, List<VBTCBridgeLockState> pool) =>
+            pool
+                .Where(l => !leftOut.Contains(l.SmartContractUID) && Nameable(l.LockId) && NameableText(l.SmartContractUID))
+                .GroupBy(l => l.SmartContractUID, StringComparer.Ordinal)
+                .Select(g => (g.Key, g.Sum(l => Math.Round(l.RemainingAmount, 8, MidpointRounding.ToZero))))
+                .ToList();
+
+        /// <summary>
+        /// Plans on as few vaults as can pay, each set's locks tried as <see cref="PlanCandidates"/> tries the pool: one
+        /// vault alone, for each vault whose locks hold the whole amount (and at least its minimum part,
+        /// <paramref name="minOf"/>), vaults in the order of their oldest lock; then pairs of vaults that hold the amount
+        /// between them and whose minimums fit in it, largest first, at most <see cref="MaxPairsTried"/> (an unlock's
+        /// minimum differs by vault, so the two largest may not both reach theirs while another pair can); then the vaults
+        /// that hold the most, largest first, until together they hold the amount (no fewer vaults can). An exit to
+        /// Bitcoin pays a miner fee for each vault it draws on, and an unlock leaves its recipient a position on each: the
+        /// plan followed the queue across vaults when fewer could pay it, and the holder paid a fee a vault.
+        /// </summary>
+        private static IEnumerable<List<PoolUnlockAllocation>?> FewVaultCandidates(decimal amountBtc, HashSet<string> leftOut, List<VBTCBridgeLockState> pool, Func<string, decimal> minOf)
+        {
+            var totals = VaultTotals(leftOut, pool);
+            IEnumerable<List<PoolUnlockAllocation>?> On(ICollection<string> vaults) =>
+                PlanCandidates(amountBtc, new HashSet<string>(leftOut.Concat(totals.Select(t => t.Vault).Where(v => !vaults.Contains(v))), StringComparer.Ordinal), pool);
+            foreach (var (vault, total) in totals)
+            {
+                if (total < amountBtc || amountBtc < minOf(vault)) continue;
+                foreach (var candidate in On(new[] { vault }))
+                    yield return candidate;
+            }
+            var minimum = totals.ToDictionary(t => t.Vault, t => minOf(t.Vault), StringComparer.Ordinal);
+            var byTotal = totals.OrderByDescending(t => t.Total).ToList(); // stable: equal totals keep queue order
+            var pairs = 0;
+            for (var i = 0; i < byTotal.Count && pairs < MaxPairsTried; i++)
+                for (var j = i + 1; j < byTotal.Count && pairs < MaxPairsTried; j++)
+                {
+                    if (byTotal[i].Total + byTotal[j].Total < amountBtc) break; // the rest are smaller still
+                    if (byTotal[i].Total >= amountBtc && amountBtc >= minimum[byTotal[i].Vault]) break; // the vault alone was tried
+                    if (minimum[byTotal[i].Vault] + minimum[byTotal[j].Vault] > amountBtc) continue;
+                    pairs++;
+                    foreach (var candidate in On(new[] { byTotal[i].Vault, byTotal[j].Vault }))
+                        yield return candidate;
+                }
+            var fewest = new List<string>();
+            decimal held = 0M;
+            foreach (var (vault, total) in byTotal)
+            {
+                if (held >= amountBtc) break;
+                fewest.Add(vault);
+                held += total;
+            }
+            if (fewest.Count > 2 && held >= amountBtc)
+                foreach (var candidate in On(fewest))
+                    yield return candidate;
         }
 
         /// <summary>
@@ -79,9 +143,9 @@ namespace VerifiedXCore.Bitcoin.Services
         private static List<PoolUnlockAllocation>? Fitting(List<PoolUnlockAllocation>? plan) =>
             plan != null && PlanBytes(plan) <= MaxPlanBytes ? plan : null;
 
-        private static List<PoolUnlockAllocation>? ComputeAllocationPlan(decimal exitAmountBtc, HashSet<string>? excludeContractUIDs, bool passOverDust, bool largestFirst)
+        private static List<PoolUnlockAllocation>? ComputeAllocationPlan(decimal exitAmountBtc, HashSet<string>? excludeContractUIDs, bool passOverDust, bool largestFirst, List<VBTCBridgeLockState>? pool = null)
         {
-            var available = VBTCBridgeLockState.GetAvailableLocksFIFO();
+            var available = pool ?? VBTCBridgeLockState.GetAvailableLocksFIFO();
             if (available != null && largestFirst)
                 available = available.OrderByDescending(l => l.RemainingAmount).ToList();
             if (available == null || available.Count == 0)
@@ -145,29 +209,38 @@ namespace VerifiedXCore.Bitcoin.Services
         /// </summary>
         public static List<PoolUnlockAllocation>? ComputeUnlockAllocationPlan(decimal amountBtc, long height, string? destination = null)
         {
-            var vaults = (VBTCBridgeLockState.GetAvailableLocksFIFO() ?? new List<VBTCBridgeLockState>())
-                .Select(l => l.SmartContractUID).Distinct(StringComparer.Ordinal).ToList();
+            var pool = Pool();
+            var vaults = pool.Select(l => l.SmartContractUID).Distinct(StringComparer.Ordinal).ToList();
             var leftOut = vaults
                 .Where(c => Attestation.BtcLegacyFreeze.Active(height) && Attestation.BtcLegacyFreeze.IsLegacyVault(c)
                     || destination != null && Attestation.BtcVaultLedger.CreditRefusal(SmartContractStateTrei.GetSmartContractState(c), destination) != null
                     || Attestation.BtcVaultKeys.CannotSignRefusal(c) != null)
                 .ToHashSet(StringComparer.Ordinal);
             if (destination == null || height < Globals.VaultMinimumPositionHeight)
-                return leftOut.Count == 0 ? ComputeAllocationPlan(amountBtc) : ComputeAllocationPlan(amountBtc, leftOut);
+                return FewVaultCandidates(amountBtc, leftOut, pool, _ => 0M).FirstOrDefault(p => p != null)
+                    ?? PlanCandidates(amountBtc, leftOut.Count == 0 ? null : leftOut, pool).FirstOrDefault(p => p != null);
             // As for an exit's parts: each kind of plan is tried, and a split moved between its vaults, before a vault whose
             // share is too small is left out.
             decimal MinOf(string vault) => Attestation.BtcVaultLedger.UnlockShareMinimum(vault, destination, height);
             List<string> TooSmall(List<PoolUnlockAllocation> plan) => plan.GroupBy(a => a.SmartContractUID, StringComparer.Ordinal)
                 .Where(g => g.Sum(a => a.UnlockAmount) < MinOf(g.Key)).Select(g => g.Key).ToList();
+            foreach (var (vault, total) in VaultTotals(leftOut, pool))
+                if (total < MinOf(vault)) leftOut.Add(vault);
+            foreach (var few in FewVaultCandidates(amountBtc, leftOut, pool, MinOf))
+            {
+                if (few == null) continue;
+                if (TooSmall(few).Count == 0) return few;
+                if (Rebalanced(few, MinOf, pool) is { } lifted && TooSmall(lifted).Count == 0) return lifted;
+            }
             while (true)
             {
                 List<PoolUnlockAllocation>? first = null;
-                foreach (var candidate in PlanCandidates(amountBtc, leftOut))
+                foreach (var candidate in PlanCandidates(amountBtc, leftOut, pool))
                 {
                     if (candidate == null) continue;
                     first ??= candidate;
                     if (TooSmall(candidate).Count == 0) return candidate;
-                    if (Rebalanced(candidate, MinOf) is { } moved && TooSmall(moved).Count == 0) return moved;
+                    if (Rebalanced(candidate, MinOf, pool) is { } moved && TooSmall(moved).Count == 0) return moved;
                 }
                 if (first == null) return null;
                 foreach (var vault in TooSmall(first)) leftOut.Add(vault); // each pass leaves out at least one more vault
@@ -188,8 +261,8 @@ namespace VerifiedXCore.Bitcoin.Services
             if (!Attestation.BtcAttestRules.Recording(height))
                 return ComputeAllocationPlan(exitAmountBtc, excludeContractUIDs);
 
-            var contracts = (VBTCBridgeLockState.GetAvailableLocksFIFO() ?? new List<VBTCBridgeLockState>())
-                .Select(l => l.SmartContractUID).Distinct(StringComparer.Ordinal).ToList();
+            var pool = Pool();
+            var contracts = pool.Select(l => l.SmartContractUID).Distinct(StringComparer.Ordinal).ToList();
             var watched = contracts.Where(c => Attestation.BtcAttestBalance.IsAttestedVault(c)).ToHashSet(StringComparer.Ordinal);
             var older = contracts.Where(c => !watched.Contains(c)).ToHashSet(StringComparer.Ordinal);
             var paidTo = new HashSet<string>(StringComparer.Ordinal);
@@ -205,7 +278,7 @@ namespace VerifiedXCore.Bitcoin.Services
 
             if (!Attestation.BtcLegacyFreeze.Active(height))
             {
-                var fromOlder = ComputeAllocationPlan(exitAmountBtc, Without(watched));
+                var fromOlder = PlanCandidates(exitAmountBtc, Without(watched), pool).FirstOrDefault(p => p != null);
                 if (fromOlder != null) return fromOlder;
             }
             // A vault is never asked for less than a Bitcoin transaction can pay (the exit would be refused). A vault
@@ -217,15 +290,28 @@ namespace VerifiedXCore.Bitcoin.Services
             static List<string> TooSmall(List<PoolUnlockAllocation> plan) => plan.GroupBy(a => a.SmartContractUID, StringComparer.Ordinal)
                 .Where(g => (long)(g.Sum(a => a.UnlockAmount) * Attestation.BtcAttestBalance.SatsPerBtc) < Attestation.BtcWithdrawals.MinExitPartSats)
                 .Select(g => g.Key).ToList();
+            // A vault whose locks hold less than the smallest part altogether can pay no part, and is left out from the
+            // start. Vaults were left out by the share the first plan gave them, and one that could pay the whole exit
+            // by itself was dropped with the vault that could not.
+            static decimal MinPart(string _) => Attestation.BtcWithdrawals.MinExitPartSats / Attestation.BtcAttestBalance.SatsPerBtc;
+            foreach (var (vault, total) in VaultTotals(leftOut, pool))
+                if (total < MinPart(vault)) leftOut.Add(vault);
+            // As few vaults as can pay it: a miner fee each.
+            foreach (var few in FewVaultCandidates(exitAmountBtc, leftOut, pool, MinPart))
+            {
+                if (few == null) continue;
+                if (TooSmall(few).Count == 0) return few;
+                if (Rebalanced(few, MinPart, pool) is { } lifted && TooSmall(lifted).Count == 0) return lifted;
+            }
             while (true)
             {
                 List<PoolUnlockAllocation>? first = null;
-                foreach (var candidate in PlanCandidates(exitAmountBtc, leftOut))
+                foreach (var candidate in PlanCandidates(exitAmountBtc, leftOut, pool))
                 {
                     if (candidate == null) continue;
                     first ??= candidate;
                     if (TooSmall(candidate).Count == 0) return candidate;
-                    if (Rebalanced(candidate, _ => Attestation.BtcWithdrawals.MinExitPartSats / Attestation.BtcAttestBalance.SatsPerBtc) is { } moved && TooSmall(moved).Count == 0) return moved;
+                    if (Rebalanced(candidate, MinPart, pool) is { } moved && TooSmall(moved).Count == 0) return moved;
                 }
                 if (first == null) return null;
                 foreach (var vault in TooSmall(first)) leftOut.Add(vault);
@@ -235,31 +321,51 @@ namespace VerifiedXCore.Bitcoin.Services
         /// <summary>
         /// A plan with a vault's part under its minimum (<paramref name="minOf"/>: an exit's smallest part, or what an
         /// unlock must give its destination there), made valid by moving the shortfall to that vault from another vault
-        /// whose part stays at or above its own minimum (and within the locks already planned). A plan of one vault's
-        /// whole locks and a little of the next was given up although such a split existed (fifth review, round 29).
-        /// Null when no such move is found.
+        /// whose part stays at or above its own minimum. A plan of one vault's whole locks and a little of the next was
+        /// given up although such a split existed (fifth review, round 29). The shortfall is taken from as many other
+        /// vaults as it needs, each down to its own minimum and no further: one vault had to spare it all, and three
+        /// vaults of 30,000 sats could not pay an exit of 80,000 although 27,000, 27,000 and 26,000 could. The short vault
+        /// draws on its planned locks first, then on its other locks in queue order: held to the locks already planned, a
+        /// vault whose next lock would have lifted it was given up. In whole satoshis. Null when no such move is found,
+        /// or the plan would not fit one transaction.
         /// </summary>
-        private static List<PoolUnlockAllocation>? Rebalanced(List<PoolUnlockAllocation> plan, Func<string, decimal> minOf)
+        private static List<PoolUnlockAllocation>? Rebalanced(List<PoolUnlockAllocation> plan, Func<string, decimal> minOf, List<VBTCBridgeLockState> pool)
         {
-            var remaining = (VBTCBridgeLockState.GetAvailableLocksFIFO() ?? new List<VBTCBridgeLockState>())
+            const decimal sat = 0.00000001M;
+            static decimal Up(decimal btc) => Math.Ceiling(btc / sat) * sat;
+            static decimal Down(decimal btc) => Math.Floor(btc / sat) * sat;
+            var available = pool
+                .Where(l => Nameable(l.LockId) && NameableText(l.SmartContractUID)).ToList();
+            var remaining = available
                 .GroupBy(l => l.LockId, StringComparer.Ordinal)
                 .ToDictionary(g => g.Key, g => Math.Round(g.First().RemainingAmount, 8, MidpointRounding.ToZero), StringComparer.Ordinal);
             var moved = plan.Select(a => new PoolUnlockAllocation { LockId = a.LockId, UnlockAmount = a.UnlockAmount, SmartContractUID = a.SmartContractUID }).ToList();
             decimal Share(string vault) => moved.Where(a => a.SmartContractUID == vault).Sum(a => a.UnlockAmount);
             foreach (var small in moved.Select(a => a.SmartContractUID).Distinct(StringComparer.Ordinal).Where(v => Share(v) < minOf(v)).ToList())
             {
-                var need = minOf(small) - Share(small);
-                var room = moved.Where(a => a.SmartContractUID == small).Sum(a => (remaining.TryGetValue(a.LockId, out var r) ? r : a.UnlockAmount) - a.UnlockAmount);
+                var need = Up(minOf(small) - Share(small));
+                var planned = moved.Where(a => a.SmartContractUID == small).Select(a => a.LockId).ToHashSet(StringComparer.Ordinal);
+                var unplanned = available.Where(l => l.SmartContractUID == small && !planned.Contains(l.LockId) && remaining[l.LockId] > 0M)
+                    .GroupBy(l => l.LockId, StringComparer.Ordinal).Select(g => g.First()).ToList();
+                var room = moved.Where(a => a.SmartContractUID == small).Sum(a => (remaining.TryGetValue(a.LockId, out var r) ? r : a.UnlockAmount) - a.UnlockAmount)
+                    + unplanned.Sum(l => remaining[l.LockId]);
                 if (room < need) return null;
-                var donor = moved.Select(a => a.SmartContractUID).Distinct(StringComparer.Ordinal)
-                    .FirstOrDefault(v => v != small && Share(v) - need >= minOf(v));
-                if (donor == null) return null;
+                var donors = moved.Select(a => a.SmartContractUID).Distinct(StringComparer.Ordinal)
+                    .Where(v => v != small).Select(v => (Vault: v, Spare: Down(Share(v) - minOf(v)))).Where(d => d.Spare > 0M).ToList();
+                if (donors.Sum(d => d.Spare) < need) return null;
                 var take = need;
-                foreach (var a in moved.Where(a => a.SmartContractUID == donor).Reverse())
+                foreach (var (donor, spare) in donors)
                 {
-                    var part = Math.Min(take, a.UnlockAmount);
-                    a.UnlockAmount -= part;
-                    take -= part;
+                    var fromDonor = Math.Min(take, spare);
+                    var left = fromDonor;
+                    foreach (var a in moved.Where(a => a.SmartContractUID == donor).Reverse())
+                    {
+                        var part = Math.Min(left, a.UnlockAmount);
+                        a.UnlockAmount -= part;
+                        left -= part;
+                        if (left == 0M) break;
+                    }
+                    take -= fromDonor;
                     if (take == 0M) break;
                 }
                 moved.RemoveAll(a => a.UnlockAmount <= 0M);
@@ -271,9 +377,16 @@ namespace VerifiedXCore.Bitcoin.Services
                     give -= part;
                     if (give == 0M) break;
                 }
+                foreach (var l in unplanned)
+                {
+                    if (give == 0M) break;
+                    var part = Math.Min(give, remaining[l.LockId]);
+                    moved.Add(new PoolUnlockAllocation { LockId = l.LockId, UnlockAmount = part, SmartContractUID = small });
+                    give -= part;
+                }
                 if (give != 0M) return null;
             }
-            return moved;
+            return PlanBytes(moved) <= MaxPlanBytes ? moved : null;
         }
 
         /// <summary>
@@ -365,10 +478,11 @@ namespace VerifiedXCore.Bitcoin.Services
                 var result = await TransactionValidatorService.VerifyTX(poolUnlockTx);
                 if (result.Item1)
                 {
-                    await TransactionData.AddTxToWallet(poolUnlockTx, true);
-                    await AccountData.UpdateLocalBalance(signerAddress, poolUnlockTx.Fee + poolUnlockTx.Amount);
-                    await TransactionData.AddToPool(poolUnlockTx);
-                    await P2PClient.SendTXMempool(poolUnlockTx);
+                    if (await TransactionData.SubmitOwnTransaction(poolUnlockTx, signerAddress, poolUnlockTx.Fee + poolUnlockTx.Amount) is { } notSent)
+                    {
+                        SCLogUtility.Log($"vBTC V2 Bridge Pool Unlock TX not sent: {notSent}", "BridgePoolUnlockService.CreateBridgePoolUnlockTx()");
+                        return (false, notSent);
+                    }
 
                     SCLogUtility.Log(
                         $"vBTC V2 Bridge Pool Unlock TX Success. TxHash: {poolUnlockTx.Hash}, Dest: {vfxDestinationAddress}, " +

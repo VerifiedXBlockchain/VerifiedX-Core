@@ -247,9 +247,7 @@ namespace VerifiedXCore.Services
             if (key.Holder == sc.OwnerAddress)
                 return null;
 
-            var ledger = (sc.SCStateTreiTokenizationTXes ?? new List<SmartContractStateTreiTokenizationTX>())
-                .Where(x => x.FromAddress == key.Holder || x.ToAddress == key.Holder)
-                .Sum(x => x.Amount);
+            var ledger = VerifiedXCore.Bitcoin.Attestation.VaultLedgerStore.Balance(sc, key.Holder);
 
             // Reserve sends defer their ledger debit to unlock; their pending rows are written at block apply on every
             // node, so netting them is deterministic (same as the VBTC_V2_TRANSFER checks).
@@ -299,7 +297,7 @@ namespace VerifiedXCore.Services
                 return key;
             if (cache == null || !cache.TryGetValue(key.ContractUid, out var uid))
             {
-                uid = SmartContractStateTrei.GetSmartContractState(key.ContractUid)?.SmartContractUID ?? key.ContractUid;
+                uid = SmartContractStateTrei.GetSmartContractHeader(key.ContractUid)?.SmartContractUID ?? key.ContractUid;
                 if (cache != null) cache[key.ContractUid] = uid;
             }
             return key with { ContractUid = uid };

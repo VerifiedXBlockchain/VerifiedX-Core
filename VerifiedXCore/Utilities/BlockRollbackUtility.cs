@@ -346,6 +346,15 @@ namespace VerifiedXCore.Utilities
 
             // The forged-VFX burn is not undone by reversing the removed blocks' transactions, and re-applying the block
             // that carried it burns again; a snapshot restore brings back the balances and the burn marker together.
+            // The ledgers' move is not undone by putting balances back: a removed range that holds it is rebuilt instead.
+            try
+            {
+                var movedAt = WorldTrei.GetWorldTrei().FindOne(x => true)?.VaultLedgerMovedHeight ?? 0;
+                if (movedAt > targetHeight)
+                    return $"The contracts' ledgers moved above block {targetHeight}.";
+            }
+            catch { return "The ledger move's marker could not be read."; }
+
             if (Globals.ForgedVfxBurns.Count > 0)
             {
                 try

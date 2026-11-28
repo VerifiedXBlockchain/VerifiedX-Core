@@ -4,6 +4,16 @@ using VerifiedXCore.Models.SmartContracts;
 
 namespace VerifiedXCore.Models
 {
+    /// <summary>
+    /// A contract's state without its ledger (<see cref="SmartContractStateTrei.GetSmartContractHeader"/>). Read-only: no
+    /// write takes it.
+    /// </summary>
+    public sealed record SmartContractHeader(long Id, string SmartContractUID, string? ContractData, string? MinterAddress, string? OwnerAddress, string? NextOwner, bool IsLocked)
+    {
+        /// <summary>A throwaway state carrying only the UID and the code, for the checks that read just those two.</summary>
+        internal SmartContractStateTrei CodeOnly() => new() { Id = Id, SmartContractUID = SmartContractUID, ContractData = ContractData };
+    }
+
     public class SmartContractStateTrei
     {
         public long Id { get; set; }
@@ -33,6 +43,22 @@ namespace VerifiedXCore.Models
         public List<string>? CancelledSaleBuyers { get; set; }
         public TokenDetails? TokenDetails { get; set; }
         public List<SmartContractStateTreiTokenizationTX>? SCStateTreiTokenizationTXes { get; set; }
+
+        /// <summary>
+        /// True once this contract's ledger is kept as entries of its own (from Globals.VaultLedgerHeight;
+        /// Bitcoin.Attestation.VaultLedgerStore): its rows are then no longer in this document.
+        /// </summary>
+        public bool? LedgerMoved { get; set; }
+        /// <summary>Moved ledger: how many holders hold a balance (not zero).</summary>
+        public int? LedgerHolders { get; set; }
+        /// <summary>Moved ledger: the sum of the holders' balances below zero.</summary>
+        public decimal? LedgerNegative { get; set; }
+        /// <summary>
+        /// Moved ledger: rows added in this apply and not yet saved. Written into the entries with the contract, in one
+        /// write (VaultLedgerStore.InOneWrite); never stored in the document.
+        /// </summary>
+        [LiteDB.BsonIgnore]
+        public List<SmartContractStateTreiTokenizationTX>? PendingLedgerRows { get; set; }
 
         /// <summary>
         /// Block height at which this record was last inserted/updated. Stamped automatically by
@@ -65,6 +91,23 @@ namespace VerifiedXCore.Models
             return null;
         }
 
+        /// <summary>
+        /// The contract's header: who holds it, whether it is changing hands, its code; not its ledger. A vault's ledger
+        /// is a list inside its state document, one row a holder, and <see cref="GetSmartContractState"/> builds every row
+        /// whatever the caller reads, so a rule that needed only the owner or the stored spelling of the UID cost as much as
+        /// the vault had holders. The same document is read (the oldest for the UID); only the fields below are built. The
+        /// header cannot be written back, so it cannot stand in for the state and wipe a ledger.
+        /// </summary>
+        public static SmartContractHeader? GetSmartContractHeader(string smartContractUID)
+        {
+            var scs = GetSCST();
+            if (scs == null || smartContractUID == null) return null;
+            var h = scs.Query().Where(x => x.SmartContractUID == smartContractUID).OrderBy(x => x.Id)
+                .Select(x => new { x.Id, x.SmartContractUID, x.ContractData, x.MinterAddress, x.OwnerAddress, x.NextOwner, x.IsLocked })
+                .FirstOrDefault();
+            return h == null ? null : new SmartContractHeader(h.Id, h.SmartContractUID, h.ContractData, h.MinterAddress, h.OwnerAddress, h.NextOwner, h.IsLocked);
+        }
+
         public static IEnumerable<SmartContractStateTrei>? GetSmartContractsOwnedByAddress(string address)
         {
             var scs = GetSCST();
@@ -94,10 +137,7 @@ namespace VerifiedXCore.Models
             // Then, load all contracts and filter in memory for transaction matches
             // This is less efficient but works around LiteDB limitations
             var allContracts = scs.Query().ToEnumerable();
-            var txContracts = allContracts.Where(contract =>
-                contract.SCStateTreiTokenizationTXes != null &&
-                contract.SCStateTreiTokenizationTXes.Any(tx =>
-                    tx.ToAddress == address || tx.FromAddress == address));
+            var txContracts = allContracts.Where(contract => VerifiedXCore.Bitcoin.Attestation.VaultLedgerStore.Names(contract, address));
 
             // Combine and return results
             var result = ownerContracts.Union(txContracts).Distinct();
@@ -116,24 +156,40 @@ namespace VerifiedXCore.Models
 
             if(exist == null)
             {
-                scs.InsertSafe(scMain);
+                var savesLedger = scMain.PendingLedgerRows is { Count: > 0 };
+                VerifiedXCore.Bitcoin.Attestation.VaultLedgerStore.InOneWrite(scMain, () =>
+                {
+                    var inserted = scs.InsertSafe(scMain);
+                    if (savesLedger && (inserted == null || inserted.IsNull))
+                        throw new InvalidOperationException($"Contract {scMain.SmartContractUID} was not written with its ledger.");
+                });
             }
         }
         public static void UpdateSmartContract(SmartContractStateTrei scMain)
         {
             var scs = GetSCST();
-
-            // A vault the chain watches: its ledger is kept within what one document holds, and a write that fails is
-            // thrown, never dropped; a dropped ledger write left a withdrawal paid with no debit (fourth review, round 5).
-            if (scMain != null && VerifiedXCore.Bitcoin.Attestation.BtcAttestBalance.IsAttestedVault(scMain.SmartContractUID))
+            if (scMain == null)
             {
-                VerifiedXCore.Bitcoin.Attestation.BtcVaultLedger.CompactWatched(scMain);
-                if (!scs.UpdateOrThrow(scMain))
-                    throw new InvalidOperationException($"Vault {scMain.SmartContractUID}'s state is not in the state trie; it was not written.");
+                scs.UpdateSafe(scMain);
                 return;
             }
 
-            scs.UpdateSafe(scMain);
+            // A moved ledger's unsaved rows are written with the contract, in one write; a write that fails is thrown.
+            var savesLedger = scMain.PendingLedgerRows is { Count: > 0 };
+            VerifiedXCore.Bitcoin.Attestation.VaultLedgerStore.InOneWrite(scMain, () =>
+            {
+                // A vault the chain watches: its ledger is kept within what one document holds, and a write that fails is
+                // thrown, never dropped; a dropped ledger write left a withdrawal paid with no debit (fourth review, round 5).
+                if (savesLedger || VerifiedXCore.Bitcoin.Attestation.BtcAttestBalance.IsAttestedVault(scMain.SmartContractUID))
+                {
+                    VerifiedXCore.Bitcoin.Attestation.BtcVaultLedger.CompactWatched(scMain);
+                    if (!scs.UpdateOrThrow(scMain))
+                        throw new InvalidOperationException($"Vault {scMain.SmartContractUID}'s state is not in the state trie; it was not written.");
+                    return;
+                }
+
+                scs.UpdateSafe(scMain);
+            });
         }
 
         public static void DeleteSmartContract(SmartContractStateTrei scMain)
@@ -141,6 +197,8 @@ namespace VerifiedXCore.Models
             var scs = GetSCST();
 
             scs.DeleteManySafe(x => x.SmartContractUID == scMain.SmartContractUID);
+            if (scMain.LedgerMoved == true)
+                VerifiedXCore.Bitcoin.Attestation.VaultLedgerStore.ClearEntriesOf(scMain.SmartContractUID);
 
             // Snapshot diff queries can't see deletions — record a tombstone so
             // StateSnapshotService propagates the delete into snapshot slots.

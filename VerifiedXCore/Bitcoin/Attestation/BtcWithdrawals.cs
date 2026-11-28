@@ -254,7 +254,7 @@ namespace VerifiedXCore.Bitcoin.Attestation
 
         /// <summary>The contract's UID as state holds it (a lookup ignores case; the tables here are keyed by the stored spelling).</summary>
         private static string? Stored(string? scUID) =>
-            string.IsNullOrEmpty(scUID) ? scUID : SmartContractStateTrei.GetSmartContractState(scUID)?.SmartContractUID ?? scUID;
+            string.IsNullOrEmpty(scUID) ? scUID : SmartContractStateTrei.GetSmartContractHeader(scUID)?.SmartContractUID ?? scUID;
 
         // ── Block application ───────────────────────────────────────────────────────────────────────────────
 
@@ -373,7 +373,7 @@ namespace VerifiedXCore.Bitcoin.Attestation
                         if (!answered && BtcAttestRules.PaysByDestination(vfxHeight) && spend.Outputs != null && !PaidAlready(coin.SmartContractUID, spend.Txid, db))
                         {
                             var (inputs, inputSats) = SpendsOf(spend.Txid, coin.SmartContractUID, effects);
-                            var paid = PaidOutput(row, spend.Outputs, inputSats);
+                            var paid = PaidOutput(row, spend.Outputs, inputSats, vfxHeight, db);
                             if (paid != null)
                             {
                                 answered = true;
@@ -611,6 +611,22 @@ namespace VerifiedXCore.Bitcoin.Attestation
 
         private static void Settle(VaultWithdrawalRow row, string txid, Transaction report, long vfxHeight, LiteDatabase? db)
         {
+            // Its transaction paid an address of its own vault (a re-key gave the vault that address after the row was
+            // fixed): the Bitcoin is still the vault's, and nothing was paid. Closed unpaid as a release is, its requester
+            // refunded less the Bitcoin fee that transaction cost; an exit part is void, as when its coin is spent elsewhere.
+            if (!row.IsSweep && PaysOwnVault(row, row.DestinationScriptHex, vfxHeight, db))
+            {
+                var why = $"Bitcoin transaction {txid} paid its destination, an address of vault {row.SmartContractUID} itself: nothing left the vault";
+                var shown = row.Pins.FirstOrDefault(p => p.Txid == txid);
+                if (!row.IsBridgeExit && shown != null)
+                {
+                    CloseReleased(row, shown, report, vfxHeight, db, why);
+                    return;
+                }
+                foreach (var pin in row.Pins) pin.Dead = true; // every one spends the coins this one spent
+                Close(row, VaultWithdrawalState.Void, vfxHeight, db, why);
+                return;
+            }
             row.State = VaultWithdrawalState.Settled;
             row.SettledTxid = txid;
             row.ClosedAtVfxHeight = vfxHeight;

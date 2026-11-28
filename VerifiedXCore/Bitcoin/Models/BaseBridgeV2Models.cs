@@ -13,7 +13,11 @@ namespace VerifiedXCore.Bitcoin.Models
         public string ContractAddress { get; set; } = string.Empty;
         public Dictionary<string, string> ValidatorSignatures { get; set; } = new();
         public int RequiredSignatures { get; set; }
-        public bool IsReady => ValidatorSignatures.Count >= RequiredSignatures;
+        /// <summary>
+        /// Whether the signatures collected meet both of the contract's thresholds, its validators' and its casters':
+        /// what <see cref="Status"/> "Ready" says. A count of signatures against one threshold does not.
+        /// </summary>
+        public bool IsReady => string.Equals(Status, "Ready", StringComparison.Ordinal);
         public long CreatedAt { get; set; }
         public string Status { get; set; } = "Pending";
     }
@@ -106,5 +110,14 @@ namespace VerifiedXCore.Bitcoin.Models
         public string BurnType { get; set; } = "";
         public long Timestamp { get; set; }
         public string Signature { get; set; } = string.Empty;
+        /// <summary>The handler this caster agreed to in the round, as its confirmation names it.</summary>
+        [Newtonsoft.Json.JsonProperty(NullValueHandling = Newtonsoft.Json.NullValueHandling.Ignore)]
+        public string? AgreedHandler { get; set; }
+        /// <summary>
+        /// This caster's signature over BridgeCasterConsensus.BuildConfirmationHandlerMessage for the burn, itself, the
+        /// agreed handler and the vote's timestamp (the confirmation's handler signature).
+        /// </summary>
+        [Newtonsoft.Json.JsonProperty(NullValueHandling = Newtonsoft.Json.NullValueHandling.Ignore)]
+        public string? HandlerSignature { get; set; }
     }
 }

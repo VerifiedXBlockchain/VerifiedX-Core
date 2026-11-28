@@ -238,6 +238,8 @@ namespace VerifiedXCore.Data
                 PrivacyDbContext.PRIV_COMMITMENTS, PrivacyDbContext.PRIV_NULLIFIERS, PrivacyDbContext.PRIV_POOL_STATE, PrivacyDbContext.PRIV_MERKLE_NODES,
                 // Bridge lock and exit state and consumed burns.
                 Bitcoin.Models.VBTCBridgeLockState.CollectionName, Bitcoin.Models.VBTCBridgeBtcExitState.CollectionName, Bitcoin.Models.VBTCBridgeConsumedBurn.CollectionName,
+                // Contracts' ledgers once they have moved (Globals.VaultLedgerHeight).
+                Bitcoin.Attestation.VaultLedgerStore.CollectionName,
             };
             // Bitcoin attestation and validator bonds.
             names.UnionWith(Bitcoin.Attestation.BtcAttestStore.AllCollections);
@@ -336,6 +338,24 @@ namespace VerifiedXCore.Data
             // fails on this node is counted like a transaction that failed to apply: the block's state is reported as
             // incomplete, so the node is flagged, not left quietly holding other state than its peers.
             var blockStartFailed = false;
+            if (block.Height >= Globals.VaultLedgerHeight)
+            {
+                // The contracts' ledgers move into their own collection at the height (or at the first block after it on a
+                // state that crossed it unmoved). A move cut short is finished at the next block: each contract moves in one
+                // write, and the marker is set once all have.
+                try
+                {
+                    var moved = VerifiedXCore.Bitcoin.Attestation.VaultLedgerStore.MoveAll(block.Height);
+                    if (moved > 0)
+                        LogUtility.Log($"Block {block.Height}: the ledgers of {moved} contract(s) moved into their own collection.", "StateData.UpdateTreis() - block start");
+                }
+                catch (Exception ex)
+                {
+                    if (IsNodeLocalFault(ex)) blockStartFailed = true;
+                    NoteApplyStepFailed(block.Height, ex);
+                    ErrorLogUtility.LogError($"Block {block.Height}: moving the contracts' ledgers failed (finished at the next block): {ex}", "StateData.UpdateTreis() - block start");
+                }
+            }
             if (block.Height == Globals.BridgeFailKeepsLocksHeight)
             {
                 try { VBTCBridgeLockState.GiveBackFailBlacklisted(); } // locks blacklisted by failed exits before it
@@ -1896,17 +1916,14 @@ namespace VerifiedXCore.Data
                         // Re-run idempotence is implicit: the sweep's own debit row drives the
                         // address's net to 0, so a second pass writes nothing.
                         var vbtcHoldings = _scDb.FindAll()
-                            .Where(x => x.SCStateTreiTokenizationTXes != null &&
-                                        x.SCStateTreiTokenizationTXes.Any(t => t.FromAddress == _fromAddress || t.ToAddress == _fromAddress))
+                            .Where(x => VerifiedXCore.Bitcoin.Attestation.VaultLedgerStore.Names(x, _fromAddress))
                             .ToList();
 
                         foreach (var sc in vbtcHoldings)
                         {
                             try
                             {
-                                var net = sc.SCStateTreiTokenizationTXes
-                                    .Where(t => t.FromAddress == _fromAddress || t.ToAddress == _fromAddress)
-                                    .Sum(t => t.Amount);
+                                var net = VerifiedXCore.Bitcoin.Attestation.VaultLedgerStore.Balance(sc, _fromAddress);
 
                                 if (net > 0)
                                 {
@@ -2026,6 +2043,7 @@ namespace VerifiedXCore.Data
             }
             catch (Exception ex)
             {
+                NoteApplyStepFailed(tx.Height, ex); // a fault of this node's storage is flagged, as the other applies do
                 ErrorLogUtility.LogError("Failed to deserialized TX Data for BTC ADNR", "StateData.AddNewBTCAdnr()");
             }
         }
@@ -2107,6 +2125,7 @@ namespace VerifiedXCore.Data
             }
             catch (Exception ex)
             {
+                NoteApplyStepFailed(tx.Height, ex); // a fault of this node's storage is flagged, as the other applies do
                 ErrorLogUtility.LogError($"Failed to delete BTC ADNR at state level! Error: {ex}", "StateData.DeleteBTCAdnr()");
             }
         }
@@ -2156,6 +2175,7 @@ namespace VerifiedXCore.Data
             }
             catch(Exception ex)
             {                
+                NoteApplyStepFailed(tx.Height, ex); // a fault of this node's storage is flagged, as the other applies do
                 ErrorLogUtility.LogError("Failed to add ADNR at state level!", "StateData.AddNewAdnr()");
             }
         }
@@ -2182,6 +2202,7 @@ namespace VerifiedXCore.Data
             }
             catch (Exception ex)
             {                
+                NoteApplyStepFailed(tx.Height, ex); // a fault of this node's storage is flagged, as the other applies do
                 ErrorLogUtility.LogError("Failed to delete ADNR State Level!", "StateData.DeleteAdnr()");
             }
         }
@@ -2356,6 +2377,7 @@ namespace VerifiedXCore.Data
                     }
                     catch (Exception ex)
                     {
+                        NoteApplyStepFailed(tx.Height, ex); // a fault of this node's storage is flagged, as the other applies do
                         ErrorLogUtility.LogError($"Failed to sync VBTCContractV2 owner: {ex.Message}", "StateData.TransferSmartContract()");
                     }
                 }
@@ -2571,6 +2593,7 @@ namespace VerifiedXCore.Data
             }
             catch (Exception ex)
             {
+                NoteApplyStepFailed(tx.Height, ex); // a fault of this node's storage is flagged, as the other applies do
                 ErrorLogUtility.LogError($"DeployTokenContract error: {ex.Message}. TX: {tx.Hash}", "StateData.DeployTokenContract()");
             }
         }
@@ -3028,6 +3051,7 @@ namespace VerifiedXCore.Data
             }
             catch (Exception ex)
             {
+                NoteApplyStepFailed(tx.Height, ex); // a fault of this node's storage is flagged, as the other applies do
                 ErrorLogUtility.LogError($"Failed to save TW From Arb. ERROR: {ex}", "StateData.TokenizedWithdrawalRequest()");
             }
         }
@@ -3073,14 +3097,7 @@ namespace VerifiedXCore.Data
                                 }
                             };
 
-                            if (scStateTreiRec.SCStateTreiTokenizationTXes?.Count() > 0)
-                            {
-                                scStateTreiRec.SCStateTreiTokenizationTXes.AddRange(tknTxList);
-                            }
-                            else
-                            {
-                                scStateTreiRec.SCStateTreiTokenizationTXes = tknTxList;
-                            }
+                            VerifiedXCore.Bitcoin.Attestation.VaultLedgerStore.Append(scStateTreiRec, tknTxList);
 
                             SmartContractStateTrei.UpdateSmartContract(scStateTreiRec);
                         }
@@ -3097,6 +3114,7 @@ namespace VerifiedXCore.Data
             }
             catch (Exception ex)
             {
+                NoteApplyStepFailed(tx.Height, ex); // a fault of this node's storage is flagged, as the other applies do
                 ErrorLogUtility.LogError($"Failed to complete TW. ERROR: {ex}", "StateData.TokenizedWithdrawalComplete()");
             }
         }
@@ -3435,14 +3453,7 @@ namespace VerifiedXCore.Data
                         }
                     };
 
-                    if(scStateTreiRec.SCStateTreiTokenizationTXes?.Count() > 0)
-                    {
-                        scStateTreiRec.SCStateTreiTokenizationTXes.AddRange(tknTxList);
-                    }
-                    else
-                    {
-                        scStateTreiRec.SCStateTreiTokenizationTXes = tknTxList;
-                    }
+                    VerifiedXCore.Bitcoin.Attestation.VaultLedgerStore.Append(scStateTreiRec, tknTxList);
 
                     SmartContractStateTrei.UpdateSmartContract(scStateTreiRec);
                 }
@@ -3484,14 +3495,7 @@ namespace VerifiedXCore.Data
                         }
                     };
 
-                        if (scStateTreiRec.SCStateTreiTokenizationTXes?.Count() > 0)
-                        {
-                            scStateTreiRec.SCStateTreiTokenizationTXes.AddRange(tknTxList);
-                        }
-                        else
-                        {
-                            scStateTreiRec.SCStateTreiTokenizationTXes = tknTxList;
-                        }
+                        VerifiedXCore.Bitcoin.Attestation.VaultLedgerStore.Append(scStateTreiRec, tknTxList);
 
                         SmartContractStateTrei.UpdateSmartContract(scStateTreiRec);
                     }
@@ -3553,14 +3557,7 @@ namespace VerifiedXCore.Data
                         }
                     };
 
-                    if(scStateTreiRec.SCStateTreiTokenizationTXes?.Count() > 0)
-                    {
-                        scStateTreiRec.SCStateTreiTokenizationTXes.AddRange(tknTxList);
-                    }
-                    else
-                    {
-                        scStateTreiRec.SCStateTreiTokenizationTXes = tknTxList;
-                    }
+                    VerifiedXCore.Bitcoin.Attestation.VaultLedgerStore.Append(scStateTreiRec, tknTxList);
 
                     SmartContractStateTrei.UpdateSmartContract(scStateTreiRec);
                 }
@@ -3608,14 +3605,7 @@ namespace VerifiedXCore.Data
                             }
                         };
 
-                        if (scStateTreiRec.SCStateTreiTokenizationTXes?.Count() > 0)
-                        {
-                            scStateTreiRec.SCStateTreiTokenizationTXes.AddRange(tknTxList);
-                        }
-                        else
-                        {
-                            scStateTreiRec.SCStateTreiTokenizationTXes = tknTxList;
-                        }
+                        VerifiedXCore.Bitcoin.Attestation.VaultLedgerStore.Append(scStateTreiRec, tknTxList);
 
                         SmartContractStateTrei.UpdateSmartContract(scStateTreiRec);
                     }
@@ -3735,7 +3725,7 @@ namespace VerifiedXCore.Data
             if (contract.OwnerAddress == fromAddress)
                 return !VerifiedXCore.Bitcoin.Attestation.BtcAttestBalance.IsAttestedVault(scUID)
                     || Bitcoin.Services.VBTCService.AttestedOwnerSpendable(contract, fromAddress, long.MaxValue) >= amount;
-            var held = contract.SCStateTreiTokenizationTXes?.Where(x => x.FromAddress == fromAddress || x.ToAddress == fromAddress).Sum(x => x.Amount) ?? 0M;
+            var held = VerifiedXCore.Bitcoin.Attestation.VaultLedgerStore.Balance(contract, fromAddress);
             return held >= amount;
         }
 
@@ -3784,13 +3774,15 @@ namespace VerifiedXCore.Data
             if (contract != null && !string.IsNullOrEmpty(oldOwner) && !string.IsNullOrEmpty(newOwner) && oldOwner != newOwner
                 && VerifiedXCore.Bitcoin.Attestation.BtcAttestBalance.IsAttestedVault(contract.SmartContractUID))
                 lock (_ownerChangesThisBlock) _ownerChangesThisBlock.Add((contract.SmartContractUID, oldOwner));
-            var rows = contract?.SCStateTreiTokenizationTXes;
-            if (rows == null || rows.Count == 0 || string.IsNullOrEmpty(oldOwner) || string.IsNullOrEmpty(newOwner) || oldOwner == newOwner) return;
+            if (!VerifiedXCore.Bitcoin.Attestation.VaultLedgerStore.HasRows(contract) || string.IsNullOrEmpty(oldOwner) || string.IsNullOrEmpty(newOwner) || oldOwner == newOwner) return;
             if (!VerifiedXCore.Bitcoin.Attestation.BtcAttestBalance.IsAttestedVault(contract!.SmartContractUID)) return;
-            var position = rows.Where(x => x.FromAddress == oldOwner || x.ToAddress == oldOwner).Sum(x => x.Amount);
+            var position = VerifiedXCore.Bitcoin.Attestation.VaultLedgerStore.Balance(contract, oldOwner);
             if (position >= 0M) return;
-            rows.Add(new SmartContractStateTreiTokenizationTX { Amount = -position, FromAddress = "+", ToAddress = oldOwner });
-            rows.Add(new SmartContractStateTreiTokenizationTX { Amount = position, FromAddress = newOwner, ToAddress = "-" });
+            VerifiedXCore.Bitcoin.Attestation.VaultLedgerStore.Append(contract, new[]
+            {
+                new SmartContractStateTreiTokenizationTX { Amount = -position, FromAddress = "+", ToAddress = oldOwner },
+                new SmartContractStateTreiTokenizationTX { Amount = position, FromAddress = newOwner, ToAddress = "-" },
+            });
             SCLogUtility.Log($"vBTC vault {contract.SmartContractUID}: owner changes from {oldOwner} to {newOwner}; the {-position} vBTC the outgoing owner had sent out as owner is carried to the incoming owner.", "StateData.CarryOwnerPosition()");
         }
 
@@ -3812,12 +3804,14 @@ namespace VerifiedXCore.Data
             foreach (var (uid, oldOwner) in changes.Distinct())
             {
                 var contract = SmartContractStateTrei.GetSmartContractState(uid);
-                var rows = contract?.SCStateTreiTokenizationTXes;
-                if (contract == null || rows == null || contract.OwnerAddress == oldOwner || string.IsNullOrEmpty(contract.OwnerAddress)) continue;
-                var position = rows.Where(x => x.FromAddress == oldOwner || x.ToAddress == oldOwner).Sum(x => x.Amount);
+                if (contract == null || !VerifiedXCore.Bitcoin.Attestation.VaultLedgerStore.HasLedger(contract) || contract.OwnerAddress == oldOwner || string.IsNullOrEmpty(contract.OwnerAddress)) continue;
+                var position = VerifiedXCore.Bitcoin.Attestation.VaultLedgerStore.Balance(contract, oldOwner);
                 if (position >= 0M) continue;
-                rows.Add(new SmartContractStateTreiTokenizationTX { Amount = -position, FromAddress = "+", ToAddress = oldOwner });
-                rows.Add(new SmartContractStateTreiTokenizationTX { Amount = position, FromAddress = contract.OwnerAddress, ToAddress = "-" });
+                VerifiedXCore.Bitcoin.Attestation.VaultLedgerStore.Append(contract, new[]
+                {
+                    new SmartContractStateTreiTokenizationTX { Amount = -position, FromAddress = "+", ToAddress = oldOwner },
+                    new SmartContractStateTreiTokenizationTX { Amount = position, FromAddress = contract.OwnerAddress, ToAddress = "-" },
+                });
                 SmartContractStateTrei.UpdateSmartContract(contract);
                 SCLogUtility.Log($"vBTC vault {uid}: {-position} vBTC sent out by {oldOwner} as owner after the vault changed hands in block {height} is carried to {contract.OwnerAddress}.", "StateData.CarryDebtsLeftInTheBlock()");
             }
@@ -3848,14 +3842,7 @@ namespace VerifiedXCore.Data
                     }
                 };
 
-                if (scStateTreiRec.SCStateTreiTokenizationTXes?.Count() > 0)
-                {
-                    scStateTreiRec.SCStateTreiTokenizationTXes.AddRange(tknTxList);
-                }
-                else
-                {
-                    scStateTreiRec.SCStateTreiTokenizationTXes = tknTxList;
-                }
+                VerifiedXCore.Bitcoin.Attestation.VaultLedgerStore.Append(scStateTreiRec, tknTxList);
 
                 SmartContractStateTrei.UpdateSmartContract(scStateTreiRec);
 
@@ -3932,10 +3919,7 @@ namespace VerifiedXCore.Data
                     }
                 };
 
-                if (scStateTreiRec.SCStateTreiTokenizationTXes?.Count() > 0)
-                    scStateTreiRec.SCStateTreiTokenizationTXes.AddRange(tknTxList);
-                else
-                    scStateTreiRec.SCStateTreiTokenizationTXes = tknTxList;
+                VerifiedXCore.Bitcoin.Attestation.VaultLedgerStore.Append(scStateTreiRec, tknTxList);
 
                 SmartContractStateTrei.UpdateSmartContract(scStateTreiRec);
 
@@ -4011,10 +3995,7 @@ namespace VerifiedXCore.Data
                     }
                 };
 
-                if (scStateTreiRec.SCStateTreiTokenizationTXes?.Count() > 0)
-                    scStateTreiRec.SCStateTreiTokenizationTXes.AddRange(tknTxList);
-                else
-                    scStateTreiRec.SCStateTreiTokenizationTXes = tknTxList;
+                VerifiedXCore.Bitcoin.Attestation.VaultLedgerStore.Append(scStateTreiRec, tknTxList);
 
                 SmartContractStateTrei.UpdateSmartContract(scStateTreiRec);
 
@@ -4086,10 +4067,7 @@ namespace VerifiedXCore.Data
         {
             var scStateTreiRec = SmartContractStateTrei.GetSmartContractState(scUID);
             if (scStateTreiRec == null) return false;
-            if (scStateTreiRec.SCStateTreiTokenizationTXes?.Count() > 0)
-                scStateTreiRec.SCStateTreiTokenizationTXes.Add(row);
-            else
-                scStateTreiRec.SCStateTreiTokenizationTXes = new List<SmartContractStateTreiTokenizationTX> { row };
+            VerifiedXCore.Bitcoin.Attestation.VaultLedgerStore.Append(scStateTreiRec, row);
             SmartContractStateTrei.UpdateSmartContract(scStateTreiRec);
             return true;
         }
@@ -4107,10 +4085,7 @@ namespace VerifiedXCore.Data
                 }
             };
 
-            if (scStateTreiRec.SCStateTreiTokenizationTXes?.Count() > 0)
-                scStateTreiRec.SCStateTreiTokenizationTXes.AddRange(tknTxList);
-            else
-                scStateTreiRec.SCStateTreiTokenizationTXes = tknTxList;
+            VerifiedXCore.Bitcoin.Attestation.VaultLedgerStore.Append(scStateTreiRec, tknTxList);
 
             SmartContractStateTrei.UpdateSmartContract(scStateTreiRec);
         }
@@ -4433,6 +4408,7 @@ namespace VerifiedXCore.Data
             }
             catch (Exception ex)
             {
+                NoteApplyStepFailed(tx.Height, ex); // a fault of this node's storage is flagged, as the other applies do
                 ErrorLogUtility.LogError($"ApplyVBTCBridgeExitToBTCComplete error: {ex.Message}", "StateData.ApplyVBTCBridgeExitToBTCComplete()");
             }
         }
@@ -4541,6 +4517,7 @@ namespace VerifiedXCore.Data
             }
             catch (Exception ex)
             {
+                NoteApplyStepFailed(tx.Height, ex); // a fault of this node's storage is flagged, as the other applies do
                 ErrorLogUtility.LogError($"ApplyVBTCBridgeExitToBTCFail error: {ex.Message}", "StateData.ApplyVBTCBridgeExitToBTCFail()");
             }
         }
@@ -4654,6 +4631,7 @@ namespace VerifiedXCore.Data
             }
             catch (Exception ex)
             {
+                NoteApplyStepFailed(tx.Height, ex); // a fault of this node's storage is flagged, as the other applies do
                 NoteWithdrawalStoreStepFailed(tx.Height, ex); // a fault on this node only: flagged, not left as other state than its peers' (fourth review, round 3)
                 ErrorLogUtility.LogError($"RequestVBTCV2Withdrawal error: {ex.Message}", "StateData.RequestVBTCV2Withdrawal()");
             }
@@ -4762,6 +4740,7 @@ namespace VerifiedXCore.Data
             }
             catch (Exception ex)
             {
+                NoteApplyStepFailed(tx.Height, ex); // a fault of this node's storage is flagged, as the other applies do
                 NoteWithdrawalStoreStepFailed(tx.Height, ex); // a fault on this node only: flagged, not left as other state than its peers' (fourth review, round 3)
                 ErrorLogUtility.LogError($"RequestVBTCV2WithdrawalMulti error: {ex.Message}", "StateData.RequestVBTCV2WithdrawalMulti()");
             }
@@ -4882,6 +4861,7 @@ namespace VerifiedXCore.Data
             }
             catch (Exception ex)
             {
+                NoteApplyStepFailed(tx.Height, ex); // a fault of this node's storage is flagged, as the other applies do
                 NoteWithdrawalStoreStepFailed(tx.Height, ex); // a fault on this node only (a data fault stays a no-op everywhere)
                 ErrorLogUtility.LogError($"CompleteVBTCV2Withdrawal error: {ex.Message}", "StateData.CompleteVBTCV2Withdrawal()");
             }
@@ -4987,6 +4967,7 @@ namespace VerifiedXCore.Data
             }
             catch (Exception ex)
             {
+                NoteApplyStepFailed(tx.Height, ex); // a fault of this node's storage is flagged, as the other applies do
                 NoteWithdrawalStoreStepFailed(tx.Height, ex); // a fault on this node only (a data fault stays a no-op everywhere)
                 ErrorLogUtility.LogError($"CancelVBTCV2Withdrawal error: {ex.Message}", "StateData.CancelVBTCV2Withdrawal()");
             }

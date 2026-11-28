@@ -159,14 +159,7 @@ namespace VerifiedXCore.Services
                 bool isRequesterOwner = requesterAddress == scState.OwnerAddress;
                 decimal ledgerBalance = 0M;
 
-                if (scState.SCStateTreiTokenizationTXes != null && scState.SCStateTreiTokenizationTXes.Any())
-                {
-                    var ledgerRows = scState.SCStateTreiTokenizationTXes
-                        .Where(x => x.FromAddress == requesterAddress || x.ToAddress == requesterAddress)
-                        .ToList();
-                    if (ledgerRows.Any())
-                        ledgerBalance = ledgerRows.Sum(x => x.Amount);
-                }
+                ledgerBalance = VerifiedXCore.Bitcoin.Attestation.VaultLedgerStore.Balance(scState, requesterAddress);
 
                 decimal totalBalance = ledgerBalance;
                 var deposit = new OwnerDepositCheck(OwnerDepositStatus.NotQueried, 0M);
@@ -1391,9 +1384,7 @@ namespace VerifiedXCore.Services
                                                 // ran only when rows existed, so a sender with none could send any amount (minting).
                                                 if (!isOwner)
                                                 {
-                                                    var balance = (scStateTreiRec.SCStateTreiTokenizationTXes ?? new List<SmartContractStateTreiTokenizationTX>())
-                                                        .Where(x => x.FromAddress == txRequest.FromAddress || x.ToAddress == txRequest.FromAddress)
-                                                        .Sum(x => x.Amount);
+                                                    var balance = VerifiedXCore.Bitcoin.Attestation.VaultLedgerStore.Balance(scStateTreiRec, txRequest.FromAddress);
 
                                                     if (balance < amount)
                                                         return (txResult, $"Insufficient Balance. Current Balance: {balance}");
@@ -1494,9 +1485,7 @@ namespace VerifiedXCore.Services
                                                     // NEW-05: zero balance when the input holder has no ledger rows (see TransferCoin()).
                                                     if (!isOwner)
                                                     {
-                                                        var balance = (scStateTreiRec.SCStateTreiTokenizationTXes ?? new List<SmartContractStateTreiTokenizationTX>())
-                                                            .Where(x => x.FromAddress == input.FromAddress || x.ToAddress == input.FromAddress)
-                                                            .Sum(x => x.Amount);
+                                                        var balance = VerifiedXCore.Bitcoin.Attestation.VaultLedgerStore.Balance(scStateTreiRec, input.FromAddress);
 
                                                         if (balance < input.Amount)
                                                             return (txResult, $"Insufficient Balance. Current Balance: {balance}");
@@ -1714,17 +1703,7 @@ namespace VerifiedXCore.Services
                                                 bool isOwner = fromAddress == scStateTreiRec.OwnerAddress;
 
                                                 decimal ledgerBalance = 0M;
-                                                if (scStateTreiRec.SCStateTreiTokenizationTXes != null && scStateTreiRec.SCStateTreiTokenizationTXes.Any())
-                                                {
-                                                    var transactions = scStateTreiRec.SCStateTreiTokenizationTXes
-                                                        .Where(x => x.FromAddress == fromAddress || x.ToAddress == fromAddress)
-                                                        .ToList();
-
-                                                    if (transactions.Any())
-                                                    {
-                                                        ledgerBalance = transactions.Sum(x => x.Amount);
-                                                    }
-                                                }
+                                                ledgerBalance = VerifiedXCore.Bitcoin.Attestation.VaultLedgerStore.Balance(scStateTreiRec, fromAddress);
 
                                                 if (isOwner)
                                                 {
@@ -1766,7 +1745,7 @@ namespace VerifiedXCore.Services
                                                     if (ledgerBalance < amount.Value)
                                                         return (txResult, $"Insufficient vBTC balance. Available: {ledgerBalance}, Requested: {amount.Value}");
 
-                                                    if (scStateTreiRec.SCStateTreiTokenizationTXes == null || !scStateTreiRec.SCStateTreiTokenizationTXes.Any())
+                                                    if (!VerifiedXCore.Bitcoin.Attestation.VaultLedgerStore.HasRows(scStateTreiRec))
                                                         return (txResult, $"No vBTC balance found for {fromAddress} in contract {scUID}.");
                                                 }
                                             }
@@ -3252,14 +3231,7 @@ namespace VerifiedXCore.Services
 
                                 bool isOwnerMulti = txRequest.FromAddress == scStateMulti.OwnerAddress;
                                 decimal ledgerBalanceMulti = 0M;
-                                if (scStateMulti.SCStateTreiTokenizationTXes != null && scStateMulti.SCStateTreiTokenizationTXes.Any())
-                                {
-                                    var ledgerRows = scStateMulti.SCStateTreiTokenizationTXes
-                                        .Where(x => x.FromAddress == txRequest.FromAddress || x.ToAddress == txRequest.FromAddress)
-                                        .ToList();
-                                    if (ledgerRows.Any())
-                                        ledgerBalanceMulti = ledgerRows.Sum(x => x.Amount);
-                                }
+                                ledgerBalanceMulti = VerifiedXCore.Bitcoin.Attestation.VaultLedgerStore.Balance(scStateMulti, txRequest.FromAddress);
 
                                 if (isOwnerMulti)
                                 {
@@ -3283,7 +3255,7 @@ namespace VerifiedXCore.Services
                                 }
                                 else
                                 {
-                                    if (scStateMulti.SCStateTreiTokenizationTXes == null || !scStateMulti.SCStateTreiTokenizationTXes.Any())
+                                    if (!VerifiedXCore.Bitcoin.Attestation.VaultLedgerStore.HasRows(scStateMulti))
                                         return (txResult, $"No vBTC balance found for {txRequest.FromAddress} in contract {input.SCUID}.");
 
                                     if (ledgerBalanceMulti < input.Amount)
@@ -3383,17 +3355,7 @@ namespace VerifiedXCore.Services
                                 bool isOwner = fromAddress == scStateTreiRec.OwnerAddress;
 
                                 decimal ledgerBalance = 0M;
-                                if (scStateTreiRec.SCStateTreiTokenizationTXes != null && scStateTreiRec.SCStateTreiTokenizationTXes.Any())
-                                {
-                                    var transactions = scStateTreiRec.SCStateTreiTokenizationTXes
-                                        .Where(x => x.FromAddress == fromAddress || x.ToAddress == fromAddress)
-                                        .ToList();
-
-                                    if (transactions.Any())
-                                    {
-                                        ledgerBalance = transactions.Sum(x => x.Amount);
-                                    }
-                                }
+                                ledgerBalance = VerifiedXCore.Bitcoin.Attestation.VaultLedgerStore.Balance(scStateTreiRec, fromAddress);
 
                                 // Reserve sends defer the ledger debit until unlock — subtract in-flight
                                 // pending amounts so the balance can't be spent twice during the window.
@@ -3437,7 +3399,7 @@ namespace VerifiedXCore.Services
                                     if (ledgerBalance - pendingReserveOut < amount.Value)
                                         return (txResult, $"Insufficient vBTC balance for transfer. Available: {ledgerBalance - pendingReserveOut}, Requested: {amount.Value}");
 
-                                    if (scStateTreiRec.SCStateTreiTokenizationTXes == null || !scStateTreiRec.SCStateTreiTokenizationTXes.Any())
+                                    if (!VerifiedXCore.Bitcoin.Attestation.VaultLedgerStore.HasRows(scStateTreiRec))
                                         return (txResult, $"No vBTC balance found for {fromAddress} in contract {scUID}.");
                                 }
                             }
@@ -3810,17 +3772,7 @@ namespace VerifiedXCore.Services
                                 bool isRequesterOwner = requesterAddress == scState.OwnerAddress;
                                 decimal ledgerBalance = 0M;
 
-                                if (scState.SCStateTreiTokenizationTXes != null && scState.SCStateTreiTokenizationTXes.Any())
-                                {
-                                    var transactions = scState.SCStateTreiTokenizationTXes
-                                        .Where(x => x.FromAddress == requesterAddress || x.ToAddress == requesterAddress)
-                                        .ToList();
-
-                                    if (transactions.Any())
-                                    {
-                                        ledgerBalance = transactions.Sum(x => x.Amount);
-                                    }
-                                }
+                                ledgerBalance = VerifiedXCore.Bitcoin.Attestation.VaultLedgerStore.Balance(scState, requesterAddress);
 
                                 decimal totalBalance = ledgerBalance;
                                 var deposit = new OwnerDepositCheck(OwnerDepositStatus.NotQueried, 0M);
@@ -4187,6 +4139,13 @@ namespace VerifiedXCore.Services
                     if (string.IsNullOrEmpty(evmDestination) || !evmDestination.StartsWith("0x") || evmDestination.Length != 42)
                         return (txResult, "Invalid EvmDestination for bridge lock.");
 
+                    // ... and an address Base can mint to: "0x" and 40 hex digits, not the zero address. A shorter one padded
+                    // with spaces to 42, or the zero address, debited vBTC that no mint could ever pay. Refused at admission at
+                    // every height; in blocks from BridgeLockEvmAddressHeight.
+                    if ((blockHeight == null || blockHeight.Value >= Globals.BridgeLockEvmAddressHeight)
+                        && !VerifiedXCore.Bitcoin.Services.BridgeTxRules.IsMintableEvmAddress(evmDestination))
+                        return (txResult, BridgeLockDestinationNotMintableReason);
+
                     // Validators never sign a Base mint for a destination that begins with an admin message tag, so a lock to
                     // one would debit vBTC that is never minted. Refused at admission at every height; in blocks from the
                     // path-audit height.
@@ -4380,8 +4339,14 @@ namespace VerifiedXCore.Services
                         if (votesTok == null || votesTok.Type != JTokenType.Array)
                             return (txResult, "Bridge pool unlock requires CasterConsensusVotes array.");
                         var votes = votesTok.ToObject<List<CasterConsensusVote>>();
+                        // From Globals.BridgeVotesBoundToAttemptHeight the votes count for the caster they elected, and only
+                        // while they are recent.
+                        var (poolAttempt, poolAttemptRefusal) = BridgeCasterConsensus.AttemptFor(txRequest.FromAddress, null, poolGateHeight, blockHeight, blockTime);
+                        if (poolAttemptRefusal != null)
+                            return (txResult, poolAttemptRefusal);
                         var (votesOk, votesReason) = BridgeCasterConsensus.VerifyBoundVotes(votes, poolBurnHash, "POOL_EXIT", totalAmountSats.Value, vfxDestAddr, poolGateHeight,
-                            eachCasterOnce: (blockHeight == null && !blockVerify && !blockDownloads) || poolGateHeight >= Globals.BridgeVoteOncePerCasterHeight);
+                            eachCasterOnce: (blockHeight == null && !blockVerify && !blockDownloads) || poolGateHeight >= Globals.BridgeVoteOncePerCasterHeight,
+                            attempt: poolAttempt);
                         if (!votesOk)
                             return (txResult, $"Caster consensus votes rejected for pool unlock: {votesReason}");
 
@@ -4513,8 +4478,14 @@ namespace VerifiedXCore.Services
                         if (votesTok == null || votesTok.Type != JTokenType.Array)
                             return (txResult, "VBTCb exit to BTC requires CasterConsensusVotes array.");
                         var votes = votesTok.ToObject<List<CasterConsensusVote>>();
+                        // From Globals.BridgeVotesBoundToAttemptHeight the votes count for the caster they elected, only while
+                        // they are recent, and, when the burn's earlier exit failed, only if they were given after it.
+                        var (exitAttempt, exitAttemptRefusal) = BridgeCasterConsensus.AttemptFor(txRequest.FromAddress, exitBurnHash, exitGateHeight, blockHeight, blockTime);
+                        if (exitAttemptRefusal != null)
+                            return (txResult, exitAttemptRefusal);
                         var (votesOk, votesReason) = BridgeCasterConsensus.VerifyBoundVotes(votes, exitBurnHash, "BTC_EXIT", exitTotalSats, btcDestination, exitGateHeight,
-                            eachCasterOnce: (blockHeight == null && !blockVerify && !blockDownloads) || exitGateHeight >= Globals.BridgeVoteOncePerCasterHeight);
+                            eachCasterOnce: (blockHeight == null && !blockVerify && !blockDownloads) || exitGateHeight >= Globals.BridgeVoteOncePerCasterHeight,
+                            attempt: exitAttempt);
                         if (!votesOk)
                             return (txResult, $"Caster consensus votes rejected for exit to BTC: {votesReason}");
 
@@ -4785,6 +4756,7 @@ namespace VerifiedXCore.Services
             catch { return null; }
         }
         internal const string BridgeLockDestinationIsAdminTagReason = "A bridge lock's EvmDestination cannot begin with a Base admin message tag.";
+        internal const string BridgeLockDestinationNotMintableReason = "A bridge lock's EvmDestination is \"0x\" and 40 hex digits, and not the zero address.";
 
         /// <summary>
         /// Bridge locks one sender may have waiting in the mempool (policy, not a block rule). Each lock costs every node a
@@ -5108,15 +5080,7 @@ namespace VerifiedXCore.Services
             bool isOwner = fromAddress == scStateTreiRec.OwnerAddress;
 
             decimal ledgerBalance = 0M;
-            if (scStateTreiRec.SCStateTreiTokenizationTXes != null && scStateTreiRec.SCStateTreiTokenizationTXes.Any())
-            {
-                var transactions = scStateTreiRec.SCStateTreiTokenizationTXes
-                    .Where(x => x.FromAddress == fromAddress || x.ToAddress == fromAddress)
-                    .ToList();
-
-                if (transactions.Any())
-                    ledgerBalance = transactions.Sum(x => x.Amount);
-            }
+            ledgerBalance = VerifiedXCore.Bitcoin.Attestation.VaultLedgerStore.Balance(scStateTreiRec, fromAddress);
 
             if (isOwner)
             {
@@ -5143,7 +5107,7 @@ namespace VerifiedXCore.Services
                 if (ledgerBalance < amount)
                     return (false, $"Insufficient vBTC balance for bridge lock. Available: {ledgerBalance}, Requested: {amount}");
 
-                if (scStateTreiRec.SCStateTreiTokenizationTXes == null || !scStateTreiRec.SCStateTreiTokenizationTXes.Any())
+                if (!VerifiedXCore.Bitcoin.Attestation.VaultLedgerStore.HasRows(scStateTreiRec))
                     return (false, $"No vBTC balance found for {fromAddress} in contract {scUID}.");
             }
 

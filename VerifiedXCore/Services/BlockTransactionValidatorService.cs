@@ -508,9 +508,9 @@ namespace VerifiedXCore.Services
 
                                                         var postAuditTknz = await TokenizedBitcoin.GetTokenizedBitcoin(scUID);
 
-                                                        if(scState.SCStateTreiTokenizationTXes != null && scState.SCStateTreiTokenizationTXes.Any())
+                                                        if(VerifiedXCore.Bitcoin.Attestation.VaultLedgerStore.HasRows(scState))
                                                         {
-                                                            var balanceList = scState.SCStateTreiTokenizationTXes.ToList();
+                                                            var balanceList = VerifiedXCore.Bitcoin.Attestation.VaultLedgerStore.Rows(scState).ToList();
                                                             if(balanceList.Any())
                                                             {
                                                                 var stateBalance = balanceList.Sum(x => x.Amount);
@@ -574,9 +574,9 @@ namespace VerifiedXCore.Services
 
                                                                 var postAuditTknz = await TokenizedBitcoin.GetTokenizedBitcoin(input.SCUID);
 
-                                                                if (scState.SCStateTreiTokenizationTXes != null && scState.SCStateTreiTokenizationTXes.Any())
+                                                                if (VerifiedXCore.Bitcoin.Attestation.VaultLedgerStore.HasRows(scState))
                                                                 {
-                                                                    var balanceList = scState.SCStateTreiTokenizationTXes.ToList();
+                                                                    var balanceList = VerifiedXCore.Bitcoin.Attestation.VaultLedgerStore.Rows(scState).ToList();
                                                                     if (balanceList.Any())
                                                                     {
                                                                         var stateBalance = balanceList.Sum(x => x.Amount);
@@ -730,11 +730,9 @@ namespace VerifiedXCore.Services
                         // ignores the owner's deposit balance (this previously produced false "Insufficient
                         // balance" rejections that blocked the recipient's wallet records). Informational only:
                         var scState = SmartContractStateTrei.GetSmartContractState(scUID);
-                        if (scState?.SCStateTreiTokenizationTXes != null && scState.SCStateTreiTokenizationTXes.Any())
+                        if (VerifiedXCore.Bitcoin.Attestation.VaultLedgerStore.HasRows(scState))
                         {
-                            var senderLedger = scState.SCStateTreiTokenizationTXes
-                                .Where(x => x.FromAddress == fromAddress || x.ToAddress == fromAddress)
-                                .Sum(x => x.Amount);
+                            var senderLedger = VerifiedXCore.Bitcoin.Attestation.VaultLedgerStore.Balance(scState, fromAddress);
                             SCLogUtility.Log($"VBTC-TRACE [2-Handler]: sender post-transfer ledger sum: {senderLedger} (informational — TX already committed)",
                                 "BlockTransactionValidatorService.ProcessIncomingTransactions()");
                         }
@@ -2098,9 +2096,9 @@ namespace VerifiedXCore.Services
 
                                                         var postAuditTknz = await TokenizedBitcoin.GetTokenizedBitcoin(scUID);
 
-                                                        if (scState.SCStateTreiTokenizationTXes != null && scState.SCStateTreiTokenizationTXes.Any())
+                                                        if (VerifiedXCore.Bitcoin.Attestation.VaultLedgerStore.HasRows(scState))
                                                         {
-                                                            var balanceList = scState.SCStateTreiTokenizationTXes.ToList();
+                                                            var balanceList = VerifiedXCore.Bitcoin.Attestation.VaultLedgerStore.Rows(scState).ToList();
                                                             if (balanceList.Any())
                                                             {
                                                                 var stateBalance = balanceList.Sum(x => x.Amount);

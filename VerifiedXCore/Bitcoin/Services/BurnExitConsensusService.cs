@@ -421,6 +421,58 @@ namespace VerifiedXCore.Bitcoin.Services
             return wait;
         }
 
+        /// <summary>
+        /// When this node's own mempool would not take the exit transaction (it holds one on the same locks): nothing was
+        /// sent, so the burn goes back to wait a short while and is planned again from the locks as they are then. Marked
+        /// failed instead, as any send failure was, this caster gave the burn up. True when that is the case.
+        /// </summary>
+        internal static bool NotSentIsRetried(ProcessedBurnRecord record, string? reason, string what)
+        {
+            // Base not answering when the transaction's burn was looked up again is no verdict on the burn either: asked
+            // again later, as the look-up before the round is.
+            if (!TransactionData.IsMempoolRefusal(reason) && !BaseCouldNotBeRead(reason)) return false;
+            var wait = NoteShortRound(record, TimeUtil.GetTime());
+            LogUtility.Log($"[BurnExitConsensus] {what} for burn {record.BaseBurnTxHash} not sent ({reason}); planned again in {wait} s.",
+                "BurnExitConsensusService");
+            return true;
+        }
+
+        /// <summary>
+        /// Whether a reason says Base could not be read (no provider answered, or none had the receipt yet), as distinct
+        /// from Base answering that the transaction is not the burn. The reasons BaseBridgeService gives for the first.
+        /// </summary>
+        internal static bool BaseCouldNotBeRead(string? reason) =>
+            reason != null && (reason.IndexOf("Could not read", StringComparison.OrdinalIgnoreCase) >= 0
+                               || reason.IndexOf("receipt not found", StringComparison.OrdinalIgnoreCase) >= 0);
+
+        /// <summary>
+        /// What a burn becomes when its EXIT_TO_BTC transaction was not sent. This node's mempool refusing it (it holds an
+        /// exit on the same locks) is judged first: nothing was sent, and the burn is planned again shortly. Its reason says
+        /// the transaction conflicts with one "already" waiting, which the check below read as another caster's exit and
+        /// marked the burn complete, out of every retry. A rule refusing a duplicate (another caster reserved the burn) is
+        /// handled; anything else failed.
+        /// </summary>
+        internal static void NoteExitNotSent(ProcessedBurnRecord record, string? reason)
+        {
+            var err = reason ?? string.Empty;
+            if (NotSentIsRetried(record, err, "EXIT_TO_BTC"))
+                return;
+
+            if (err.IndexOf("Duplicate", StringComparison.OrdinalIgnoreCase) >= 0
+                || err.IndexOf("already", StringComparison.OrdinalIgnoreCase) >= 0)
+            {
+                // Another caster already reserved — safe to treat as handled
+                record.Status = BurnExitStatus.Complete;
+                LogUtility.Log($"[BurnExitConsensus] EXIT_TO_BTC already broadcast for burn {record.BaseBurnTxHash} — treating as handled.",
+                    "BurnExitConsensusService.ExecuteBtcExit()");
+                return;
+            }
+
+            record.Status = BurnExitStatus.Failed;
+            ErrorLogUtility.LogError($"[BurnExitConsensus] VFX EXIT_TO_BTC broadcast failed: {err}. No BTC was sent. Stuck exit will retry.",
+                "BurnExitConsensusService.ExecuteBtcExit()");
+        }
+
         /// <summary>The burns the sweep takes now: pending, and past their retry time.</summary>
         internal static List<ProcessedBurnRecord> DueForARound(IEnumerable<ProcessedBurnRecord> records, long now) =>
             records.Where(r => r.Status == BurnExitStatus.Pending && r.NextAttemptAt <= now).ToList();
@@ -471,6 +523,43 @@ namespace VerifiedXCore.Bitcoin.Services
         /// <summary>Whether the round's votes still meet the threshold of <paramref name="committee"/>, the one the exit is judged by.</summary>
         internal static bool VotesCarry(IEnumerable<CasterConsensusVote>? votes, HashSet<string> committee, int required) =>
             (votes ?? Enumerable.Empty<CasterConsensusVote>()).Select(v => v.CasterAddress).Where(committee.Contains).Distinct(StringComparer.Ordinal).Count() >= required;
+
+        /// <summary>
+        /// The votes of a round, as the transaction that carries them records them: each with the handler its caster
+        /// agreed to and that caster's signature over it (from Globals.BridgeVotesBoundToAttemptHeight a vote counts only
+        /// for the caster it names, BridgeCasterConsensus.VerifyBoundVotes).
+        /// </summary>
+        internal static List<CasterConsensusVote> VotesOf(IEnumerable<BurnExitConfirmation> confirmations, BurnExitType exitType)
+        {
+            var burnType = BurnTypeString(exitType);
+            return confirmations.Select(c => new CasterConsensusVote
+            {
+                CasterAddress = c.ConfirmingCasterAddress,
+                BaseBurnTxHash = c.BaseBurnTxHash,
+                BurnType = burnType,
+                Signature = c.Signature,
+                Timestamp = c.Timestamp,
+                AgreedHandler = c.AgreedHandlerAddress,
+                HandlerSignature = c.HandlerSignature,
+            }).ToList();
+        }
+
+        /// <summary>How long before admission's age limit a round's votes are given up for a new round: room to build and send the transaction.</summary>
+        internal const long VoteAgeSlackSeconds = 60;
+
+        /// <summary>
+        /// The votes of a round that a transaction sent now for the block at <paramref name="nextHeight"/> would still be
+        /// admitted with: from Globals.BridgeVotesBoundToAttemptHeight those younger than admission's age limit (less
+        /// <see cref="VoteAgeSlackSeconds"/>), all of them below it. A round whose exit waited its turn past that is held
+        /// again instead of sending an exit that is refused.
+        /// </summary>
+        internal static IEnumerable<CasterConsensusVote> VotesStillAdmitted(IEnumerable<CasterConsensusVote>? votes, long nextHeight, long now)
+        {
+            var all = votes ?? Enumerable.Empty<CasterConsensusVote>();
+            if (nextHeight < Globals.BridgeVotesBoundToAttemptHeight) return all;
+            var oldest = now - (BridgeCasterConsensus.VoteMaxAgeSeconds - BridgeCasterConsensus.VoteAdmissionMarginSeconds - VoteAgeSlackSeconds);
+            return all.Where(v => v != null && v.Timestamp >= oldest);
+        }
 
         /// <summary>Until <paramref name="onChain"/> holds, checked every <paramref name="poll"/>, or <paramref name="atMost"/> passed; whether it held.</summary>
         internal static async Task<bool> WaitUntilOnChain(Func<bool> onChain, TimeSpan atMost, TimeSpan poll)
@@ -752,15 +841,7 @@ namespace VerifiedXCore.Bitcoin.Services
             record.FailedRounds = 0;
 
             record.Status = BurnExitStatus.ConsensusReached;
-            var voteBurnType = BurnTypeString(record.ExitType);
-            record.ConsensusVotes = confirmations.Select(c => new CasterConsensusVote
-            {
-                CasterAddress = c.ConfirmingCasterAddress,
-                BaseBurnTxHash = c.BaseBurnTxHash,
-                BurnType = voteBurnType,
-                Signature = c.Signature,
-                Timestamp = c.Timestamp
-            }).ToList();
+            record.ConsensusVotes = VotesOf(confirmations, record.ExitType);
 
             LogUtility.Log($"[BurnExitConsensus] Consensus reached for {baseBurnTxHash}. Handler: {winner.ProposerCasterAddress}, Votes: {confirmations.Count}", "BurnExitConsensusService");
 
@@ -772,9 +853,9 @@ namespace VerifiedXCore.Bitcoin.Services
                 {
                     // Waiting its turn, the round's votes may no longer carry the committee that judges the exit: then the
                     // burn goes back for a fresh round rather than sending an exit that is refused and given up.
-                    if (!VotesCarry(record.ConsensusVotes, ExitCommittee(), RequiredCasterSignatures))
+                    if (!VotesCarry(VotesStillAdmitted(record.ConsensusVotes, VBTCService.NextBlockHeight, TimeUtil.GetTime()), ExitCommittee(), RequiredCasterSignatures))
                     {
-                        LogUtility.Log($"[BurnExitConsensus] The committee changed while {baseBurnTxHash} waited its turn; a new round will be held.", "BurnExitConsensusService");
+                        LogUtility.Log($"[BurnExitConsensus] The committee changed, or the round's votes grew too old, while {baseBurnTxHash} waited its turn; a new round will be held.", "BurnExitConsensusService");
                         record.ConsensusVotes.Clear();
                         record.HandlerCasterAddress = "";
                         record.Status = BurnExitStatus.Pending;
@@ -986,7 +1067,7 @@ namespace VerifiedXCore.Bitcoin.Services
                 LogUtility.Log($"[BurnExitConsensus] VFX pool unlock TX: {result.TxHashOrError} for burn {record.BaseBurnTxHash}",
                     "BurnExitConsensusService.ExecuteVfxPoolUnlock()");
             }
-            else
+            else if (!NotSentIsRetried(record, result.TxHashOrError, "VFX pool unlock"))
             {
                 record.Status = BurnExitStatus.Failed;
                 ErrorLogUtility.LogError($"[BurnExitConsensus] VFX pool unlock failed: {result.TxHashOrError}",
@@ -1156,20 +1237,7 @@ namespace VerifiedXCore.Bitcoin.Services
 
                 if (!exitResult.Success)
                 {
-                    var err = exitResult.TxHashOrError ?? string.Empty;
-                    if (err.IndexOf("Duplicate", StringComparison.OrdinalIgnoreCase) >= 0
-                        || err.IndexOf("already", StringComparison.OrdinalIgnoreCase) >= 0)
-                    {
-                        // Another caster already reserved — safe to treat as handled
-                        record.Status = BurnExitStatus.Complete;
-                        LogUtility.Log($"[BurnExitConsensus] EXIT_TO_BTC already broadcast for burn {record.BaseBurnTxHash} — treating as handled.",
-                            "BurnExitConsensusService.ExecuteBtcExit()");
-                        return;
-                    }
-
-                    record.Status = BurnExitStatus.Failed;
-                    ErrorLogUtility.LogError($"[BurnExitConsensus] VFX EXIT_TO_BTC broadcast failed: {err}. No BTC was sent. Stuck exit will retry.",
-                        "BurnExitConsensusService.ExecuteBtcExit()");
+                    NoteExitNotSent(record, exitResult.TxHashOrError);
                     return;
                 }
 
@@ -1587,20 +1655,33 @@ namespace VerifiedXCore.Bitcoin.Services
         /// Whether a pool unlock's record is to be made again: null when it is not one waiting to be seen mined (another
         /// kind, not complete, broadcast too recently), false when its burn was consumed, true when it was not.
         /// </summary>
-        internal static bool? UnlockToRemake(ProcessedBurnRecord r, long currentBlock, Func<string, bool>? burnUsed = null)
+        internal static bool? UnlockToRemake(ProcessedBurnRecord r, long currentBlock, Func<string, bool>? burnUsed = null, Func<string, bool>? stillPooled = null)
         {
-            if (r.ExitType != BurnExitType.VfxPoolUnlock || r.Status != BurnExitStatus.Complete || r.CompletionBroadcastAtBlock <= 0
-                || currentBlock - r.CompletionBroadcastAtBlock <= STUCK_EXIT_BLOCK_THRESHOLD)
+            if (r.ExitType != BurnExitType.VfxPoolUnlock || r.Status != BurnExitStatus.Complete || r.CompletionBroadcastAtBlock <= 0)
+                return null;
+            var age = currentBlock - r.CompletionBroadcastAtBlock;
+            if (age <= STUCK_EXIT_BLOCK_THRESHOLD && !(stillPooled != null && age >= DroppedUnlockBlocks && !stillPooled(r.CompletionVfxTxHash)))
                 return null;
             return burnUsed == null ? true : !burnUsed(r.BaseBurnTxHash);
         }
 
+        /// <summary>
+        /// Blocks after its broadcast at which a pool unlock that has left this node's mempool without being mined is made
+        /// again. A producer that finds its plan stale (another unlock drew the lock first) drops it from the mempool, and
+        /// the burn then sat until <see cref="STUCK_EXIT_BLOCK_THRESHOLD"/> blocks had passed.
+        /// </summary>
+        internal const long DroppedUnlockBlocks = 3;
+
+        /// <summary>Whether a transaction is still in this node's mempool.</summary>
+        private static bool InThisMempool(string txHash) =>
+            !string.IsNullOrEmpty(txHash) && TransactionData.GetPool().FindOne(x => x.Hash == txHash) != null;
+
         internal static async Task RetryUnminedPoolUnlocks(long currentBlock)
         {
-            foreach (var record in _processedBurns.Values.Where(r => UnlockToRemake(r, currentBlock) != null).ToList())
+            foreach (var record in _processedBurns.Values.Where(r => UnlockToRemake(r, currentBlock, stillPooled: InThisMempool) != null).ToList())
             {
-                if (UnlockToRemake(record, currentBlock, VBTCBridgeConsumedBurn.IsBurnUsedAnywhere) == false) { record.CompletionBroadcastAtBlock = 0; continue; } // mined
-                LogUtility.Log($"[BurnExitConsensus] Pool unlock {record.CompletionVfxTxHash} for burn {record.BaseBurnTxHash} was not mined in {STUCK_EXIT_BLOCK_THRESHOLD} blocks; made again.", "BurnExitConsensusService.RetryUnminedPoolUnlocks()");
+                if (UnlockToRemake(record, currentBlock, VBTCBridgeConsumedBurn.IsBurnUsedAnywhere, InThisMempool) == false) { record.CompletionBroadcastAtBlock = 0; continue; } // mined
+                LogUtility.Log($"[BurnExitConsensus] Pool unlock {record.CompletionVfxTxHash} for burn {record.BaseBurnTxHash} was not mined ({currentBlock - record.CompletionBroadcastAtBlock} blocks, still in the mempool: {InThisMempool(record.CompletionVfxTxHash)}); made again.", "BurnExitConsensusService.RetryUnminedPoolUnlocks()");
                 record.CompletionBroadcastAtBlock = 0;
                 record.Status = BurnExitStatus.Pending;
                 record.DetectedAtBlock = currentBlock;

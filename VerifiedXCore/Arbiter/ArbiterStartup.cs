@@ -220,9 +220,9 @@ namespace VerifiedXCore.Arbiter
 
                                 if (scState.OwnerAddress != result.VFXAddress)
                                 {
-                                    if (scState.SCStateTreiTokenizationTXes != null)
+                                    if (VerifiedXCore.Bitcoin.Attestation.VaultLedgerStore.HasLedger(scState))
                                     {
-                                        var vBTCList = scState.SCStateTreiTokenizationTXes.Where(x => x.ToAddress == result.VFXAddress || x.FromAddress == result.VFXAddress).ToList();
+                                        var vBTCList = VerifiedXCore.Bitcoin.Attestation.VaultLedgerStore.Rows(scState).Where(x => x.ToAddress == result.VFXAddress || x.FromAddress == result.VFXAddress).ToList();
                                         if (vBTCList.Count() > 0)
                                         {
                                             //Also get the state level stuff we are saving now.
@@ -270,9 +270,9 @@ namespace VerifiedXCore.Arbiter
                                     
                                     // Calculate owner's total balance from smart contract state
                                     decimal ownerBalance = 0M;
-                                    if (scState.SCStateTreiTokenizationTXes != null)
+                                    if (VerifiedXCore.Bitcoin.Attestation.VaultLedgerStore.HasLedger(scState))
                                     {
-                                        var ownerBalances = scState.SCStateTreiTokenizationTXes
+                                        var ownerBalances = VerifiedXCore.Bitcoin.Attestation.VaultLedgerStore.Rows(scState)
                                             .Where(x => x.ToAddress == result.VFXAddress || x.FromAddress == result.VFXAddress)
                                             .ToList();
                                         ownerBalance = ownerBalances.Sum(x => x.Amount);

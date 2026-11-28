@@ -11,6 +11,40 @@ namespace VerifiedXCore.Services
     public static class ConsensusCertificateHelper
     {
         /// <summary>
+        /// The check run on a block before this node signs it: the validation a producer runs on its own block, at this
+        /// node's tip, with nothing written. Replaceable in tests.
+        /// </summary>
+        internal static Func<Block, Task<bool>> TakesAtTip = block => BlockValidatorService.ValidateBlock(block, false, false, validateOnly: true);
+
+        /// <summary>Blocks this node judged and would take: hash → height, so a retried attach does not validate again.</summary>
+        private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, long> _takenAtTip = new(StringComparer.Ordinal);
+        private const long TakenAtTipKeptBlocks = 10;
+
+        /// <summary>
+        /// Why this node does not sign <paramref name="block"/>, or null when it does. It signs a block it has committed,
+        /// and a block on its tip that its validation takes; nothing else, as it cannot tell whether it would take it. A
+        /// refusal is not remembered, so a block refused for a fault of this node's own is judged again at the next try.
+        /// </summary>
+        internal static async Task<string?> WhyNotSign(Block block)
+        {
+            var tip = Globals.LastBlock;
+            if (tip != null && tip.Height == block.Height && tip.Hash == block.Hash)
+                return null; // committed here, so validated here
+            if (tip == null || block.Height != tip.Height + 1 || block.PrevHash != tip.Hash)
+                return "it is not on this node's tip, so this node cannot judge it";
+            if (string.IsNullOrEmpty(block.Hash))
+                return "it has no hash";
+            if (_takenAtTip.TryGetValue(block.Hash, out var at) && at == block.Height)
+                return null;
+            if (!await TakesAtTip(block))
+                return "this node's validation refuses it";
+            _takenAtTip[block.Hash] = block.Height;
+            foreach (var stale in _takenAtTip.Where(kv => kv.Value < block.Height - TakenAtTipKeptBlocks).Select(kv => kv.Key).ToList())
+                _takenAtTip.TryRemove(stale, out _);
+            return null;
+        }
+
+        /// <summary>
         /// A4: shared attestation-quorum check. Collects attestations for the exact
         /// (height, hash, winner, prevHash) tuple from the local store first, then from peer
         /// casters' GetAttestations endpoints. Every signature is verified against the canonical
@@ -118,6 +152,15 @@ namespace VerifiedXCore.Services
             // A caster that lost the validators signs nothing: see VreeService.StandDownReason.
             if (VreeService.StandDownReason(block.Height) != null)
                 return false;
+
+            // Only a block this node takes at its tip is signed. Signing claims the height, and the claim is released by an
+            // operator only: a block signed and then refused held every caster to it, and no other block at that height
+            // could be certified.
+            if (await WhyNotSign(block) is { } notTaken)
+            {
+                CasterLogUtility.Log($"ATTEST-JUDGE: not signing block {block.Hash?[..Math.Min(16, block.Hash?.Length ?? 0)]} at height {block.Height} — {notTaken}.", "CERT");
+                return false;
+            }
 
             // One block per height: never sign a second, different block at a height this node already signed.
             if (!AttestationGuard.TryClaim(block.Height, block.Hash))
