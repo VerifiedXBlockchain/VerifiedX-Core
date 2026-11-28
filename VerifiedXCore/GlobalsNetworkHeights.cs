@@ -51,6 +51,7 @@ namespace VerifiedXCore
             Globals.BridgeLockMinimumHeight = Globals.IsTestNet ? Globals.BridgeLockMinimumTestnetHeight : Globals.BridgeLockMinimumHeight;
             Globals.VaultLedgerHeight = Globals.IsTestNet ? Globals.VaultLedgerTestnetHeight : Globals.VaultLedgerHeight;
             Globals.BridgeAllocationsArrayHeight = Globals.IsTestNet ? Globals.BridgeAllocationsArrayTestnetHeight : Globals.BridgeAllocationsArrayHeight;
+            Globals.ExitPartTakeoverHeight = Globals.IsTestNet ? Globals.ExitPartTakeoverTestnetHeight : Globals.ExitPartTakeoverHeight;
             Globals.PoolUnlockCreditsAddressHeight = Globals.IsTestNet ? Globals.PoolUnlockCreditsAddressTestnetHeight : Globals.PoolUnlockCreditsAddressHeight;
             Globals.BridgeLockEvmAddressHeight = Globals.IsTestNet ? Globals.BridgeLockEvmAddressTestnetHeight : Globals.BridgeLockEvmAddressHeight;
             Globals.WithdrawalOwnScriptAttributionHeight = Globals.IsTestNet ? Globals.WithdrawalOwnScriptAttributionTestnetHeight : Globals.WithdrawalOwnScriptAttributionHeight;
@@ -191,6 +192,7 @@ namespace VerifiedXCore
             Globals.VrfMixHeight = CustomTestNetInputRulesHeight;
             Globals.BridgeLockMinimumHeight = CustomTestNetLateRulesHeight;
             Globals.BridgeAllocationsArrayHeight = CustomTestNetLateRulesHeight;
+            Globals.ExitPartTakeoverHeight = CustomTestNetLateRulesHeight;
             Globals.PoolUnlockCreditsAddressHeight = CustomTestNetLateRulesHeight;
             Globals.BridgeLockEvmAddressHeight = CustomTestNetLateRulesHeight;
             Globals.WithdrawalOwnScriptAttributionHeight = CustomTestNetLateRulesHeight;

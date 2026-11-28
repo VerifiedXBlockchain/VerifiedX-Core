@@ -37,6 +37,7 @@ namespace VerifiedXCore.Tests
         private readonly V _holder = NewKey();
         private readonly Network? _priorNetwork = Globals.BTCNetwork;
         private readonly long _priorGuard = Globals.BridgeIntraBlockGuardHeight;
+        private readonly long _priorExitTakeover = Globals.ExitPartTakeoverHeight;
         private readonly Func<VaultWithdrawalRow, VaultPin, Task<(bool, string)>> _realSign = BtcWithdrawalSigner.SignAndBroadcast;
         private readonly Func<string, Task<bool?>> _realKnown = BtcWithdrawalSigner.KnownOnBitcoin;
 
@@ -63,6 +64,7 @@ namespace VerifiedXCore.Tests
             BtcWithdrawalSigner.ForgetAttempts();
             Globals.BootstrapCasterAddresses.Remove(Caster.Address);
             Globals.BridgeIntraBlockGuardHeight = _priorGuard;
+            Globals.ExitPartTakeoverHeight = _priorExitTakeover;
             Globals.BTCNetwork = _priorNetwork;
             base.Dispose();
         }
@@ -132,9 +134,11 @@ namespace VerifiedXCore.Tests
             SignedBy(from ?? Minter, (to ?? _holder).Address, TransactionType.VBTC_V2_TRANSFER,
                 new { Function = "TransferVBTCV2()", ContractUID = vault, FromAddress = (from ?? Minter).Address, ToAddress = (to ?? _holder).Address, Amount = amount });
 
-        private VfxTx Request(string vault, decimal amount, V? from = null) =>
+        private VfxTx Request(string vault, decimal amount, V? from = null, int feeRate = 10) =>
             SignedBy(from ?? Minter, (from ?? Minter).Address, TransactionType.VBTC_V2_WITHDRAWAL_REQUEST,
-                new { Function = "VBTCWithdrawalRequest()", ContractUID = vault, BTCAddress = BtcDest, Amount = amount, FeeRate = 10, UniqueId = Guid.NewGuid().ToString("N") });
+                new { Function = "VBTCWithdrawalRequest()", ContractUID = vault, BTCAddress = BtcDest, Amount = amount, FeeRate = feeRate, UniqueId = Guid.NewGuid().ToString("N") });
+
+        private static VaultWithdrawalRow WithdrawalRow(VfxTx request, string vault) => BtcAttestStore.Withdrawal(BtcWithdrawals.RefOf(request.Hash, vault))!;
 
         /// <summary>A holder locks vBTC of a vault for the bridge; returns the lock's id.</summary>
         private async Task<string> Lock(string vault, decimal amount, V? from = null, string? id = null)
@@ -3156,6 +3160,191 @@ namespace VerifiedXCore.Tests
             Assert.Equal(546, last.DestinationSats);                                         // the fee at 160 sat/vB and an output above dust
             await AdvanceTo(Looks(last.PinnedAtVfxHeight + BtcAttestRules.StuckPinBlocks));
             Assert.Equal(BtcWithdrawals.ExitPartBearsDoublings + 1, Part(smallBurn, vault.Uid).Pins.Count);
+        }
+
+        // ── An exit part whose fee can be raised no further (ExitPartTakeoverHeight) ─────────────────────────────
+
+        private static long Looks(long from) => from % BtcAttestRules.TakeRetryBlocks == 0 ? from : from + BtcAttestRules.TakeRetryBlocks - from % BtcAttestRules.TakeRetryBlocks;
+
+        /// <summary>
+        /// The smallest exit part on a one-coin vault, raised by rule four times to 160 sat/vB (the most it bears); a
+        /// withdrawal at 200 sat/vB made after the third raise. Returns the vault, its coin, the exit's burn and lock, and the request.
+        /// </summary>
+        private async Task<((string Uid, string Address, NBitcoin.Script Script) Vault, BtcTx Deposit, string Burn, string LockId, VfxTx Request)> AnExitPartRaisedToTheEnd_AndAWithdrawalWaiting()
+        {
+            await Start();
+            var vault = await CreateVault(H1 + 1, keyHolders: Signers);
+            var deposit = await Deposit(vault.Script, 1_000_000);
+            var lockId = await Lock(vault.Uid, 0.00025186M);
+            var burn = NewBurn();
+            await Mine(Exit(burn, BtcDest, (lockId, vault.Uid, 0.00025186M)));
+            for (var doubling = 1; doubling < BtcWithdrawals.ExitPartBearsDoublings; doubling++)
+                await AdvanceTo(Looks(Part(burn, vault.Uid).Pins[^1].PinnedAtVfxHeight + BtcAttestRules.StuckPinBlocks));
+            Assert.Equal(80, Part(burn, vault.Uid).Pins[^1].FeeRate);
+
+            // The vault's one coin is the exit's: a withdrawal paying more waits.
+            var request = await Mine(Request(vault.Uid, 0.001M, feeRate: 200));
+            Assert.Equal(VaultWithdrawalState.Waiting, WithdrawalRow(request, vault.Uid).State);
+
+            // At the next raise the part can still be raised: it is raised, not taken. From the height the withdrawal is
+            // kept past its 360 blocks for the part it waits on; below it, it expired long before.
+            await AdvanceTo(Looks(Part(burn, vault.Uid).Pins[^1].PinnedAtVfxHeight + BtcAttestRules.StuckPinBlocks));
+            Assert.Equal(160, Part(burn, vault.Uid).Pins[^1].FeeRate);
+            Assert.Equal(Tip >= Globals.ExitPartTakeoverHeight ? VaultWithdrawalState.Waiting : VaultWithdrawalState.Expired, WithdrawalRow(request, vault.Uid).State);
+            return (vault, deposit, burn, lockId, request);
+        }
+
+        /// <summary>
+        /// Below ExitPartTakeoverHeight an exit part was never taken. One fixed at a fee Bitcoin will not take, and raised
+        /// by rule as far as it can be, held its coin (here the vault's only coin) for good: no withdrawal could be paid.
+        /// From the height, once its newest transaction has been unconfirmed for StuckPinBlocks and it can be raised no
+        /// further, a withdrawal paying a higher rate is fixed on its coin, and the withdrawal waiting for it is kept alive
+        /// until then. Bitcoin confirms the withdrawal: it is paid and the part is void. The part waits until that spend is
+        /// buried, then is fixed again on the vault's change (the lock's Bitcoin is still in the vault) and paid once.
+        /// </summary>
+        [Fact]
+        public async Task FromTheHeight_AnExitPartThatCanBeRaisedNoFurther_IsTaken_AndFixedAgainOnceTheTakerIsBuried()
+        {
+            Globals.ExitPartTakeoverHeight = 1;
+            BtcAttestRules.ExitReopenBurialBlocksOverride = 2;
+            var (vault, deposit, burn, lockId, request) = await AnExitPartRaisedToTheEnd_AndAWithdrawalWaiting();
+            var last = Part(burn, vault.Uid).Pins[^1];
+
+            await AdvanceTo(Looks(last.PinnedAtVfxHeight + BtcAttestRules.StuckPinBlocks) - BtcAttestRules.TakeRetryBlocks);
+            Assert.Equal(VaultWithdrawalState.Waiting, WithdrawalRow(request, vault.Uid).State);      // not yet: still moving
+            await AdvanceTo(Looks(last.PinnedAtVfxHeight + BtcAttestRules.StuckPinBlocks));
+            var taker = WithdrawalRow(request, vault.Uid);
+            Assert.Equal(VaultWithdrawalState.Pinned, taker.State);
+            Assert.Equal(new[] { Outpoint(deposit, 0) }, taker.Pins[0].Inputs);
+            Assert.Equal(VaultWithdrawalState.Pinned, Part(burn, vault.Uid).State);                    // both hold the coin
+            Assert.Equal(BtcWithdrawals.ExitPartBearsDoublings + 1, Part(burn, vault.Uid).Pins.Count); // and no raise after the last
+
+            var takerTx = await SignAndConfirm(taker.Pins[0]);
+            Assert.Equal(VaultWithdrawalState.Settled, WithdrawalRow(request, vault.Uid).State);
+            var part = Part(burn, vault.Uid);
+            Assert.Equal(VaultWithdrawalState.Waiting, part.State);                                    // void, waiting for the burial
+            Assert.True(part.Pins.All(p => p.Dead));
+            Assert.False(Record(burn).IsComplete);
+            Assert.Equal(0M, VBTCBridgeLockState.GetByLockId(lockId)!.RemainingAmount);                // still drawn by the exit
+
+            var spare = await CreateVault(Tip + 1);
+            await Deposit(spare.Script, 10_000);                                                       // Bitcoin moves past the burial
+            await AdvanceTo(Looks(Tip + 1));
+            part = Part(burn, vault.Uid);
+            Assert.Equal(VaultWithdrawalState.Pinned, part.State);
+            var fresh = part.Pins[^1];
+            Assert.Equal(new[] { Outpoint(takerTx, 1) }, fresh.Inputs);                                // the withdrawal's change
+            await SignAndConfirm(fresh);
+            Assert.True(Record(burn).IsComplete);
+            Assert.False(Record(burn).IsFailedRecord);
+            Assert.Equal(25_186, BtcAttestStore.Total(vault.Uid).SettledExitSats);                     // once
+            Assert.Equal(0M, VBTCBridgeLockState.GetByLockId(lockId)!.RemainingAmount);
+        }
+
+        /// <summary>
+        /// From the height a part voided by a spend while nothing else of its exit is paying no longer fails its exit at
+        /// once: its transaction was signed, and the exit made again elsewhere could be paid twice should a reorganisation
+        /// drop the spend. With no coin to be fixed again on, the exit fails once the spend is buried, its lock restored once.
+        /// </summary>
+        [Fact]
+        public async Task FromTheHeight_AVoidedPartsExitFails_OnlyOnceTheVoidingSpendIsBuried()
+        {
+            Globals.ExitPartTakeoverHeight = 1;
+            BtcAttestRules.ExitReopenBurialBlocksOverride = 2;
+            await Start();
+            var vault = await CreateVault(H1 + 1);
+            var deposit = await Deposit(vault.Script, 1_000_000);
+            var lockId = await Lock(vault.Uid, 0.004M);
+            var burn = NewBurn();
+            await Mine(Exit(burn, BtcDest, (lockId, vault.Uid, 0.004M)));
+
+            await Report(_btc.Mine(Pay(new[] { new OutPoint(deposit, 0) }, (Elsewhere(), 999_000))));
+            var part = Part(burn, vault.Uid);
+            Assert.Equal(VaultWithdrawalState.Waiting, part.State);
+            Assert.False(Record(burn).IsComplete);
+            Assert.Equal(0M, VBTCBridgeLockState.GetByLockId(lockId)!.RemainingAmount);
+            await AdvanceTo(part.RequestVfxHeight + VBTCWithdrawalRequest.EXPIRY_BLOCKS + BtcAttestRules.TakeRetryBlocks);
+            Assert.False(Record(burn).IsComplete);                                                     // past its window, not its burial
+            Assert.Equal(VaultWithdrawalState.Waiting, Part(burn, vault.Uid).State);
+
+            var spare = await CreateVault(Tip + 1);
+            await Deposit(spare.Script, 10_000);                                                       // Bitcoin moves past the burial
+            await AdvanceTo(Tip + 1);
+            Assert.Equal(VaultWithdrawalState.Void, Part(burn, vault.Uid).State);
+            Assert.True(Record(burn).IsFailedRecord);
+            Assert.Equal(0.004M, VBTCBridgeLockState.GetByLockId(lockId)!.RemainingAmount);           // restored once
+            await AdvanceTo(Tip + 2 * BtcAttestRules.TakeRetryBlocks);
+            Assert.Equal(0.004M, VBTCBridgeLockState.GetByLockId(lockId)!.RemainingAmount);
+            Assert.True(BtcWithdrawals.PausedByVoidedExit(vault.Uid, Tip + 1));
+        }
+
+        /// <summary>And a rewind during that wait makes its earlier transaction its payment again: nothing failed, paid once.</summary>
+        [Fact]
+        public async Task FromTheHeight_AVoidedPartWhoseSpendIsRewoundBeforeTheBurial_IsPaidByItsEarlierTransaction()
+        {
+            Globals.ExitPartTakeoverHeight = 1;
+            BtcAttestRules.ExitReopenBurialBlocksOverride = 5;
+            await Start();
+            var vault = await CreateVault(H1 + 1);
+            var deposit = await Deposit(vault.Script, 1_000_000);
+            var lockId = await Lock(vault.Uid, 0.004M);
+            var burn = NewBurn();
+            await Mine(Exit(burn, BtcDest, (lockId, vault.Uid, 0.004M)));
+            var first = Part(burn, vault.Uid).Pins[0];
+
+            var at = _btc.Mine(Pay(new[] { new OutPoint(deposit, 0) }, (Elsewhere(), 999_000)));
+            await Report(at);
+            Assert.Equal(VaultWithdrawalState.Waiting, Part(burn, vault.Uid).State);
+
+            await Reorganise(at - 1);
+            var part = Part(burn, vault.Uid);
+            Assert.Equal(VaultWithdrawalState.Pinned, part.State);
+            Assert.Equal(first.Txid, part.Pins.Single(p => !p.Dead).Txid);
+            await SignAndConfirm(part.Pins.Single(p => !p.Dead));
+            Assert.True(Record(burn).IsComplete);
+            Assert.False(Record(burn).IsFailedRecord);
+            Assert.Equal(400_000, BtcAttestStore.Total(vault.Uid).SettledExitSats);
+        }
+
+        /// <summary>The mirror: the exit's last transaction confirms after all; the exit is paid and the taker refunded in full.</summary>
+        [Fact]
+        public async Task FromTheHeight_ATakenExitPartConfirmingAfterAll_IsPaid_AndTheTakerIsRefundedInFull()
+        {
+            Globals.ExitPartTakeoverHeight = 1;
+            var (vault, _, burn, _, request) = await AnExitPartRaisedToTheEnd_AndAWithdrawalWaiting();
+            var last = Part(burn, vault.Uid).Pins[^1];
+            await AdvanceTo(Looks(last.PinnedAtVfxHeight + BtcAttestRules.StuckPinBlocks));
+            Assert.Equal(VaultWithdrawalState.Pinned, WithdrawalRow(request, vault.Uid).State);
+            var before = await Spendable(vault.Uid, Minter);
+
+            await SignAndConfirm(last);
+            Assert.Equal(VaultWithdrawalState.Settled, Part(burn, vault.Uid).State);
+            Assert.True(Record(burn).IsComplete);
+            Assert.False(Record(burn).IsFailedRecord);
+            Assert.Equal(25_186, BtcAttestStore.Total(vault.Uid).SettledExitSats);
+            Assert.Equal(VaultWithdrawalState.Void, WithdrawalRow(request, vault.Uid).State);
+            Assert.Equal(VBTCWithdrawalStatus.Cancelled, VBTCWithdrawalRequest.GetByTransactionHash(request.Hash, vault.Uid)!.Status);
+            Assert.Equal(before + 0.001M, await Spendable(vault.Uid, Minter));                         // the whole amount back
+        }
+
+        /// <summary>Below the height the same part keeps its coin and the withdrawal is never fixed on it; from the height it is.</summary>
+        [Fact]
+        public async Task BelowTheHeight_AnExitPartIsNeverTaken_FromItTheWaitingWithdrawalTakesIt()
+        {
+            Globals.ExitPartTakeoverHeight = long.MaxValue;
+            var (vault, deposit, burn, _, _) = await AnExitPartRaisedToTheEnd_AndAWithdrawalWaiting();
+            var last = Part(burn, vault.Uid).Pins[^1];
+            await AdvanceTo(Looks(last.PinnedAtVfxHeight + BtcAttestRules.StuckPinBlocks));
+            var late = await Mine(Request(vault.Uid, 0.001M, feeRate: 200));
+            Assert.Equal(VaultWithdrawalState.Waiting, WithdrawalRow(late, vault.Uid).State);
+            await AdvanceTo(Tip + BtcAttestRules.TakeRetryBlocks);
+            Assert.Equal(VaultWithdrawalState.Waiting, WithdrawalRow(late, vault.Uid).State);
+
+            Globals.ExitPartTakeoverHeight = Tip + 1;
+            await AdvanceTo(Looks(Tip + 1));
+            var taker = WithdrawalRow(late, vault.Uid);
+            Assert.Equal(VaultWithdrawalState.Pinned, taker.State);
+            Assert.Equal(new[] { Outpoint(deposit, 0) }, taker.Pins[0].Inputs);
         }
     }
 }

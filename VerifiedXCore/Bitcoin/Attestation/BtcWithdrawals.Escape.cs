@@ -74,16 +74,22 @@ namespace VerifiedXCore.Bitcoin.Attestation
         /// <summary>
         /// Whether a pinned withdrawal has stopped moving, as seen by one that would pay <paramref name="feeRate"/>:
         /// its newest transaction was fixed at least <see cref="BtcAttestRules.StuckPinBlocks"/> blocks ago and pays a
-        /// lower fee rate. A bridge exit's part is never taken: an exit is paid whole or not at all, and a part made
-        /// void would leave the rest of it paid with nothing to match.
+        /// lower fee rate. A bridge exit's part has its fee raised by rule instead, and is taken only from
+        /// <see cref="Globals.ExitPartTakeoverHeight"/> and once the rule can raise it no further
+        /// (<see cref="NextExitRaise"/>): a part fixed at a fee Bitcoin will not take, with nothing left to raise, held its
+        /// coin (in a one-coin vault, the whole vault) for good. A voided part is fixed again, or its exit failed, as for a
+        /// foreign spend (<see cref="VoidExitPart"/>).
         /// </summary>
-        private static bool IsStuck(VaultWithdrawalRow row, long feeRate, long vfxHeight)
+        private static bool IsStuck(VaultWithdrawalRow row, long feeRate, long vfxHeight, LiteDatabase? db)
         {
             // A sweep's fee is raised by rule, like an exit's; it gives its coins to nobody.
-            if (row.IsBridgeExit || row.IsSweep || row.State != VaultWithdrawalState.Pinned) return false;
+            if (row.IsSweep || row.State != VaultWithdrawalState.Pinned) return false;
             var newest = row.Pins.LastOrDefault(p => !p.Dead);
             if (newest == null) return false;
             var pays = newest.FeeRate > 0 ? newest.FeeRate : row.FeeRate;
+            if (row.IsBridgeExit)
+                return vfxHeight >= Globals.ExitPartTakeoverHeight && vfxHeight >= newest.PinnedAtVfxHeight + BtcAttestRules.StuckPinBlocks
+                    && pays < feeRate && NextExitRaise(row, db) == null;
             return vfxHeight >= MovingSince(row) + BtcAttestRules.StuckPinBlocks && pays < feeRate;
         }
 
@@ -114,7 +120,7 @@ namespace VerifiedXCore.Bitcoin.Attestation
         internal static List<(VaultCoinRow Coin, List<VaultWithdrawalRow> Holders)> TakeableCoins(string scUID, long feeRate, long vfxHeight, LiteDatabase? db)
         {
             var result = new List<(VaultCoinRow, List<VaultWithdrawalRow>)>();
-            var stuck = BtcAttestStore.WithdrawalsOf(scUID, VaultWithdrawalState.Pinned, db).Where(r => IsStuck(r, feeRate, vfxHeight)).ToList();
+            var stuck = BtcAttestStore.WithdrawalsOf(scUID, VaultWithdrawalState.Pinned, db).Where(r => IsStuck(r, feeRate, vfxHeight, db)).ToList();
             if (stuck.Count == 0) return result;
 
             var outpoints = new SortedSet<string>(stuck.SelectMany(r => r.Pins.Where(p => !p.Dead).SelectMany(p => p.Inputs)), StringComparer.Ordinal);
@@ -123,7 +129,7 @@ namespace VerifiedXCore.Bitcoin.Attestation
                 var coin = BtcAttestStore.Coin(outpoint, db);
                 if (coin == null || coin.Status != VaultCoinStatus.Pinned || coin.SmartContractUID != scUID || coin.ValueSats <= 0) continue;
                 var holders = HoldersOf(coin, db);
-                if (holders.Count == 0 || holders.Any(h => !IsStuck(h, feeRate, vfxHeight))) continue; // somebody who holds it is still moving
+                if (holders.Count == 0 || holders.Any(h => !IsStuck(h, feeRate, vfxHeight, db))) continue; // somebody who holds it is still moving
                 result.Add((coin, holders));
             }
             return result;
@@ -146,16 +152,21 @@ namespace VerifiedXCore.Bitcoin.Attestation
             long until = 0;
             var pinnedRows = pinnedOnItsVault.ToList();
             var current = BtcAttestStore.ScriptRowForVault(waiting.SmartContractUID);
+            var height = atHeight ?? (Globals.LastBlock?.Height ?? 0) + 1;
             foreach (var pinned in pinnedRows)
             {
-                if (pinned.IsBridgeExit || pinned.IsSweep || pinned.State != VaultWithdrawalState.Pinned) continue;
+                if (pinned.IsSweep || pinned.State != VaultWithdrawalState.Pinned) continue;
+                if (pinned.IsBridgeExit && height < Globals.ExitPartTakeoverHeight) continue;
                 var newest = pinned.Pins.LastOrDefault(p => !p.Dead);
                 if (newest == null) continue;
                 // Coins of a replaced key are never a withdrawal's to take (a sweep takes them).
                 if (current != null && BtcVaultKeys.KeyOfCoins(newest.Inputs)?.ScriptHex != current.ScriptHex) continue;
                 var pays = newest.FeeRate > 0 ? newest.FeeRate : pinned.FeeRate;
                 if (pays >= waiting.FeeRate) continue; // never takeable by this one
-                until = Math.Max(until, MovingSince(pinned) + BtcAttestRules.StuckPinBlocks + BtcAttestRules.TakeRetryBlocks);
+                // An exit part counts from its newest transaction: then it is either raised (and counted again from the
+                // raise) or can be raised no further and is taken.
+                var from = pinned.IsBridgeExit ? newest.PinnedAtVfxHeight : MovingSince(pinned);
+                until = Math.Max(until, from + BtcAttestRules.StuckPinBlocks + BtcAttestRules.TakeRetryBlocks);
             }
             return until;
         }

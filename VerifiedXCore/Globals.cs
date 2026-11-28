@@ -572,6 +572,20 @@ namespace VerifiedXCore
         public const long BridgeAllocationsArrayTestnetHeight = long.MaxValue;
 
         /// <summary>
+        /// From this height a pinned bridge exit part whose Bitcoin fee the rule can raise no further (the next doubling
+        /// leaves too little to pay, passes the highest fee rate, or the part has its most transactions) and whose newest
+        /// transaction has been unconfirmed for BtcAttestRules.StuckPinBlocks no longer keeps its coins to itself: a
+        /// withdrawal that pays a higher fee rate may be fixed on them, as on a stuck withdrawal's. Whichever confirms is
+        /// paid; a voided part's exit is failed and its locks restored only once the voiding spend is buried
+        /// (BtcAttestRules.ExitReopenBurialBlocks), so its signed transaction cannot also confirm after a reorganisation.
+        /// Below it an exit part is never taken and a voided part with no other part paying fails its exit at once. A
+        /// consensus change to apply: every validator runs it from the same height. Unset (long.MaxValue) on mainnet and
+        /// testnet until the release that activates it. Testnet value in GlobalsNetworkHeights.
+        /// </summary>
+        public static long ExitPartTakeoverHeight = long.MaxValue;
+        public const long ExitPartTakeoverTestnetHeight = long.MaxValue;
+
+        /// <summary>
         /// From this height a reserve's Recover() reads each pending NFT_TX row's call as the dispatchers read it. Below it
         /// a row whose Data was not an array of objects made the recovery throw part-way, so every later row, the balance
         /// sweep, the contract re-own and the vBTC sweep never ran, and the reserve stayed under its vault key. Active from LedgerRulesBatchHeight.
