@@ -49,6 +49,8 @@ namespace VerifiedXCore.Tests
         private readonly Func<string, string, string, Task<string?>> _priorPost = VreeService.HttpPost;
         private readonly Func<string, long, Task<MembershipRecordResponse?>> _priorFetch = CasterDiscoveryService.FetchMembershipResponse;
         private readonly System.Collections.Concurrent.ConcurrentBag<Peers> _priorBag = Globals.BlockCasters;
+        private readonly long _priorChainHeight = Globals.MembershipChainHeight;
+        private readonly string _priorChainAnchor = Globals.MembershipAnchorRecordHash;
 
         private readonly AsyncLocal<Member?> _who = new();
         private readonly Dictionary<long, string> _hashes = new();
@@ -68,6 +70,7 @@ namespace VerifiedXCore.Tests
             CasterMembershipStore.InvalidateCache();
             VreeElection.ClearCachesForTests();
             VreeService.ResetForTests();
+            CarriedRecordCompletion.ResetForTests();
             BlockchainData.ChainRef = "test-chain";
             Globals.IsChainSynced = true;
             Globals.IsBlockCaster = false;
@@ -114,6 +117,11 @@ namespace VerifiedXCore.Tests
             VreeService.HttpGet = _priorGet;
             VreeService.HttpPost = _priorPost;
             CasterDiscoveryService.FetchMembershipResponse = _priorFetch;
+            Globals.MembershipChainHeight = _priorChainHeight;
+            Globals.MembershipAnchorRecordHash = _priorChainAnchor;
+            MembershipChain.ResetForTests();
+            CarriedRecordCompletion.ResetForTests();
+            BlockDownloadService.BlockDict.Clear();
             VreeElection.ClearCachesForTests();
             VreeService.ResetForTests();
             CasterMembershipStore.InvalidateCache();
@@ -2556,6 +2564,262 @@ namespace VerifiedXCore.Tests
                 Globals.MembershipAnchorRecordHash = priorAnchor;
                 MembershipChain.ResetForTests();
             }
+        }
+
+        // ── A copy of an election's first block passed on without its record ─────────────────────
+
+        /// <summary>
+        /// This node's peers hold <paramref name="record"/>. Their answer reaches it through its minute pull while it is still
+        /// five blocks below the record, so the record cannot be adopted yet; then the download brings the tip to the block
+        /// before it.
+        /// </summary>
+        private Task PeersHoldWhileBehind(CasterMembershipRecord record) => PeersAnswerWhileBehind(_ => new List<CasterMembershipRecord> { record });
+
+        /// <summary>As <see cref="PeersHoldWhileBehind"/>, each peer answering with what <paramref name="answer"/> gives for its address.</summary>
+        private async Task PeersAnswerWhileBehind(Func<string, List<CasterMembershipRecord>> answer)
+        {
+            var tip = Globals.LastBlock;
+            StallAt(H - 5, 400);
+            CasterDiscoveryService.FetchMembershipResponse = (ip, _) => Task.FromResult<MembershipRecordResponse?>(
+                new MembershipRecordResponse { HeadSeq = HeadSeq + 1, Records = answer(ip) });
+            ValidatorMembershipPull.ResetForTests();
+            Assert.True(await ValidatorMembershipPull.PullIfDueAsync());
+            Assert.Equal(_head.RecordHash, CasterMembershipStore.GetCurrent()!.RecordHash); // too far ahead to be adopted
+            CasterDiscoveryService.FetchMembershipResponse = (_, _) => Task.FromResult<MembershipRecordResponse?>(null);
+            ValidatorMembershipPull.ResetForTests();
+            _blocks[H] = tip;
+            Globals.LastBlock = tip;
+        }
+
+        /// <summary>The membership chain starts with the block at <paramref name="height"/>, whose run is the anchor: this node's head record.</summary>
+        private void TheChainStartedAt(long height)
+        {
+            var block = _blocks[height];
+            block.Transactions ??= new List<Transaction>();
+            BlockchainData.GetBlocks().Insert(block);
+            DbContext.DB!.GetCollection<MembershipChain.ChainRow>("rsrv_membership_chain").Upsert(
+                new MembershipChain.ChainRow { Id = height, BlockHash = block.Hash, IsRun = true, Records = new List<CasterMembershipRecord> { _head } });
+            Globals.MembershipChainHeight = height;
+            Globals.MembershipAnchorRecordHash = _head.RecordHash;
+            MembershipChain.ResetForTests();
+            Assert.True(MembershipChain.ActiveAt(height + 1));
+        }
+
+        /// <summary>The next block as its producer serves it, with a reward, certified by <paramref name="attestors"/>.</summary>
+        private Block Served(IEnumerable<Member> attestors, CasterMembershipRecord? carried)
+        {
+            var height = Globals.LastBlock.Height + 1;
+            var reward = new Transaction
+            {
+                FromAddress = "Coinbase_BlkRwd", ToAddress = _electors[10].Address, TransactionType = TransactionType.TX, Timestamp = TimeUtil.GetTime(),
+                Amount = BlockVersionUtility.GetBlockVersion(height) < 4 ? BlockchainData.GetBlockReward() : 0.0M,
+            };
+            reward.Build();
+            return ProducedBlock(_electors[10], attestors, carried, transactions: new List<Transaction> { reward });
+        }
+
+        /// <summary>A copy as a peer passes it on, with the record and the certificate left out as asked: both are outside the hash.</summary>
+        private static Block PassedOn(Block block, bool record, bool certificate)
+        {
+            var copy = JsonConvert.DeserializeObject<Block>(JsonConvert.SerializeObject(block))!;
+            if (!record) copy.MembershipRecord = null;
+            if (!certificate) copy.ConsensusCertificate = null;
+            Assert.Equal(block.Hash, copy.GetBlockHash());
+            return copy;
+        }
+
+        /// <summary>The download loop's validation of a block staged from <paramref name="ip"/>, on a node catching up.</summary>
+        private static async Task Download(Block copy, string ip)
+        {
+            Globals.IsChainSynced = false;
+            Assert.True(BlockStaging.Stage(copy, ip));
+            await Globals.BlocksDownloadSlim.WaitAsync();
+            try { await BlockValidatorService.ValidateBlocks(true); }
+            finally { Globals.BlocksDownloadSlim.Release(); }
+        }
+
+        /// <summary>
+        /// A node catching up takes the election's first block from a peer that left the record out. The block's certificate
+        /// is the elected committee's and holds under no other: the record its peers hold, which judges valid on the block,
+        /// is put back, and the node adopts it there, as it would from the whole block. From the membership chain's start
+        /// the chain carries it too. Before, the copy was taken as it was and the node kept the old committee.
+        /// </summary>
+        [Theory]
+        [InlineData(false)]
+        [InlineData(true)]
+        public async Task ACopyWithoutItsRecord_IsGivenBackTheRecordItsCertificateWasSignedUnder(bool chain)
+        {
+            var record = Ratified(0);
+            await PeersHoldWhileBehind(record);
+            if (chain) TheChainStartedAt(H);
+            var block = Served(Members(record).Take(3), record);
+
+            await Download(PassedOn(block, record: false, certificate: true), "10.0.0.201");
+
+            Assert.Equal(H + 1, Globals.LastBlock.Height);
+            Assert.Equal(record.RecordHash, BlockchainData.GetBlockByHeight(H + 1)!.MembershipRecord?.RecordHash);
+            Assert.Equal(record.RecordHash, CasterMembershipStore.GetCurrent()!.RecordHash);
+            if (chain) Assert.Equal(record.RecordHash, MembershipChain.RecordFor(H + 2)?.RecordHash);
+        }
+
+        /// <summary>
+        /// The block at that height that the old committee certified, carrying no record, is taken as it is, though peers hold
+        /// a record for its height: its certificate holds without one. No record a node merely holds changes the verdict on
+        /// it, before the chain's start or after.
+        /// </summary>
+        [Theory]
+        [InlineData(false)]
+        [InlineData(true)]
+        public async Task TheOldCommitteesBlock_IsTakenAsItIs_ThoughPeersHoldARecordForItsHeight(bool chain)
+        {
+            var record = Ratified(0);
+            await PeersHoldWhileBehind(record);
+            if (chain) TheChainStartedAt(H);
+            var block = Served(_committee.Take(3), null);
+
+            await Download(PassedOn(block, record: false, certificate: true), "10.0.0.201");
+
+            Assert.Equal(H + 1, Globals.LastBlock.Height);
+            Assert.Null(BlockchainData.GetBlockByHeight(H + 1)!.MembershipRecord);
+            Assert.Equal(_head.RecordHash, CasterMembershipStore.GetCurrent()!.RecordHash);
+            if (chain) Assert.Equal(_head.RecordHash, MembershipChain.RecordFor(H + 2)?.RecordHash);
+        }
+
+        /// <summary>
+        /// A copy without the record and without the certificate: nothing in it shows whose block it is. While peers hold a
+        /// record that judges valid on it, the copy is not taken, the downloader asks another peer than the one that served
+        /// it, and the whole block from that peer is taken with its record.
+        /// </summary>
+        [Fact]
+        public async Task ACopyWithoutItsRecordOrCertificate_IsFetchedFromAnotherPeer_AndTheWholeBlockTaken()
+        {
+            var record = Ratified(0);
+            await PeersHoldWhileBehind(record);
+            var block = Served(Members(record).Take(3), record);
+            var since = DateTime.UtcNow;
+
+            await Download(PassedOn(block, record: false, certificate: false), "10.0.0.201");
+
+            Assert.Equal(H, Globals.LastBlock.Height);
+            Assert.Contains("BlockValidatorService.ValidateBlock()-incompleteCopy", StepsSince(since));
+            Assert.False(BlockValidatorService.WasRefusedForItsContents(block.Height, block.Hash));
+            var served = new NodeInfo { NodeIP = "10.0.0.201", NodeHeight = H + 5 };
+            var other = new NodeInfo { NodeIP = "10.0.0.202", NodeHeight = H + 3 };
+            Assert.Same(other, CarriedRecordCompletion.PreferSource(H + 1, served, new[] { served, other }));
+            Assert.Same(served, CarriedRecordCompletion.PreferSource(H + 1, served, new[] { served })); // nobody else has it
+
+            await Download(PassedOn(block, record: true, certificate: true), other.NodeIP);
+
+            Assert.Equal(H + 1, Globals.LastBlock.Height);
+            Assert.Equal(record.RecordHash, CasterMembershipStore.GetCurrent()!.RecordHash);
+        }
+
+        /// <summary>
+        /// Copies of the record with signatures that are not their signers' (the record hash leaves the signatures out, so
+        /// each is a copy of the real record) reach this node first, two from every peer, more than a height has places
+        /// for. None is kept, the record as its electors signed it is kept from the next pull, and the copy of the block
+        /// without it is given it back.
+        /// </summary>
+        [Fact]
+        public async Task CopiesOfTheRecordWithBadSignatures_DoNotKeepOutTheOneItsElectorsSigned()
+        {
+            var record = Ratified(0);
+            var junk = 0;
+            CasterMembershipRecord BadlySigned()
+            {
+                var copy = JsonConvert.DeserializeObject<CasterMembershipRecord>(JsonConvert.SerializeObject(record))!;
+                var signer = Of(copy.Signatures![0].SignerAddress);
+                copy.Signatures[0].Signature = SignatureService.CreateSignature($"not-the-record-{++junk}", signer.Key, signer.Pub);
+                Assert.Equal(record.RecordHash, CasterMembershipStore.ComputeRecordHash(copy));
+                return copy;
+            }
+            await PeersAnswerWhileBehind(_ => new List<CasterMembershipRecord> { BadlySigned(), BadlySigned() });
+            Assert.True(junk > CarriedRecordCompletion.MaxPerHeight);
+            await PeersHoldWhileBehind(record);
+            var block = Served(Members(record).Take(3), record);
+
+            await Download(PassedOn(block, record: false, certificate: true), "10.0.0.201");
+
+            Assert.Equal(H + 1, Globals.LastBlock.Height);
+            Assert.Equal(record.RecordHash, CasterMembershipStore.GetCurrent()!.RecordHash);
+        }
+
+        /// <summary>
+        /// One peer answers with eight copies, each with good signatures from two electors (too few to ratify it, which only
+        /// the block can show): it takes two places at the height, and the record another peer holds still finds one.
+        /// </summary>
+        [Fact]
+        public async Task OnePeersCopies_TakeTwoPlacesAtAHeight_AndTheRecordAnotherPeerHoldsStillFitsIn()
+        {
+            var record = Ratified(0);
+            var pairs = Enumerable.Range(0, 8).Select(i => new[] { _electors[i], _electors[i + 1] }).ToList();
+            var own = pairs.Select(keys => Signed(JsonConvert.DeserializeObject<CasterMembershipRecord>(JsonConvert.SerializeObject(record))!, keys)).ToList();
+            var greedy = _committee[0].Ip;
+            await PeersAnswerWhileBehind(ip => ip == greedy ? own : new List<CasterMembershipRecord>());
+            await PeersAnswerWhileBehind(ip => ip == _committee[1].Ip ? new List<CasterMembershipRecord> { record } : new List<CasterMembershipRecord>());
+            var block = Served(Members(record).Take(3), record);
+
+            await Download(PassedOn(block, record: false, certificate: true), "10.0.0.201");
+
+            Assert.Equal(H + 1, Globals.LastBlock.Height);
+            Assert.Equal(record.RecordHash, CasterMembershipStore.GetCurrent()!.RecordHash);
+        }
+
+        /// <summary>
+        /// Copies of the record carrying many signatures from addresses of the sender's own making: one with more than any
+        /// validator set signs, one with fewer than a pull may verify, all from addresses that are not validators here. Both
+        /// are refused before a single signature is verified, and the record as its electors signed it still gets in and
+        /// completes the block.
+        /// </summary>
+        [Fact]
+        public async Task ACopyWithThousandsOfMadeUpSigners_IsRefusedWithoutVerifyingOne_AndTheElectedRecordStillGetsIn()
+        {
+            var record = Ratified(0);
+            CasterMembershipRecord MadeUp(int signers)
+            {
+                var copy = JsonConvert.DeserializeObject<CasterMembershipRecord>(JsonConvert.SerializeObject(record))!;
+                copy.Signatures = Enumerable.Range(0, signers).Select(i => new RecordSignature { SignerAddress = $"xMadeUp{i:D6}", Signature = $"30{i:x8}" }).ToList();
+                return copy;
+            }
+            Assert.True(BoundedJson.ValidatorItems < 5_000 && CarriedRecordCompletion.MaxVerificationsPerPull > 900);
+            var verified = 0;
+            CarriedRecordCompletion.VerifyingForTests = r => { if (r.RecordHash == record.RecordHash) Interlocked.Add(ref verified, r.Signatures!.Count); };
+            try
+            {
+                await PeersAnswerWhileBehind(_ => new List<CasterMembershipRecord> { MadeUp(5_000), MadeUp(900) });
+                Assert.Equal(0, verified);
+
+                await PeersHoldWhileBehind(record);
+                Assert.Equal(record.Signatures!.Count, verified); // checked once, however many peers serve it
+            }
+            finally { CarriedRecordCompletion.VerifyingForTests = null; }
+            var block = Served(Members(record).Take(3), record);
+
+            await Download(PassedOn(block, record: false, certificate: true), "10.0.0.201");
+
+            Assert.Equal(H + 1, Globals.LastBlock.Height);
+            Assert.Equal(record.RecordHash, CasterMembershipStore.GetCurrent()!.RecordHash);
+        }
+
+        /// <summary>
+        /// When every copy comes that way (peers that themselves stored it stripped), the block is taken as it is after a
+        /// few, as before: the node moves on, and the repair it had before is what is left to it.
+        /// </summary>
+        [Fact]
+        public async Task WhenEveryCopyLacksTheRecord_TheBlockIsTakenAfterAFew_SoTheNodeNeverStops()
+        {
+            var record = Ratified(0);
+            await PeersHoldWhileBehind(record);
+            var block = Served(Members(record).Take(3), record);
+
+            for (var i = 0; i < CarriedRecordCompletion.MaxIncompleteCopies; i++)
+            {
+                await Download(PassedOn(block, record: false, certificate: false), $"10.0.0.{210 + i}");
+                Assert.Equal(H, Globals.LastBlock.Height);
+            }
+            await Download(PassedOn(block, record: false, certificate: false), "10.0.0.220");
+
+            Assert.Equal(H + 1, Globals.LastBlock.Height);
         }
     }
 }

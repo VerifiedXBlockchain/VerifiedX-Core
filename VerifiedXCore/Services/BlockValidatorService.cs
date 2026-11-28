@@ -512,7 +512,7 @@ namespace VerifiedXCore.Services
                             await ConsensusCertificateHelper.TryCompleteCertificateAsync(block);
                         var stopwatch1 = new Stopwatch();
                         stopwatch1.Start();
-                        var result = await ValidateBlock(block, false, startupDownload, false, false, skipCasterCheck, source: $"BlockDict:{ipAddress}");
+                        var result = await ValidateBlock(block, false, startupDownload, false, false, skipCasterCheck, source: CarriedRecordCompletion.DownloadSource(ipAddress));
                         stopwatch1.Stop();
                         if (!result && block.Height == Globals.LastBlock.Height + 1)
                         {
@@ -902,6 +902,11 @@ namespace VerifiedXCore.Services
                     return result;
                 }
 
+                // A copy passed on without its record keeps its hash. When its own certificate holds only under a record peers
+                // hold for this block, that record is put back, and the block is judged as its committee signed it.
+                if (!validateOnly)
+                    CarriedRecordCompletion.TryComplete(block);
+
                 // Certificates are attached after local craft (TryAttachCertificateAsync) and before broadcast.
                 // validateOnly preflight must not require a cert yet; full acceptance paths use validateOnly=false.
                 // blockDownloads is exempt: certs are not part of the block hash and attestations are
@@ -918,6 +923,15 @@ namespace VerifiedXCore.Services
                     if (block.Height == Globals.LastBlock.Height + 1 && ConsensusCertificateVerifier.RefusalDependsOnCommittee(block))
                         NoteCommitteeRefusal(committeeRefusal, heldBeforeCertificate);
                     DbContext.Rollback("BlockValidatorService.ValidateBlock()-cert");
+                    return result;
+                }
+
+                // Behind the tip a download is not asked for its certificate, so a copy without its record and without its
+                // certificate would be taken as it is. Where peers hold a record for this block, such a copy is fetched again
+                // from another source; after a few the block is taken as before (CarriedRecordCompletion).
+                if (!validateOnly && blockDownloads && !AtSyncedTip(block) && CarriedRecordCompletion.RefuseIncomplete(block, source))
+                {
+                    DbContext.Rollback("BlockValidatorService.ValidateBlock()-incompleteCopy");
                     return result;
                 }
 
