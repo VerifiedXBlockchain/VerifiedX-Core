@@ -1,4 +1,7 @@
 using System;
+using System.Collections.Generic;
+using System.Numerics;
+using System.Threading.Tasks;
 using VerifiedXCore.Bitcoin.Services;
 using Xunit;
 
@@ -13,8 +16,6 @@ namespace VerifiedXCore.Tests
         [Fact]
         public void OnlyARevert_SaysTheContractHasNoSuchFunction()
         {
-            static Exception Rpc(int code, string message) => new Nethereum.JsonRpc.Client.RpcResponseException(new Nethereum.JsonRpc.Client.RpcError(code, message));
-
             Assert.True(BaseBridgeService.SaysTheContractReverted(Rpc(3, "execution reverted")));
             Assert.True(BaseBridgeService.SaysTheContractReverted(Rpc(-32000, "execution reverted")));
             Assert.True(BaseBridgeService.SaysTheContractReverted(new Nethereum.ABI.FunctionEncoding.SmartContractRevertException("reverted", "0x")));
@@ -27,5 +28,44 @@ namespace VerifiedXCore.Tests
             Assert.False(BaseBridgeService.SaysTheContractReverted(new System.Net.Http.HttpRequestException("connection refused")));
         }
 
+
+        private static Exception Rpc(int code, string message) => new Nethereum.JsonRpc.Client.RpcResponseException(new Nethereum.JsonRpc.Client.RpcError(code, message));
+
+        private static BaseBridgeService.SignerView View(int version) =>
+            new BaseBridgeService.SignerView(new List<string> { "0xv1", "0xv2" }, version, 2, BigInteger.One);
+
+        [Fact]
+        public async Task AProviderThatFailsOnTheVersion_IsPassedOver_AndTheNextOnesVersionIsUsed()
+        {
+            var asked = new List<string>();
+            // Each provider's read, as the node makes it: the version call goes through ReadMessageVersionAsync.
+            async Task<BaseBridgeService.SignerView> Read(string url)
+            {
+                asked.Add(url);
+                var version = await BaseBridgeService.ReadMessageVersionAsync(() => url switch
+                {
+                    "limited" => throw Rpc(-32005, "limit exceeded"),
+                    "down" => throw new System.Net.Http.HttpRequestException("connection refused"),
+                    _ => Task.FromResult(new BigInteger(4)),
+                });
+                return View(version);
+            }
+
+            var view = await BaseBridgeService.ReadSignerViewFromAsync(new[] { "limited", "down", "good" }, Read);
+
+            Assert.Equal(new[] { "limited", "down", "good" }, asked);
+            Assert.NotNull(view);
+            Assert.Equal(4, view!.MessageVersion); // not the older form, which the first provider's failure used to mean
+        }
+
+        [Fact]
+        public async Task WhenEveryProviderFails_ThereIsNoView_AndAnOlderContractIsStillRead()
+        {
+            Assert.Null(await BaseBridgeService.ReadSignerViewFromAsync(new[] { "a", "b" }, async url => View(await BaseBridgeService.ReadMessageVersionAsync(() => throw Rpc(-32603, "Internal error")))));
+
+            // A contract without the function reverts: that is the older contract, read from the first provider.
+            var older = await BaseBridgeService.ReadSignerViewFromAsync(new[] { "a", "b" }, async url => View(await BaseBridgeService.ReadMessageVersionAsync(() => throw Rpc(3, "execution reverted"))));
+            Assert.Equal(3, older!.MessageVersion);
+        }
     }
 }

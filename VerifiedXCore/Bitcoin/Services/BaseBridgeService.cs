@@ -252,27 +252,42 @@ namespace VerifiedXCore.Bitcoin.Services
         {
             if (ReadSignerViewForTests != null) return await ReadSignerViewForTests();
             if (!IsBridgeConfigured) return null;
-            foreach (var url in RpcUrlCandidates())
+            return await ReadSignerViewFromAsync(RpcUrlCandidates(), ReadSignerViewAtAsync);
+        }
+
+        /// <summary>The signer view from the first provider that gives one: a provider whose read fails is passed over. Null when none gives one.</summary>
+        internal static async Task<SignerView?> ReadSignerViewFromAsync(IEnumerable<string> providers, Func<string, Task<SignerView>> read)
+        {
+            foreach (var url in providers)
             {
-                try
-                {
-                    var c = new Web3(url).Eth.GetContract(SIGNER_VIEW_ABI, ContractAddress);
-                    var validators = await c.GetFunction("getValidators").CallAsync<List<string>>();
-                    var required = (int)await c.GetFunction("requiredMintSignatures").CallAsync<BigInteger>();
-                    var nonce = await c.GetFunction("adminNonce").CallAsync<BigInteger>();
-                    var version = 3;
-                    // V3 has no such function, and says so by reverting. Any other failure of the call is the provider's:
-                    // it is not taken for a V3 contract, and the next provider is asked.
-                    try { version = (int)await c.GetFunction("MESSAGE_VERSION").CallAsync<BigInteger>(); }
-                    catch (Exception ex) when (SaysTheContractReverted(ex)) { }
-                    if (version != VbtcbTypedData.MessageVersion) return new SignerView(validators, version, Math.Max(2, required), nonce);
-                    var casters = await c.GetFunction("getCasters").CallAsync<List<string>>();
-                    var requiredCasters = (int)await c.GetFunction("requiredCasterSignatures").CallAsync<BigInteger>();
-                    return new SignerView(validators, version, Math.Max(2, required), nonce, casters, requiredCasters);
-                }
+                try { return await read(url); }
                 catch { }
             }
             return null;
+        }
+
+        /// <summary>
+        /// The contract's message version as one provider reports it: 3 when the call reverts, which is how a contract
+        /// without the function (V3) answers. Any other failure of the call is the provider's and is thrown, so that
+        /// provider's read fails and the next is asked: it is not taken for a V3 contract.
+        /// </summary>
+        internal static async Task<int> ReadMessageVersionAsync(Func<Task<BigInteger>> call)
+        {
+            try { return (int)await call(); }
+            catch (Exception ex) when (SaysTheContractReverted(ex)) { return 3; }
+        }
+
+        private static async Task<SignerView> ReadSignerViewAtAsync(string url)
+        {
+            var c = new Web3(url).Eth.GetContract(SIGNER_VIEW_ABI, ContractAddress);
+            var validators = await c.GetFunction("getValidators").CallAsync<List<string>>();
+            var required = (int)await c.GetFunction("requiredMintSignatures").CallAsync<BigInteger>();
+            var nonce = await c.GetFunction("adminNonce").CallAsync<BigInteger>();
+            var version = await ReadMessageVersionAsync(() => c.GetFunction("MESSAGE_VERSION").CallAsync<BigInteger>());
+            if (version != VbtcbTypedData.MessageVersion) return new SignerView(validators, version, Math.Max(2, required), nonce);
+            var casters = await c.GetFunction("getCasters").CallAsync<List<string>>();
+            var requiredCasters = (int)await c.GetFunction("requiredCasterSignatures").CallAsync<BigInteger>();
+            return new SignerView(validators, version, Math.Max(2, required), nonce, casters, requiredCasters);
         }
 
         /// <summary>The contract's pending proposeRemoval: the validators and casters it names, and when it can run (0: none).</summary>
