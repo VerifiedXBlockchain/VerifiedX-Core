@@ -23,14 +23,13 @@ namespace VerifiedXCore.Tests
         [Fact]
         public async Task TheBurnWatch_ReadsNoFurtherThanTheFinalizedBlock_AndTakesABurnOnceItsBlockIsFinal()
         {
-            var provider = Provider();
-            provider.Head = 5_000;
-            provider.Finalized = 4_900;
-            Configure(provider);
+            var all = Providers(2);
+            all.At(5_000, finalized: 4_900);
+            var provider = all[0];
             var state = BridgeExitSyncState.GetOrCreate();
             state.LastScannedBlock = 4_890;
             BridgeExitSyncState.Save(state);
-            provider.AddBurn(NewBurn(), Contract, vfxExit: false, 400_000, "bc1qdestination", blockNumber: 4_950); // newer than the finalized block
+            all.AddBurn(NewBurn(), Contract, vfxExit: false, 400_000, "bc1qdestination", blockNumber: 4_950); // newer than the finalized block
 
             var (taken, scannedTo, _) = await BaseBridgeExitWatchService.PollOnce();
 
@@ -47,7 +46,14 @@ namespace VerifiedXCore.Tests
             Assert.Equal(4_900, scannedTo);
             Assert.Equal(4_900, provider.HighestLogBlockAsked);
 
-            // The burn's block is final: now it is read and taken.
+            // One provider holds the burn's block final, the other does not yet: the watch reads to what both hold final.
+            all[1].Finalized = 4_960;
+            (taken, scannedTo, _) = await BaseBridgeExitWatchService.PollOnce();
+            Assert.Equal(0, taken);
+            Assert.Equal(4_900, scannedTo);
+            Assert.Equal(4_900, all[1].HighestLogBlockAsked);
+
+            // The burn's block is final on both: now it is read and taken.
             provider.Finalized = 4_960;
             (taken, scannedTo, _) = await BaseBridgeExitWatchService.PollOnce();
             Assert.Equal(1, taken);
@@ -58,16 +64,14 @@ namespace VerifiedXCore.Tests
         [Fact]
         public async Task TheBurnWatch_StartsItsCursorJustBelowTheFinalizedBlock_SoWhatIsNotFinalYetIsStillRead()
         {
-            var provider = Provider();
-            provider.Head = 5_000;
-            provider.Finalized = 4_900;
-            Configure(provider);
-            provider.AddBurn(NewBurn(), Contract, vfxExit: true, 300_000, "xDestination", blockNumber: 4_950);
+            var all = Providers(2);
+            all.At(5_000, finalized: 4_900);
+            all.AddBurn(NewBurn(), Contract, vfxExit: true, 300_000, "xDestination", blockNumber: 4_950);
 
             await BaseBridgeExitWatchService.PollOnce();
             Assert.Equal(4_899, BridgeExitSyncState.GetOrCreate().LastScannedBlock);
 
-            provider.Finalized = 5_000;
+            all.Finalize(5_000);
             var taken = 0;
             for (var i = 0; i < 5 && BridgeExitSyncState.GetOrCreate().LastScannedBlock < 5_000; i++)
                 taken += (await BaseBridgeExitWatchService.PollOnce()).Processed;
@@ -85,12 +89,10 @@ namespace VerifiedXCore.Tests
         [Fact]
         public async Task ACastersCheckOfABurn_IsNotYet_UntilTheBurnsBlockIsFinal()
         {
-            var provider = Provider();
-            provider.Head = 1_000;
-            provider.Finalized = 940;
-            Configure(provider);
+            var all = Providers(2);
+            all.At(1_000, finalized: 940);
             var burn = NewBurn();
-            provider.AddBurn(burn, Contract, vfxExit: false, 400_000, "bc1qdestination", blockNumber: 950);
+            all.AddBurn(burn, Contract, vfxExit: false, 400_000, "bc1qdestination", blockNumber: 950);
             var record = Record(burn, 0.004M, "bc1qdestination");
 
             var (ok, transient, reason, evidence) = await BurnExitConsensusService.VerifyBurnEvidenceAsync(record);
@@ -105,7 +107,7 @@ namespace VerifiedXCore.Tests
             Assert.Equal(BaseBridgeService.BurnVerdict.NotYet, read.Verdict);
             Assert.True(BaseBridgeService.IsNotYet(read.Reason), read.Reason);
 
-            provider.Finalized = 950;
+            all.Finalize(950);
             (ok, transient, reason, evidence) = await BurnExitConsensusService.VerifyBurnEvidenceAsync(record);
             Assert.True(ok, reason);
             Assert.False(transient);
@@ -115,11 +117,10 @@ namespace VerifiedXCore.Tests
         [Fact]
         public async Task ACastersCheckOfABurn_IsNotYet_WhileItsReceiptNamesABlockTheChainDoesNotHold()
         {
-            var provider = Provider();
-            Configure(provider);
+            var all = Providers(2);
             var burn = NewBurn();
-            provider.AddBurn(burn, Contract, vfxExit: false, 400_000, "bc1qdestination", blockNumber: 900);
-            provider.BlockHashes[900] = FakeBaseRpc.BlockHash("another block at 900"); // the chain holds another block there
+            all.AddBurn(burn, Contract, vfxExit: false, 400_000, "bc1qdestination", blockNumber: 900);
+            foreach (var p in all) p.BlockHashes[900] = FakeBaseRpc.BlockHash("another block at 900"); // the chain holds another block there
             var record = Record(burn, 0.004M, "bc1qdestination");
 
             var (ok, transient, reason, _) = await BurnExitConsensusService.VerifyBurnEvidenceAsync(record);
@@ -127,7 +128,7 @@ namespace VerifiedXCore.Tests
             Assert.True(transient, reason);
             Assert.Contains(BaseRpc.ReceiptOffChain, reason);
 
-            provider.BlockHashes.Clear();
+            foreach (var p in all) p.BlockHashes.Clear();
             (ok, _, reason, _) = await BurnExitConsensusService.VerifyBurnEvidenceAsync(record);
             Assert.True(ok, reason);
         }
@@ -135,11 +136,10 @@ namespace VerifiedXCore.Tests
         [Fact]
         public async Task AFinalReceiptThatIsNotTheBurn_IsAnAnswer_NotNotYet()
         {
-            var provider = Provider();
-            Configure(provider);
+            var all = Providers(2);
             var burn = NewBurn();
             var log = FakeBaseRpc.BurnLog(burn, Contract, vfxExit: false, 400_000, "bc1qdestination", Globals.BaseEvmChainId, blockNumber: 900);
-            provider.Receipts[burn] = FakeBaseRpc.Receipt(burn, succeeded: false, log);
+            foreach (var p in all) p.Receipts[burn] = FakeBaseRpc.Receipt(burn, succeeded: false, log);
 
             var (ok, transient, reason, _) = await BurnExitConsensusService.VerifyBurnEvidenceAsync(Record(burn, 0.004M, "bc1qdestination"));
             Assert.False(ok);
@@ -158,12 +158,13 @@ namespace VerifiedXCore.Tests
             const string implementation = "0xd2bB4BdA89A23c63eaaD464F15658845a2114Ffa";
             var finalized = FakeBaseRpc.Hex(900);
             // The contract's admin nonce moved from 5 to 6, and the implementation's code changed, after the finalized block.
-            var provider = ContractProvider(null, myBase,
+            FakeBaseRpc Serving() => ContractProvider(null, myBase,
                 nonceAt: at => at == finalized ? 5 : 6,
                 codeAt: at => at == finalized ? "0x6080604052" : "0xdeadbeef");
-            provider.Head = 1_000;
-            provider.Finalized = 900;
-            Configure(provider);
+            var provider = Serving();
+            var all = new[] { provider, Serving() };
+            all.At(1_000, finalized: 900);
+            Configure(all);
 
             var cancel = await BaseAdminSigningService.SignAsync(new BaseAdminSigningService.Request { Action = BaseAdminSigningService.CancelPending });
             Assert.True(cancel.Success, cancel.Error);
@@ -177,7 +178,7 @@ namespace VerifiedXCore.Tests
             Assert.All(provider.StateBlocksAsked, at => Assert.Equal(finalized, at));
             Assert.Equal(13, provider.StateBlocksAsked.Count); // six more views and the code
 
-            // A provider that names no finalized block gives no answer to sign on.
+            // A provider that names no finalized block gives no answer, and the other alone is not enough to sign on.
             provider.On = (method, args) => method == "eth_getBlockByNumber" && args[0]!.ToString() == "finalized" ? Newtonsoft.Json.Linq.JValue.CreateNull() : null;
             var none = await BaseAdminSigningService.SignAsync(new BaseAdminSigningService.Request { Action = BaseAdminSigningService.CancelPending });
             Assert.False(none.Success);

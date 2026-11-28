@@ -1,19 +1,9 @@
 using System;
-using System.Collections.Generic;
-using System.IO;
 using System.Linq;
-using System.Numerics;
 using System.Threading.Tasks;
-using Nethereum.ABI;
 using Nethereum.Util;
-using Newtonsoft.Json.Linq;
 using VerifiedXCore.Bitcoin.Models;
 using VerifiedXCore.Bitcoin.Services;
-using VerifiedXCore.Data;
-using VerifiedXCore.EllipticCurve;
-using VerifiedXCore.Extensions;
-using VerifiedXCore.Models;
-using VerifiedXCore.Utilities;
 using Xunit;
 
 namespace VerifiedXCore.Tests
@@ -44,11 +34,11 @@ namespace VerifiedXCore.Tests
             Assert.Equal(1, elsewhere.CallsTo("eth_chainId"));
 
             // The first read after it passes the provider on another chain over without asking it anything.
-            var burn = "0x" + new string('a', 64);
+            var burn = NewBurn();
             elsewhere.AddBurn(burn, Contract, vfxExit: true, 500_000, "xDestination");
             var (ok, _, reason) = await BaseBridgeService.TryGetBurnEventAsync(burn, vfxExit: true);
             Assert.False(ok);
-            Assert.Contains("receipt not found", reason);
+            Assert.True(BaseBridgeService.IsNotYet(reason), reason);
             Assert.Equal(0, elsewhere.CallsTo("eth_getTransactionReceipt"));
             Assert.Equal(1, elsewhere.CallsTo("eth_chainId"));
             Assert.Equal(1, onBase.CallsTo("eth_getTransactionReceipt"));
@@ -60,20 +50,23 @@ namespace VerifiedXCore.Tests
         public async Task TheBurnWatch_DoesNotReadAProviderOnAnotherChain_AndReadsItAgainOnceItServesBase()
         {
             var provider = Provider(OtherChain);
-            provider.Head = 5_000;
-            Configure(provider);
+            var other = Provider();
+            new[] { provider, other }.At(5_000);
+            Configure(provider, other);
 
-            // The poll the loop runs: the provider is asked its chain id and nothing else, and the cursor does not move.
-            await Assert.ThrowsAnyAsync<Exception>(() => BaseBridgeExitWatchService.ReadUntilCaughtUpAsync());
+            // The poll the loop runs: the provider is asked its chain id and nothing else, and the cursor does not move
+            // (one provider on Base is not enough to read from).
+            await Assert.ThrowsAsync<BaseProviderException>(() => BaseBridgeExitWatchService.ReadUntilCaughtUpAsync());
             Assert.Equal(1, provider.CallsTo("eth_chainId"));
             Assert.Equal(0, provider.FinalizedAsked);
             Assert.Equal(0, provider.CallsTo("eth_getLogs"));
+            Assert.Equal(0, other.CallsTo("eth_getLogs"));
             Assert.Equal(0, BridgeExitSyncState.GetOrCreate().LastScannedBlock);
 
             // It serves Base again. Inside the set-aside time it is not asked; after it, it is asked and read.
             provider.ChainId = null;
             Now += BaseRpc.SetAsideSeconds - 1;
-            await Assert.ThrowsAnyAsync<Exception>(() => BaseBridgeExitWatchService.ReadUntilCaughtUpAsync());
+            await Assert.ThrowsAsync<BaseProviderException>(() => BaseBridgeExitWatchService.ReadUntilCaughtUpAsync());
             Assert.Equal(1, provider.CallsTo("eth_chainId"));
             Assert.Equal(0, provider.FinalizedAsked);
 
@@ -87,9 +80,9 @@ namespace VerifiedXCore.Tests
         [Fact]
         public async Task AProviderFoundOnBase_IsAskedItsChainIdAgainLater_AndLeftOutIfItChanged()
         {
-            var provider = Provider();
-            provider.Head = 5_000;
-            Configure(provider);
+            var all = Providers(2);
+            all.At(5_000);
+            var provider = all[0];
 
             await BaseBridgeExitWatchService.ReadUntilCaughtUpAsync();
             await BaseBridgeExitWatchService.ReadUntilCaughtUpAsync();
@@ -98,48 +91,55 @@ namespace VerifiedXCore.Tests
 
             provider.ChainId = OtherChain;
             Now += BaseRpc.VerifiedForSeconds + 1;
-            await Assert.ThrowsAnyAsync<Exception>(() => BaseBridgeExitWatchService.ReadUntilCaughtUpAsync());
+            await Assert.ThrowsAsync<BaseProviderException>(() => BaseBridgeExitWatchService.ReadUntilCaughtUpAsync());
             Assert.Equal(2, provider.CallsTo("eth_chainId"));
             Assert.Equal(2, provider.FinalizedAsked);
         }
 
         /// <summary>
-        /// A block holding a burn log that names another chain was not read from Base: it waits, however many polls find
-        /// it so, and is never passed over the way a block the provider cannot serve is. A burn of Base's own in the same
-        /// block is taken once the provider is set right.
+        /// A block holding a burn log that names another chain was not read from Base by the provider that served it. While
+        /// that leaves too few providers that read the block, the block waits, however many polls find it so, and is never
+        /// passed over the way a block the providers cannot serve is. That holds when every provider serves the log, and
+        /// when one does and too few others are left. A burn of Base's own in the same block is taken, at once from a
+        /// provider that is right, and the block is passed once the providers are set right.
         /// </summary>
-        [Fact]
-        public async Task TheBurnWatch_NeverPassesABlockWhoseBurnLogNamesAnotherChain_HoweverOftenItIsRead()
+        [Theory]
+        [InlineData(true)]
+        [InlineData(false)]
+        public async Task TheBurnWatch_NeverPassesABlockWhoseBurnLogNamesAnotherChain_HoweverOftenItIsRead(bool everyProviderServesIt)
         {
-            var provider = Provider();
-            provider.Head = 5_000;
-            Configure(provider);
+            var all = Providers(2);
+            all.At(5_000);
+            foreach (var p in all) p.LogRangeCap = 1; // the providers read one block at a time, so the watch narrows to single blocks
             var state = BridgeExitSyncState.GetOrCreate();
             state.LastScannedBlock = 4_990;
             BridgeExitSyncState.Save(state);
             // Block 4,995 holds a burn of Base's and a burn log that names another chain.
-            var real = "0x" + Guid.NewGuid().ToString("N") + Guid.NewGuid().ToString("N");
-            var foreign = "0x" + Guid.NewGuid().ToString("N") + Guid.NewGuid().ToString("N");
-            provider.AddBurn(real, Contract, vfxExit: true, 300_000, "xDestination", blockNumber: 4_995);
-            provider.AddBurn(foreign, Contract, vfxExit: false, 400_000, "bc1qdestination", chainId: OtherChain, blockNumber: 4_995);
+            var real = NewBurn();
+            var foreign = NewBurn();
+            all.AddBurn(real, Contract, vfxExit: true, 300_000, "xDestination", blockNumber: 4_995);
+            all.Take(everyProviderServesIt ? 2 : 1).AddBurn(foreign, Contract, vfxExit: false, 400_000, "bc1qdestination", chainId: OtherChain, blockNumber: 4_995);
 
-            // Polled far past the count at which a block that cannot be read is passed over (the range narrows to the
-            // block first, and the provider reads the block after it without trouble).
+            // Polled far past the count at which a block that cannot be read is passed over (the providers read the block
+            // after it without trouble).
             var taken = 0;
-            for (var i = 0; i < 4 * BaseBridgeExitWatchService.SingleBlockFailuresBeforeSkip; i++)
+            for (var i = 0; i < 5 * BaseBridgeExitWatchService.SingleBlockFailuresBeforeSkip; i++)
                 taken += (await BaseBridgeExitWatchService.PollOnce()).Processed;
 
             Assert.Equal(1, BaseBridgeExitWatchService.CurrentSpan);                          // narrowed to the one block
             Assert.Equal(4_994, BridgeExitSyncState.GetOrCreate().LastScannedBlock);          // which waits; the blocks before it were read
-            Assert.Equal(0, taken);
-            Assert.True(provider.CallsTo("eth_getLogs") > 2 * BaseBridgeExitWatchService.SingleBlockFailuresBeforeSkip);
+            if (everyProviderServesIt) Assert.Equal(0, taken);
+            else Assert.True(taken > 0, "the burn the other provider serves is taken while the block waits for a second read");
+            Assert.True(all[0].CallsTo("eth_getLogs") > 2 * BaseBridgeExitWatchService.SingleBlockFailuresBeforeSkip);
 
-            // The provider is set right: the block is read, and the burn that waited in it is taken.
-            lock (provider.Logs) provider.Logs.RemoveAll(l => l["transactionHash"]!.ToString() == foreign);
+            // The providers are set right: the block is read by both and passed, with the burn in it.
+            foreach (var p in all)
+                lock (p.Logs) p.Logs.RemoveAll(l => l["transactionHash"]!.ToString() == foreign);
+            var takenAfter = 0;
             for (var i = 0; i < 12 && BridgeExitSyncState.GetOrCreate().LastScannedBlock < 5_000; i++)
-                taken += (await BaseBridgeExitWatchService.PollOnce()).Processed;
+                takenAfter += (await BaseBridgeExitWatchService.PollOnce()).Processed;
             Assert.Equal(5_000, BridgeExitSyncState.GetOrCreate().LastScannedBlock);
-            Assert.Equal(1, taken);
+            Assert.Equal(1, takenAfter);
         }
 
         // ── A burn's receipt ─────────────────────────────────────────────────────────────
@@ -147,11 +147,9 @@ namespace VerifiedXCore.Tests
         [Fact]
         public async Task ABurnWhoseEventNamesAnotherChain_IsNotTakenFromThatProvider()
         {
-            var first = Provider();
-            var second = Provider();
-            Configure(first, second);
-            var burn = "0x" + new string('c', 64);
-            first.AddBurn(burn, Contract, vfxExit: true, 500_000, "xDestination", chainId: OtherChain);
+            var all = Providers(3);
+            var burn = NewBurn();
+            all[0].AddBurn(burn, Contract, vfxExit: true, 500_000, "xDestination", chainId: OtherChain);
 
             var (ok, info, reason) = await BaseBridgeService.TryGetBurnEventAsync(burn, vfxExit: true);
             Assert.False(ok);
@@ -159,8 +157,8 @@ namespace VerifiedXCore.Tests
             // No answer about the burn, as when Base could not be read: it is asked again, not failed.
             Assert.True(BurnExitConsensusService.BaseCouldNotBeRead(reason), reason);
 
-            // The next provider's receipt, which names Base's chain, is the one taken.
-            second.AddBurn(burn, Contract, vfxExit: true, 500_000, "xDestination");
+            // The other providers' receipts, which name Base's chain, are the ones taken.
+            all.Skip(1).AddBurn(burn, Contract, vfxExit: true, 500_000, "xDestination");
             (ok, info, reason) = await BaseBridgeService.TryGetBurnEventAsync(burn, vfxExit: true);
             Assert.True(ok, reason);
             Assert.Equal(500_000, info!.AmountSats);
@@ -170,14 +168,15 @@ namespace VerifiedXCore.Tests
         // ── The contract's views and code, as the operator's signing reads them ────────────
 
         [Fact]
-        public async Task TheOperatorsSigning_ReadsTheContractFromAProviderOnBase_NotFromOneOnAnotherChain()
+        public async Task TheOperatorsSigning_ReadsTheContractFromProvidersOnBase_NotFromOneOnAnotherChain()
         {
             var myBase = ThisNodeIsAValidator();
             const string implementation = "0xd2bB4BdA89A23c63eaaD464F15658845a2114Ffa";
 
-            // A provider on another chain serves a contract at admin nonce 99 and other code; the one on Base, nonce 5.
+            // A provider on another chain serves a contract at admin nonce 99 and other code; those on Base, nonce 5.
             var elsewhere = ContractProvider(OtherChain, myBase, nonce: 99, codeHex: "0xdeadbeef");
             var onBase = ContractProvider(null, myBase, nonce: 5, codeHex: "0x6080604052");
+            var alsoOnBase = ContractProvider(null, myBase, nonce: 5, codeHex: "0x6080604052");
 
             Configure(elsewhere);
             var alone = await BaseAdminSigningService.SignAsync(new BaseAdminSigningService.Request { Action = BaseAdminSigningService.CancelPending });
@@ -185,7 +184,7 @@ namespace VerifiedXCore.Tests
             Assert.Equal("Could not read the Base contract", alone.Error);
             Assert.Equal(0, elsewhere.CallsTo("eth_call"));
 
-            Configure(elsewhere, onBase);
+            Configure(elsewhere, onBase, alsoOnBase);
             var cancel = await BaseAdminSigningService.SignAsync(new BaseAdminSigningService.Request { Action = BaseAdminSigningService.CancelPending });
             Assert.True(cancel.Success, cancel.Error);
             Assert.Equal("5", cancel.AdminNonce);

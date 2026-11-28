@@ -26,12 +26,60 @@ namespace VerifiedXCore.Bitcoin.Services
         private static int _singleBlockFailures;
         internal const int SingleBlockFailuresBeforeSkip = 20;
 
-        // The widest span read without error and the narrowest one refused above it (a provider's range cap: 200 blocks
-        // on sepolia.base.org). The span settles between them: doubled into the cap and cut to a quarter on every refusal,
-        // it averaged about 95 blocks a 12-second poll, and with Base at 200 ms blocks a caster behind by an outage gained
-        // under one block a second on the chain, so every burn waited that long (10 November 2026).
-        private static int _goodSpan;
-        private static int _refusedSpan = int.MaxValue;
+        /// <summary>
+        /// What one provider reads at once: the span it is asked next, the widest it read without error and the narrowest
+        /// it refused above that (a provider's range cap: 200 blocks on sepolia.base.org). The span settles between them:
+        /// doubled into the cap and cut to a quarter on every refusal, it averaged about 95 blocks a 12-second poll, and
+        /// with Base at 200 ms blocks a caster behind by an outage gained under one block a second on the chain, so every
+        /// burn waited that long (10 November 2026). Each provider has its own, since each has its own cap and its own
+        /// bad moments; the watch reads a range no wider than BaseRpc.RequiredAgreement of them take (<see cref="SpanFor"/>).
+        /// </summary>
+        internal sealed class SpanState
+        {
+            public int Span = MaxBlockSpan;
+            private int _good;
+            private int _refused = int.MaxValue;
+
+            /// <summary>The span after a read of <paramref name="span"/> blocks succeeded: back up to the widest that worked, then halfway to the narrowest refused.</summary>
+            public int AfterSuccess(int span)
+            {
+                if (span > _good) _good = span;
+                if (span < _good) return Math.Min(span * 2, _good);
+                if (_refused == int.MaxValue) return Math.Min(MaxBlockSpan, span * 2);
+                return Math.Max(span, (span + _refused) / 2);
+            }
+
+            /// <summary>
+            /// The span after a read of <paramref name="span"/> blocks failed. Wider than any that worked, it is the provider's
+            /// cap and the span goes back to the widest that worked; otherwise (a range dense with logs, or the provider
+            /// failing) it shrinks to a quarter, as before.
+            /// </summary>
+            public int AfterFailure(int span)
+            {
+                if (span > _good)
+                {
+                    _refused = Math.Min(_refused, span);
+                    if (_good > 0) return _good;
+                }
+                return Math.Max(1, span / 4);
+            }
+        }
+
+        private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, SpanState> Spans = new(StringComparer.Ordinal);
+
+        private static SpanState SpanOf(string provider) => Spans.GetOrAdd(provider, _ => new SpanState());
+
+        /// <summary>
+        /// The span a range is read at: the widest that BaseRpc.RequiredAgreement of <paramref name="providers"/> take now,
+        /// which is what it takes to pass the range. One provider with a low cap or a bad moment does not narrow it for
+        /// the others.
+        /// </summary>
+        internal static int SpanFor(IEnumerable<string> providers)
+        {
+            var spans = providers.Select(p => SpanOf(p).Span).OrderByDescending(n => n).ToList();
+            return spans.Count >= BaseRpc.RequiredAgreement ? spans[BaseRpc.RequiredAgreement - 1] : spans.DefaultIfEmpty(MaxBlockSpan).Min();
+        }
+
         private static bool _behind;
 
         /// <summary>Reads at most this many spans in one poll while the cursor is behind Base, one after another.</summary>
@@ -134,41 +182,16 @@ namespace VerifiedXCore.Bitcoin.Services
             }
         }
 
-        /// <summary>The span the next read asks for.</summary>
+        /// <summary>The span the last read asked for.</summary>
         internal static int CurrentSpan => _span;
 
         /// <summary>Test seam: start the span over as at startup.</summary>
         internal static void ResetSpanForTests()
         {
             _span = MaxBlockSpan;
-            _goodSpan = 0;
-            _refusedSpan = int.MaxValue;
+            Spans.Clear();
             _singleBlockFailures = 0;
             _behind = false;
-        }
-
-        /// <summary>The span after a read of <paramref name="span"/> blocks succeeded: back up to the widest that worked, then halfway to the narrowest refused.</summary>
-        internal static int SpanAfterSuccess(int span)
-        {
-            if (span > _goodSpan) _goodSpan = span;
-            if (span < _goodSpan) return Math.Min(span * 2, _goodSpan);
-            if (_refusedSpan == int.MaxValue) return Math.Min(MaxBlockSpan, span * 2);
-            return Math.Max(span, (span + _refusedSpan) / 2);
-        }
-
-        /// <summary>
-        /// The span after a read of <paramref name="span"/> blocks failed. Wider than any that worked, it is the provider's
-        /// cap and the span goes back to the widest that worked; otherwise (a range dense with logs, or the provider
-        /// failing) it shrinks to a quarter, as before.
-        /// </summary>
-        internal static int SpanAfterFailure(int span)
-        {
-            if (span > _goodSpan)
-            {
-                _refusedSpan = Math.Min(_refusedSpan, span);
-                if (_goodSpan > 0) return _goodSpan;
-            }
-            return Math.Max(1, span / 4);
         }
 
         private static readonly object CursorLock = new();
@@ -248,21 +271,18 @@ namespace VerifiedXCore.Bitcoin.Services
             return await PollOnceInternal();
         }
 
-        private static async Task<bool> CanReadLogs(string? contract, long block, long latest)
+        /// <summary>Whether BaseRpc.RequiredAgreement of <paramref name="providers"/> read the logs of <paramref name="block"/>.</summary>
+        private static async Task<bool> CanReadLogs(IReadOnlyList<string> providers, string? contract, long block, long latest)
         {
             if (block > latest || string.IsNullOrEmpty(contract)) return false;
-            try
+            var probe = new Nethereum.RPC.Eth.DTOs.NewFilterInput
             {
-                var probe = new Nethereum.RPC.Eth.DTOs.NewFilterInput
-                {
-                    FromBlock = new BlockParameter(new HexBigInteger(block)),
-                    ToBlock = new BlockParameter(new HexBigInteger(block)),
-                    Address = new[] { contract },
-                };
-                await BaseRpc.AuthorizingPrimaryAsync(web3 => web3.Eth.Filters.GetLogs.SendRequestAsync(probe));
-                return true;
-            }
-            catch { return false; }
+                FromBlock = new BlockParameter(new HexBigInteger(block)),
+                ToBlock = new BlockParameter(new HexBigInteger(block)),
+                Address = new[] { contract },
+            };
+            var reads = await BaseRpc.AuthorizingEachAsync(providers, web3 => web3.Eth.Filters.GetLogs.SendRequestAsync(probe));
+            return reads.Count(r => r.Read) >= BaseRpc.RequiredAgreement;
         }
 
         /// <summary>Moves the cursor back when this node has just begun handling burns; see the call in PollOnceInternal.</summary>
@@ -374,10 +394,15 @@ namespace VerifiedXCore.Bitcoin.Services
 
         private static async Task<(int Processed, long ScannedToBlock, string Message)> PollOnceInternal()
         {
-            // The burns read here start an exit: authorizing reads, of the first configured provider. The newest block
-            // read is the provider's finalized block, the newest one Base will not replace: a burn in a block after it
-            // is read once that block is final, so no exit starts from a burn Base can still drop.
-            var latest = (await BaseRpc.AuthorizingPrimaryHeadAsync()).Number;
+            // The burns read here start an exit: authorizing reads. No single provider decides what the watch reads.
+            // Every configured provider that is on Base is asked for its finalized block (the newest one Base will not
+            // replace), and the watch reads to the newest block that BaseRpc.RequiredAgreement of them hold final: a burn
+            // in a block after it is read once that block is final, so no exit starts from a burn Base can still drop.
+            // With fewer providers to read from, nothing is read: that is the providers' failing, not a block's.
+            var providers = await BaseRpc.AuthorizingWatchProvidersAsync();
+            if (providers.Count < BaseRpc.RequiredAgreement)
+                throw new BaseProviderException($"Base cannot be read: {providers.Count} of the configured providers can be read from, and {BaseRpc.RequiredAgreement} are needed");
+            var latest = providers.Select(p => p.Final.Number).OrderByDescending(n => n).ElementAt(BaseRpc.RequiredAgreement - 1);
             _behind = false;
 
             var state = ReadCursorForPoll();
@@ -424,64 +449,103 @@ namespace VerifiedXCore.Bitcoin.Services
             if (from > latest)
                 return (0, state.LastScannedBlock, "No new blocks");
 
-            var to = Math.Min(from + _span - 1, latest);
+            // Every provider final up to the range's end is asked for it (there are BaseRpc.RequiredAgreement at least).
+            var span = _span = SpanFor(providers.Where(p => p.Final.Number >= from).Select(p => p.Provider));
+            var to = Math.Min(from + span - 1, latest);
+            var asked = providers.Where(p => p.Final.Number >= to).Select(p => p.Provider).ToList();
             var contract = BaseBridgeService.VBTCbContractAddress;
 
             var processed = 0;
             var scanFailed = false;
-            // Whether the range could not be read because of the provider (BaseProviderException), not because of the
-            // range: such a read says nothing about the block, so it never counts toward passing a block over.
+            // Whether the range could not be passed because of the providers, not because of the range: too few of them
+            // were in a position to read it at all (not on Base, or what they served is not Base's). Such a poll says
+            // nothing about the block, so it never counts toward passing a block over.
             var providerAtFault = false;
+            // Whether a burn that was read could not be handled (this node's failing): the range is narrowed, as before.
+            var handlingFailed = false;
 
             // Both kinds of burn are read before either is handled: a burn's id counts every bridge burn of its transaction
-            // (BaseBridgeService.BurnId). A range one kind of which could not be read is read again, both kinds.
+            // (BaseBridgeService.BurnId). A provider that could not read one kind has not read the range.
             var v3Contract = BaseBridgeService.ContractAddress;
             var v2Contract = BaseBridgeService.ContractAddress; // also scan the V2 contract if configured
             var btcExitContract = !string.IsNullOrEmpty(v2Contract) ? v2Contract : contract;
-            var vfxExitLogs = new List<Nethereum.Contracts.EventLog<VfxExitBurnedEventDTO>>();
-            var btcLogs = new List<Nethereum.Contracts.EventLog<BTCExitBurnedEventDTO>>();
-            try
+            var reads = await BaseRpc.AuthorizingEachAsync(asked, async web3 =>
             {
+                var vfx = new List<Nethereum.Contracts.EventLog<VfxExitBurnedEventDTO>>();
                 if (!string.IsNullOrEmpty(v3Contract))
                 {
-                    vfxExitLogs = await BaseRpc.AuthorizingPrimaryAsync(web3 =>
-                    {
-                        var vfxExitHandler = web3.Eth.GetEvent<VfxExitBurnedEventDTO>(v3Contract);
-                        return vfxExitHandler.GetAllChangesAsync(vfxExitHandler.CreateFilterInput(
-                            new BlockParameter(new HexBigInteger(from)),
-                            new BlockParameter(new HexBigInteger(to))));
-                    });
-                }
-                btcLogs = await BaseRpc.AuthorizingPrimaryAsync(web3 =>
-                {
-                    var btcEventHandler = web3.Eth.GetEvent<BTCExitBurnedEventDTO>(btcExitContract);
-                    return btcEventHandler.GetAllChangesAsync(btcEventHandler.CreateFilterInput(
+                    var vfxExitHandler = web3.Eth.GetEvent<VfxExitBurnedEventDTO>(v3Contract);
+                    vfx = await vfxExitHandler.GetAllChangesAsync(vfxExitHandler.CreateFilterInput(
                         new BlockParameter(new HexBigInteger(from)),
                         new BlockParameter(new HexBigInteger(to))));
-                });
+                }
+                var btcEventHandler = web3.Eth.GetEvent<BTCExitBurnedEventDTO>(btcExitContract);
+                var btc = await btcEventHandler.GetAllChangesAsync(btcEventHandler.CreateFilterInput(
+                    new BlockParameter(new HexBigInteger(from)),
+                    new BlockParameter(new HexBigInteger(to))));
                 // The contract writes its own chain's id into every burn: a log that names another chain is not Base's,
-                // and the range is read again like one that could not be read.
-                if (vfxExitLogs.Any(e => e.Event != null && !BaseRpc.IsExpectedChain(e.Event.ChainId))
-                    || btcLogs.Any(e => e.Event != null && !BaseRpc.IsExpectedChain(e.Event.ChainId)))
+                // and this provider has not read the range.
+                if (vfx.Any(e => e.Event != null && !BaseRpc.IsExpectedChain(e.Event.ChainId))
+                    || btc.Any(e => e.Event != null && !BaseRpc.IsExpectedChain(e.Event.ChainId)))
                     throw new BaseProviderException(BaseBridgeService.BurnOnAnotherChain);
+                return (Vfx: vfx, Btc: btc);
+            });
+
+            // What any provider serves is a burn to look into: one provider cannot hide a burn from the watch. It is not
+            // yet a burn: before anything is signed for it, the casters' check holds it to a final receipt that
+            // BaseRpc.RequiredAgreement providers give alike. A burn's id is taken from the logs of the provider that
+            // served it, so a log one provider adds to a transaction does not rename the burn the others serve.
+            var vfxExitLogs = new List<(Nethereum.Contracts.EventLog<VfxExitBurnedEventDTO> Event, string BurnId)>();
+            var btcLogs = new List<(Nethereum.Contracts.EventLog<BTCExitBurnedEventDTO> Event, string BurnId)>();
+            var taken = new HashSet<string>(StringComparer.Ordinal);
+            var readBy = 0;
+            var rangeFaults = 0;
+            foreach (var read in reads)
+            {
+                var spanState = SpanOf(read.Provider);
+                if (!read.Read)
+                {
+                    if (!read.ProviderAtFault)
+                    {
+                        rangeFaults++;
+                        spanState.Span = spanState.AfterFailure(span);
+                    }
+                    LogUtility.Log($"[BaseBridgeExit] Burn log query error ({BaseRpc.NameOf(read.Provider)}): {read.Reason}",
+                        "BaseBridgeExitWatchService.PollOnceInternal");
+                    continue;
+                }
+                readBy++;
+                spanState.Span = spanState.AfterSuccess(span);
+                var ids = BurnIdsOf(read.Value.Vfx.Select(e => e.Log).Concat(read.Value.Btc.Select(e => e.Log)));
+                foreach (var ev in read.Value.Vfx)
+                {
+                    if (ev.Log == null || string.IsNullOrEmpty(ev.Log.TransactionHash)) continue;
+                    var id = ids[BurnLogKey(ev.Log)];
+                    if (taken.Add($"V|{id}|{ev.Event?.Amount}|{ev.Event?.VfxDestinationAddress}|{ev.Event?.Burner?.ToLowerInvariant()}"))
+                        vfxExitLogs.Add((ev, id));
+                }
+                foreach (var ev in read.Value.Btc)
+                {
+                    if (ev.Log == null || string.IsNullOrEmpty(ev.Log.TransactionHash)) continue;
+                    var id = ids[BurnLogKey(ev.Log)];
+                    if (taken.Add($"B|{id}|{ev.Event?.Amount}|{ev.Event?.BtcDestination}|{ev.Event?.Burner?.ToLowerInvariant()}"))
+                        btcLogs.Add((ev, id));
+                }
             }
-            catch (Exception readEx)
+            // The range is passed only once BaseRpc.RequiredAgreement providers have read it: fewer, and a burn the
+            // others would have served could be left behind the cursor.
+            if (readBy < BaseRpc.RequiredAgreement)
             {
                 scanFailed = true;
-                providerAtFault = readEx is BaseProviderException;
-                vfxExitLogs.Clear();
-                btcLogs.Clear();
-                LogUtility.Log($"[BaseBridgeExit] Burn log query error: {readEx.Message}",
-                    "BaseBridgeExitWatchService.PollOnceInternal");
+                providerAtFault = readBy + rangeFaults < BaseRpc.RequiredAgreement;
             }
-            var burnIds = BurnIdsOf(vfxExitLogs.Select(e => e.Log).Concat(btcLogs.Select(e => e.Log)));
 
             // --- VfxExitBurned events (V3 burnForVfxExit → pool-based unlock) ---
             try
             {
                 if (!string.IsNullOrEmpty(v3Contract))
                 {
-                    foreach (var ev in vfxExitLogs)
+                    foreach (var (ev, burnId) in vfxExitLogs)
                     {
                         var log = ev.Log;
                         var burner = ev.Event?.Burner ?? "";
@@ -491,7 +555,7 @@ namespace VerifiedXCore.Bitcoin.Services
                         if (amount > long.MaxValue || amount <= 0) continue;
 
                         if (string.IsNullOrEmpty(log.TransactionHash)) continue;
-                        var txHash = burnIds[BurnLogKey(log)]; // the burn's id: its transaction's hash, with its position when that holds several
+                        var txHash = burnId; // the burn's id: its transaction's hash, with its position when that holds several
 
                         // Kept for a restart until the chain redeems it, also when this read repeats one whose state was not saved.
                         if (Globals.IsBlockCaster) NoteOpenBurn(state, txHash, (long)(log.BlockNumber?.Value ?? 0));
@@ -526,6 +590,7 @@ namespace VerifiedXCore.Bitcoin.Services
             catch (Exception v3Ex)
             {
                 scanFailed = true;
+                handlingFailed = true;
                 LogUtility.Log($"[BaseBridgeExit] VfxExitBurned scan error: {v3Ex.Message}",
                     "BaseBridgeExitWatchService.PollOnceInternal");
             }
@@ -533,7 +598,7 @@ namespace VerifiedXCore.Bitcoin.Services
             // --- BTCExitBurned events (burnForBTCExit → direct BTC withdrawal) ---
             try
             {
-                foreach (var ev in btcLogs)
+                foreach (var (ev, burnId) in btcLogs)
                 {
                     var log = ev.Log;
                     var burner = ev.Event?.Burner ?? "";
@@ -543,7 +608,7 @@ namespace VerifiedXCore.Bitcoin.Services
                     if (amount > long.MaxValue || amount <= 0) continue;
 
                     if (string.IsNullOrEmpty(log.TransactionHash)) continue;
-                    var txHash = burnIds[BurnLogKey(log)]; // the burn's id: its transaction's hash, with its position when that holds several
+                    var txHash = burnId; // the burn's id: its transaction's hash, with its position when that holds several
 
                     // Kept for a restart until the chain redeems it, also when this read repeats one whose state was not saved.
                     if (Globals.IsBlockCaster) NoteOpenBurn(state, txHash, (long)(log.BlockNumber?.Value ?? 0));
@@ -577,6 +642,7 @@ namespace VerifiedXCore.Bitcoin.Services
             catch (Exception btcEx)
             {
                 scanFailed = true;
+                handlingFailed = true;
                 LogUtility.Log($"[BaseBridgeExit] BTCExitBurned scan error: {btcEx.Message}",
                     "BaseBridgeExitWatchService.PollOnceInternal");
             }
@@ -586,32 +652,28 @@ namespace VerifiedXCore.Bitcoin.Services
             // skipped on the second read.
             if (scanFailed)
             {
-                if (_span > 1)
-                {
-                    _span = SpanAfterFailure(_span);
-                    return (processed, state.LastScannedBlock, $"Base log query failed; the range is read again next poll, {_span} block(s) at a time");
-                }
-                // A block is passed over for failures of its own (a block the provider cannot serve while it serves the
-                // next). A provider that is not on Base, or whose logs are not Base's, has not read the block at all:
-                // however often that repeats, the block waits, and is read once a provider that is right answers. Passed
-                // over, every burn in the block was lost with it, and setting the provider right did not bring them back.
+                if (handlingFailed)
+                    foreach (var provider in asked) SpanOf(provider).Span = SpanOf(provider).AfterFailure(span);
+                if (span > 1)
+                    return (processed, state.LastScannedBlock, $"Base log query failed; the range is read again next poll, {SpanFor(asked)} block(s) at a time");
+                // A block is passed over for failures of its own (a block the providers cannot serve while they serve the
+                // next). When too few providers were in a position to read it (not on Base, or their logs are not
+                // Base's), the block was not read at all: however often that repeats, the block waits, and is read once
+                // enough providers that are right answer. Passed over, every burn in the block was lost with it, and
+                // setting the providers right did not bring them back.
                 if (providerAtFault)
-                    return (processed, state.LastScannedBlock, "The Base provider's answer is not Base's; the block is read again, not passed over");
+                    return (processed, state.LastScannedBlock, "Too few Base providers gave an answer that is Base's; the block is read again, not passed over");
                 if (++_singleBlockFailures < SingleBlockFailuresBeforeSkip)
                     return (processed, state.LastScannedBlock, "Base log query failed for one block; read again next poll");
-                // Passed over only when the provider reads the next block: during an outage nothing is skipped, the
+                // Passed over only when the providers read the next block: during an outage nothing is skipped, the
                 // watcher waits (round 22).
-                if (!await CanReadLogs(contract, from + 1, latest))
+                if (!await CanReadLogs(providers.Where(p => p.Final.Number >= from + 1).Select(p => p.Provider).ToList(), contract, from + 1, latest))
                 {
                     _singleBlockFailures = SingleBlockFailuresBeforeSkip - 1;
-                    return (processed, state.LastScannedBlock, "Base log queries are failing; waiting for the provider");
+                    return (processed, state.LastScannedBlock, "Base log queries are failing; waiting for the providers");
                 }
-                ErrorLogUtility.LogError($"[BaseBridgeExit] Base block {from} could not be read {SingleBlockFailuresBeforeSkip} times; passed over. Rescan it (RescanExitBurns/{from}) once the provider answers.",
+                ErrorLogUtility.LogError($"[BaseBridgeExit] Base block {from} could not be read {SingleBlockFailuresBeforeSkip} times; passed over. Rescan it (RescanExitBurns/{from}) once the providers answer.",
                     "BaseBridgeExitWatchService.PollOnceInternal");
-            }
-            else
-            {
-                _span = SpanAfterSuccess(_span);
             }
             _singleBlockFailures = 0;
 

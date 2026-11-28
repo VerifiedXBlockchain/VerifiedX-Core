@@ -15,6 +15,27 @@ using Newtonsoft.Json.Linq;
 
 namespace VerifiedXCore.Tests
 {
+    /// <summary>What several providers that serve the same chain are told together.</summary>
+    public static class FakeBaseRpcs
+    {
+        /// <summary>Adds a burn to what each of them serves.</summary>
+        public static void AddBurn(this IEnumerable<FakeBaseRpc> providers, string txHash, string contract, bool vfxExit, long amountSats, string destination, long? chainId = null, long blockNumber = 900)
+        {
+            foreach (var p in providers) p.AddBurn(txHash, contract, vfxExit, amountSats, destination, chainId, blockNumber);
+        }
+
+        /// <summary>Sets their newest block, and their finalized block (null: the newest).</summary>
+        public static void At(this IEnumerable<FakeBaseRpc> providers, long head, long? finalized = null)
+        {
+            foreach (var p in providers) { p.Head = head; p.Finalized = finalized; }
+        }
+
+        public static void Finalize(this IEnumerable<FakeBaseRpc> providers, long? finalized)
+        {
+            foreach (var p in providers) p.Finalized = finalized;
+        }
+    }
+
     /// <summary>
     /// A Base provider on loopback for tests: a JSON-RPC endpoint the node's own client talks to, so a test reads Base
     /// the way the node does. It answers eth_chainId with <see cref="ChainId"/>, eth_blockNumber with <see cref="Head"/>,
@@ -56,6 +77,9 @@ namespace VerifiedXCore.Tests
 
         /// <summary>The hash this provider's chain holds at <paramref name="number"/>.</summary>
         public string HashAt(long number) => BlockHashes.TryGetValue(number, out var hash) ? hash : BlockHash("block" + number);
+
+        /// <summary>The widest range of blocks eth_getLogs answers; a wider one is refused. Null: any.</summary>
+        public int? LogRangeCap { get; set; }
 
         /// <summary>When true every request fails, as from a provider that is down.</summary>
         public bool Down { get; set; }
@@ -170,6 +194,7 @@ namespace VerifiedXCore.Tests
                     var filter = (JObject)args[0]!;
                     var from = Convert.ToInt64(filter["fromBlock"]!.ToString(), 16);
                     var to = Convert.ToInt64(filter["toBlock"]!.ToString(), 16);
+                    if (LogRangeCap is { } cap && to - from + 1 > cap) return Error(id, -32614, $"eth_getLogs is limited to a {cap} range");
                     long seen;
                     while (to > (seen = Interlocked.Read(ref _highestLogBlockAsked)) && Interlocked.CompareExchange(ref _highestLogBlockAsked, to, seen) != seen) { }
                     var addresses = filter["address"] is JArray many ? many.Select(a => a.ToString()).ToList()

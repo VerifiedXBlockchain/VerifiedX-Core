@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Numerics;
 using Nethereum.ABI;
 using Nethereum.Util;
@@ -82,6 +83,14 @@ namespace VerifiedXCore.Tests
             var p = new FakeBaseRpc { ChainId = chainId };
             _providers.Add(p);
             return p;
+        }
+
+        /// <summary><paramref name="count"/> providers that serve the same chain, configured as the node's.</summary>
+        protected FakeBaseRpc[] Providers(int count)
+        {
+            var all = Enumerable.Range(0, count).Select(_ => Provider()).ToArray();
+            Configure(all);
+            return all;
         }
 
         /// <summary>The node's providers, in the order it asks them.</summary>
