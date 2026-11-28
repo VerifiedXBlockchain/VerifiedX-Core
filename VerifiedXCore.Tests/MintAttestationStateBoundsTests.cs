@@ -39,5 +39,21 @@ namespace VerifiedXCore.Tests
             BaseBridgeAttestationService.PruneAttestationStates(now);
             Assert.Equal(BaseBridgeAttestationService.MaxAttestationStates, BaseBridgeAttestationService.AttestationStatesHeld);
         }
+
+        [Fact]
+        public void ALongBacklogCollectedInOneRound_NeverHoldsMoreThanTheLimit()
+        {
+            // As the collector holds each lock's state while it works through more pending locks than the limit.
+            var now = TimeUtil.GetTime();
+            AttestationStates.Clear();
+            for (var i = 0; i < BaseBridgeAttestationService.MaxAttestationStates + 300; i++)
+            {
+                BaseBridgeAttestationService.Keep(new MintAttestationState { LockId = $"backlog-{i}", CreatedAt = now + i });
+                Assert.True(BaseBridgeAttestationService.AttestationStatesHeld <= BaseBridgeAttestationService.MaxAttestationStates);
+            }
+            // The newest are the ones kept.
+            Assert.NotNull(BaseBridgeAttestationService.GetAttestationState($"backlog-{BaseBridgeAttestationService.MaxAttestationStates + 299}"));
+            Assert.Null(BaseBridgeAttestationService.GetAttestationState("backlog-0"));
+        }
     }
 }

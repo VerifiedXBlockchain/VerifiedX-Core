@@ -245,6 +245,13 @@ namespace VerifiedXCore.Bitcoin.Services
             return dropped;
         }
 
+        /// <summary>Holds a lock's collected state, and keeps to the limit as it is added: a long backlog collected in one round does not pass it.</summary>
+        internal static void Keep(MintAttestationState state)
+        {
+            Pending[state.LockId] = state;
+            if (Pending.Count > MaxAttestationStates) PruneAttestationStates(TimeUtil.GetTime());
+        }
+
         /// <summary>Tests only: how many locks' collected state is held.</summary>
         internal static int AttestationStatesHeld => Pending.Count;
 
@@ -285,7 +292,7 @@ namespace VerifiedXCore.Bitcoin.Services
                 CreatedAt = TimeUtil.GetTime(),
                 Status = "Pending"
             };
-            Pending[record.LockId] = state;
+            Keep(state);
 
             record.MintNonce = nonce;
             record.RequiredSignatures = requiredSignatures;
@@ -334,7 +341,7 @@ namespace VerifiedXCore.Bitcoin.Services
                 BridgeLockRecord.Save(record);
             }
 
-            Pending[record.LockId] = state;
+            Keep(state);
         }
 
         /// <summary>Background: casters collect attestations for V2 locks that just confirmed on VFX.</summary>
