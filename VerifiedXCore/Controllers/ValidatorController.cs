@@ -1518,6 +1518,10 @@ namespace VerifiedXCore.Controllers
                 TipHash = lastBlock?.Hash ?? "",
                 IsChainSynced = Globals.IsChainSynced,
                 IsValidator = !string.IsNullOrEmpty(Globals.ValidatorAddress),
+                // Whether this node would sign a Base mint for a lock right now (BaseBridgeAttestationService.NotReadyToAttest:
+                // at the network's height with a recent tip, not stalled, not on another chain than its peers). A node about
+                // to make a bridge lock asks this of the contract's signers; only the signer knows how old its own tip is.
+                ReadyToAttest = Bitcoin.Services.BaseBridgeAttestationService.NotReadyToAttest() == null,
                 IsBlockCaster = Globals.IsBlockCaster,
                 // SEAT-HEAL: casting right now (resumed, record current). Peers time a member's absence by this.
                 Casting = CasterSeatService.CastingNow,
